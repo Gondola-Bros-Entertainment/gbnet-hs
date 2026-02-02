@@ -136,9 +136,7 @@ class BitDeserialize a where
 -- The instance declarations here are minimal because the buffer
 -- primitives already have the right signatures.
 instance BitSerialize Bool where
-  bitSerialize val = writeBit val
-    -- ^ Point-free style: @bitSerialize val@ returns a function
-    -- @BitBuffer -> BitBuffer@, which is exactly what 'writeBit val' is.
+  bitSerialize = writeBit
 
 instance BitDeserialize Bool where
   bitDeserialize = readBit

@@ -38,6 +38,10 @@ jobs:
         run: cabal build --ghc-options="-Wall -Werror"
 
       - name: Lint (HLint)
-        run: |
-          cabal install hlint
-          hlint src/ test/
+        uses: haskell-actions/hlint-setup@v2
+
+      - name: Run HLint
+        uses: haskell-actions/hlint-run@v2
+        with:
+          path: '["src/", "test/"]'
+          fail-on: warning
