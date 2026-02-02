@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6.7'
+          cabal-version: '3.14'
+
+      - name: Cache cabal store
+        uses: actions/cache@v4
+        with:
+          path: ~/.cabal/store
+          key: ${{ runner.os }}-cabal-${{ hashFiles('gb-net-hs.cabal') }}
+          restore-keys: ${{ runner.os }}-cabal-
+
+      - name: Build dependencies
+        run: cabal build --only-dependencies
+
+      - name: Build
+        run: cabal build
+
+      - name: Test
+        run: cabal test
+
+      - name: Check warnings
+        run: cabal build --ghc-options="-Werror"
