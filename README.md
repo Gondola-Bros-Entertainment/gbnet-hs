@@ -1,11 +1,11 @@
 <div align="center">
-<h1>GB-Net-HS</h1>
+<h1>gbnet-hs</h1>
 <p><strong>Game Networking for Haskell</strong></p>
 <p>Bitpacked serialization. Reliable UDP transport. Haskell port of <a href="https://github.com/Gondola-Bros-Entertainment/gb-net">GB-Net</a>.</p>
 <p><a href="#quick-start">Quick Start</a> · <a href="#serialization">Serialization</a> · <a href="#architecture">Architecture</a></p>
 <p>
 
-[![CI](https://github.com/Gondola-Bros-Entertainment/gb-net-hs/actions/workflows/ci.yml/badge.svg)](https://github.com/Gondola-Bros-Entertainment/gb-net-hs/actions/workflows/ci.yml)
+[![CI](https://github.com/Gondola-Bros-Entertainment/gbnet-hs/actions/workflows/ci.yml/badge.svg)](https://github.com/Gondola-Bros-Entertainment/gbnet-hs/actions/workflows/ci.yml)
 ![Haskell](https://img.shields.io/badge/haskell-GHC%209.6-purple)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -28,7 +28,7 @@ Add to your `.cabal` file:
 
 ```cabal
 build-depends:
-    gb-net-hs
+    gbnet-hs
 ```
 
 ### Writing & Reading Bits
@@ -95,7 +95,7 @@ case runBitReader reader buf of
 ## Architecture
 
 ```
-gb-net-hs/
+gbnet-hs/
 ├── src/
 │   └── GBNet/
 │       └── Serialize/
@@ -107,7 +107,7 @@ gb-net-hs/
 ├── .github/
 │   └── workflows/
 │       └── ci.yml             # GitHub Actions CI
-└── gb-net-hs.cabal            # Package manifest
+└── gbnet-hs.cabal            # Package manifest
 ```
 
 ---

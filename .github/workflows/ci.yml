@@ -22,7 +22,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cabal/store
-          key: ${{ runner.os }}-cabal-${{ hashFiles('gb-net-hs.cabal') }}
+          key: ${{ runner.os }}-cabal-${{ hashFiles('gbnet-hs.cabal') }}
           restore-keys: ${{ runner.os }}-cabal-
 
       - name: Build dependencies

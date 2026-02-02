@@ -1,5 +1,5 @@
 cabal-version:      3.0
-name:               gb-net-hs
+name:               gbnet-hs
 version:            0.1.0.0
 synopsis:           Game networking library with bitpacked serialization
 description:
@@ -29,13 +29,13 @@ library
   default-language:  Haskell2010
   ghc-options:       -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns
 
-test-suite gb-net-test
+test-suite gbnet-test
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   test
   build-depends:
       base
-    , gb-net-hs
+    , gbnet-hs
     , bytestring
   default-language: Haskell2010
   ghc-options:      -Wall
