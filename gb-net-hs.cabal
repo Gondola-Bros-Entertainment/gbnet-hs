@@ -1,0 +1,59 @@
+cabal-version:      3.0
+name:               gb-net-hs
+version:            0.1.0.0
+synopsis:           Game networking library with bitpacked serialization
+description:
+  Haskell port of GB-Net — a transport-level game networking library
+  providing reliable UDP with bitpacked serialization.
+  Reference implementation: https://github.com/Gondola-Bros-Entertainment/gb-net
+
+license:            MIT
+license-file:       LICENSE
+author:             Devon Tomlin
+maintainer:         devon@novavero.ai
+category:           Network, Game
+build-type:         Simple
+
+-- This is a Cabal file. It's like Cargo.toml for Haskell.
+-- It declares your package metadata, dependencies, and build targets.
+-- Cabal resolves deps from Hackage (like crates.io for Haskell).
+
+library
+  -- 'exposed-modules' = your public API (like `pub mod` in Rust's lib.rs)
+  exposed-modules:
+    GBNet.Serialize.BitBuffer
+    GBNet.Serialize.Class
+    GBNet.Serialize.Reader
+
+  -- 'other-modules' = private internal modules (like `pub(crate)` in Rust)
+  other-modules:
+
+  -- 'build-depends' = your [dependencies] section
+  -- 'base' is Haskell's stdlib (like std in Rust)
+  -- 'bytestring' is the go-to for raw byte manipulation (like &[u8] / Vec<u8>)
+  -- 'vector' gives you mutable arrays (like Vec<T> but more controlled)
+  build-depends:
+      base        >= 4.16 && < 5
+    , bytestring  >= 0.11
+    , vector      >= 0.13
+
+  -- Where to find source files
+  hs-source-dirs:   src
+
+  -- Language standard. Haskell2010 is the stable base.
+  -- GHC extensions (like Rust's #![feature(...)]) are opt-in per file.
+  default-language:  Haskell2010
+
+  -- Compiler warnings. Like `clippy::all` — catch common mistakes.
+  ghc-options:       -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns
+
+test-suite gb-net-test
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  hs-source-dirs:   test
+  build-depends:
+      base
+    , gb-net-hs
+    , bytestring
+  default-language: Haskell2010
+  ghc-options:      -Wall
