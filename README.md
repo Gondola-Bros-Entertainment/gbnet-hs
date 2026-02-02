@@ -152,5 +152,5 @@ Contributions welcome. Run `cabal test && cabal build --ghc-options="-Werror"` b
 ---
 
 <p align="center">
-  <sub>MIT License · Built by <a href="https://github.com/aoinoikaz">GondolaBros</a></sub>
+  <sub>MIT License · Built by <a href="https://github.com/aoinoikaz">Gondola Bros Entertainment</a></sub>
 </p>
