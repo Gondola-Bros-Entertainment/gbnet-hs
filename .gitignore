@@ -5,3 +5,7 @@ dist-newstyle/
 *.dyn_o
 .ghc.environment.*
 cabal.project.local
+.DS_Store
+*.swp
+*.swo
+*~
