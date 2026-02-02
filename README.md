@@ -77,9 +77,47 @@ case runBitReader reader buf of
   Right (result, buf') -> use result
 ```
 
+### Template Haskell Derive
+
+```haskell
+{-# LANGUAGE TemplateHaskell #-}
+import GBNet.Serialize.TH
+
+data PlayerState = PlayerState
+  { health :: Word8
+  , x      :: Word16
+  , y      :: Word16
+  } deriving (Eq, Show)
+
+deriveNetworkSerialize ''PlayerState
+
+data GameEvent
+  = PlayerJoin Word8
+  | PlayerLeave Word8
+  | ChatMessage Word8 Word16
+  deriving (Eq, Show)
+
+deriveNetworkSerialize ''GameEvent
+```
+
+### Measurement & Debug
+
+```haskell
+import GBNet.Serialize.BitBuffer
+
+-- Measure serialized size without keeping the buffer
+serializedSizeBits (bitSerialize myPacket)   -- e.g. 68
+serializedSizeBytes (bitSerialize myPacket)  -- e.g. 9
+
+-- Visualize buffer contents as a bit string
+toBitString buf  -- "10101011 00110011 101"
+```
+
 ---
 
 ## Serialization
+
+### Primitives
 
 | Type | Bits | Haskell | Rust Equivalent |
 |------|------|---------|-----------------|
@@ -96,6 +134,16 @@ case runBitReader reader buf of
 | `Double` | 64 | `bitSerialize (n :: Double)` | `bit_serialize(&n)` |
 | Custom N | N | `writeBits value n` | `write_bits(value, n)` |
 
+### Collections & Composites
+
+| Type | Wire Format | Notes |
+|------|-------------|-------|
+| `Maybe a` | 1-bit flag + payload | `Nothing` = 0, `Just x` = 1 + serialize(x) |
+| `[a]` | 16-bit length + elements | Max 65535 elements |
+| `String` | 16-bit length + bytes | Via `[Char]`, 1 byte per char |
+| `Text` | 16-bit byte-length + UTF-8 | Wire-compatible with Rust `String` |
+| `(a, b)` | serialize a, then b | Also 3-tuples and 4-tuples |
+
 ---
 
 ## Architecture
@@ -108,7 +156,8 @@ gbnet-hs/
 │       └── Serialize/
 │           ├── BitBuffer.hs       # Bit-level read/write buffer
 │           ├── Class.hs           # BitSerialize / BitDeserialize typeclasses
-│           └── Reader.hs          # BitReader monad for clean deserialization
+│           ├── Reader.hs          # BitReader monad for clean deserialization
+│           └── TH.hs             # Template Haskell derive for custom types
 ├── test/
 │   └── Main.hs                   # Serialization round-trip tests
 ├── .github/
@@ -136,8 +185,13 @@ cabal haddock            # Generate docs
 
 - [x] Bitpacked serialization (BitBuffer)
 - [x] Typeclass-based serialize/deserialize
+- [x] Collections (Maybe, List, String, Text, tuples)
 - [x] Monadic reader (BitReader)
 - [x] Packet header / wire format
+- [x] Template Haskell derive (records, enums, enums with payloads)
+- [x] Measurement utilities (serializedSizeBits/Bytes)
+- [x] Debug visualization (toBitString)
+- [x] Byte-aligned fast paths (writeBits/readBits)
 - [ ] Reliability layer (RTT, ACK, retransmit)
 - [ ] Channel system (delivery modes)
 - [ ] Connection state machine

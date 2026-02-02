@@ -60,6 +60,7 @@ module GBNet.Packet
 import Data.Word (Word16, Word32)
 import GBNet.Serialize.BitBuffer
 import GBNet.Serialize.Class
+import GBNet.Serialize.Reader
 
 -- | Number of bits in a serialized 'PacketHeader'.
 --
@@ -169,31 +170,23 @@ instance BitSerialize PacketHeader where
 
 -- | Deserialize a 'PacketHeader' by reading fields in wire order.
 --
--- Each @case@ reads one field and threads the updated buffer to the
--- next read. This is the "nested case" pattern that the 'BitReader'
--- monad (from "GBNet.Serialize.Reader") was designed to eliminate.
--- We use the explicit style here for clarity and to avoid a circular
--- dependency (Packet doesn't import Reader).
+-- Uses the 'BitReader' monad to thread buffer state and propagate
+-- errors automatically. Each @deserializeM@ reads the next field
+-- and advances the cursor — no manual buffer threading needed.
 instance BitDeserialize PacketHeader where
   bitDeserialize buf =
-    case bitDeserialize buf of
-      Left err -> Left err
-      Right (ReadResult pt buf1) ->
-        case bitDeserialize buf1 of
-          Left err -> Left err
-          Right (ReadResult sn buf2) ->
-            case bitDeserialize buf2 of
-              Left err -> Left err
-              Right (ReadResult ak buf3) ->
-                case bitDeserialize buf3 of
-                  Left err -> Left err
-                  Right (ReadResult abf buf4) ->
-                    Right $ ReadResult
-                      { readValue = PacketHeader
-                          { packetType  = pt
-                          , sequenceNum = sn
-                          , ack         = ak
-                          , ackBitfield = abf
-                          }
-                      , readBuffer = buf4
-                      }
+    case runBitReader reader buf of
+      Left err         -> Left err
+      Right (hdr, buf') -> Right $ ReadResult { readValue = hdr, readBuffer = buf' }
+    where
+      reader = do
+        pt  <- deserializeM
+        sn  <- deserializeM
+        ak  <- deserializeM
+        abf <- deserializeM
+        pure PacketHeader
+          { packetType  = pt
+          , sequenceNum = sn
+          , ack         = ak
+          , ackBitfield = abf
+          }
