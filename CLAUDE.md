@@ -11,7 +11,7 @@
 
 ## Project Overview
 
-gbnet-hs is the Haskell port of [GB-Net](https://github.com/Gondola-Bros-Entertainment/gb-net) — a transport-level game networking library providing reliable UDP with bitpacked serialization. The Rust version is the golden copy.
+gbnet-hs is the Haskell port of [GB-Net](https://github.com/Gondola-Bros-Entertainment/gbnet) — a transport-level game networking library providing reliable UDP with bitpacked serialization. The Rust version is the golden copy.
 
 ## Structure
 

@@ -1,7 +1,7 @@
 <div align="center">
 <h1>gbnet-hs</h1>
 <p><strong>Game Networking for Haskell</strong></p>
-<p>Bitpacked serialization. Reliable UDP transport. Haskell port of <a href="https://github.com/Gondola-Bros-Entertainment/gb-net">GB-Net</a>.</p>
+<p>Bitpacked serialization. Reliable UDP transport. Haskell port of <a href="https://github.com/Gondola-Bros-Entertainment/gbnet">GB-Net</a>.</p>
 <p><a href="#quick-start">Quick Start</a> · <a href="#serialization">Serialization</a> · <a href="#architecture">Architecture</a></p>
 <p>
 
@@ -16,7 +16,7 @@
 
 ## What is GB-Net-HS?
 
-Haskell port of [GB-Net](https://github.com/Gondola-Bros-Entertainment/gb-net), a transport-level game networking library. Currently implements the bitpacked serialization layer with a pure functional API.
+Haskell port of [GB-Net](https://github.com/Gondola-Bros-Entertainment/gbnet), a transport-level game networking library. Currently implements the bitpacked serialization layer with a pure functional API.
 
 **Status:** Serialization complete. Transport layer in progress.
 

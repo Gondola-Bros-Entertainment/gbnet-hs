@@ -5,7 +5,7 @@ synopsis:           Game networking library with bitpacked serialization
 description:
   Haskell port of GB-Net — a transport-level game networking library
   providing reliable UDP with bitpacked serialization.
-  Reference implementation: https://github.com/Gondola-Bros-Entertainment/gb-net
+  Reference implementation: https://github.com/Gondola-Bros-Entertainment/gbnet
 
 license:            MIT
 license-file:       LICENSE
