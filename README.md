@@ -1,11 +1,11 @@
 <div align="center">
 <h1>gbnet-hs</h1>
 <p><strong>Game Networking for Haskell</strong></p>
-<p>Bitpacked serialization. Reliable UDP transport. Haskell port of <a href="https://github.com/Gondola-Bros-Entertainment/gbnet">GB-Net</a>.</p>
+<p>Bitpacked serialization. Reliable UDP transport. Haskell port of <a href="https://github.com/aoinoikaz/gbnet">GB-Net</a>.</p>
 <p><a href="#quick-start">Quick Start</a> · <a href="#serialization">Serialization</a> · <a href="#architecture">Architecture</a></p>
 <p>
 
-[![CI](https://github.com/Gondola-Bros-Entertainment/gbnet-hs/actions/workflows/ci.yml/badge.svg)](https://github.com/Gondola-Bros-Entertainment/gbnet-hs/actions/workflows/ci.yml)
+[![CI](https://github.com/aoinoikaz/gbnet-hs/actions/workflows/ci.yml/badge.svg)](https://github.com/aoinoikaz/gbnet-hs/actions/workflows/ci.yml)
 ![Haskell](https://img.shields.io/badge/haskell-GHC%209.6-purple)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -16,7 +16,7 @@
 
 ## What is GB-Net-HS?
 
-Haskell port of [GB-Net](https://github.com/Gondola-Bros-Entertainment/gbnet), a transport-level game networking library. Currently implements the bitpacked serialization layer with a pure functional API.
+Haskell port of [GB-Net](https://github.com/aoinoikaz/gbnet), a transport-level game networking library. Currently implements the bitpacked serialization layer with a pure functional API.
 
 **Status:** Serialization complete. Transport layer in progress.
 
@@ -152,5 +152,5 @@ Contributions welcome. Run `cabal test && cabal build --ghc-options="-Werror"` b
 ---
 
 <p align="center">
-  <sub>MIT License · Built by <a href="https://github.com/gondola-bros-entertainment">GondolaBros</a> · A <a href="https://novavero.ai">Novavero AI</a> project</sub>
+  <sub>MIT License · Built by <a href="https://github.com/aoinoikaz">GondolaBros</a></sub>
 </p>
