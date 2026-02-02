@@ -79,17 +79,24 @@ module GBNet.Serialize.BitBuffer
   , toBytes
   , bitPosition
   , readPosition
+
+    -- * Measurement
+  , serializedSizeBits
+  , serializedSizeBytes
+
+    -- * Debug
+  , toBitString
   ) where
 
 -- 'Word64' is an unsigned 64-bit integer (like Rust's u64).
 -- We use it as the intermediate type for all bit read/write operations
 -- because it can hold any value up to 64 bits wide.
-import Data.Word (Word64)
+import Data.Word (Word8, Word64)
 
 -- Bitwise operations: '.|.' is bitwise OR, 'shiftL' shifts left,
 -- 'testBit' checks if a specific bit is set, 'setBit'/'clearBit'
 -- turn individual bits on or off.
-import Data.Bits ((.|.), shiftL, testBit, setBit, clearBit)
+import Data.Bits ((.|.), (.&.), shiftL, shiftR, testBit, setBit, clearBit)
 
 -- ByteString is a packed, immutable array of bytes — the standard Haskell
 -- type for binary data. Unlike '[Word8]' (a linked list where each byte
@@ -285,6 +292,24 @@ writeBits _value 0 buf = buf
 writeBits value numBits buf
   | numBits < 0  = error "writeBits: negative bit count"
   | numBits > maxBitsPerOp = error "writeBits: exceeds 64 bits"
+  | bitPos buf `mod` bitsPerByte == 0 && numBits `mod` bitsPerByte == 0 =
+      -- Fast path: both cursor and width are byte-aligned, so we can
+      -- append whole bytes directly instead of going bit-by-bit.
+      let numBytes  = numBits `div` bitsPerByte
+          -- Extract bytes from the Word64 in big-endian (MSB-first) order.
+          extractBytes 0 _ = []
+          extractBytes n v =
+            let shift = (n - 1) * bitsPerByte
+            in fromIntegral ((v `shiftR` shift) .&. 0xFF) : extractBytes (n - 1) v
+          newBytes  = BS.pack (extractBytes numBytes value)
+          -- Pad buffer to the current byte boundary if needed.
+          byteIndex = bitPos buf `div` bitsPerByte
+          padded    = if byteIndex > BS.length (bufferBytes buf)
+                      then bufferBytes buf `BS.append` BS.replicate (byteIndex - BS.length (bufferBytes buf)) 0
+                      else BS.take byteIndex (bufferBytes buf)
+      in buf { bufferBytes = padded `BS.append` newBytes
+             , bitPos      = bitPos buf + numBits
+             }
   | otherwise     = foldl writeSingleBit buf [numBits - 1, numBits - 2 .. 0]
     -- ^ 'foldl' is Haskell's left fold — like Rust's @.fold()@ on an
     -- iterator. Starting with @buf@ as the accumulator, it applies
@@ -353,6 +378,21 @@ readBits 0 buf = Right $ ReadResult { readValue = 0, readBuffer = buf }
 readBits numBits buf
   | numBits < 0  = Left "readBits: negative bit count"
   | numBits > maxBitsPerOp = Left "readBits: exceeds 64 bits"
+  | readPos buf `mod` bitsPerByte == 0 && numBits `mod` bitsPerByte == 0 =
+      -- Fast path: both cursor and width are byte-aligned. Slice bytes
+      -- directly and reconstruct the Word64 with shifts.
+      let startByte = readPos buf `div` bitsPerByte
+          numBytes  = numBits `div` bitsPerByte
+          endByte   = startByte + numBytes
+          bytes     = bufferBytes buf
+      in if endByte > BS.length bytes
+         then Left "readBits: buffer underflow"
+         else let slice = BS.take numBytes (BS.drop startByte bytes)
+                  val   = BS.foldl' (\acc w -> (acc `shiftL` bitsPerByte) .|. fromIntegral w) 0 slice
+              in Right $ ReadResult
+                   { readValue  = val
+                   , readBuffer = buf { readPos = readPos buf + numBits }
+                   }
   | otherwise     = readBitsLoop numBits 0 buf
   where
     readBitsLoop :: Int -> Word64 -> BitBuffer -> Either String (ReadResult Word64)
@@ -405,3 +445,58 @@ bitPosition = bitPos
 -- | Current read position in bits.
 readPosition :: BitBuffer -> Int
 readPosition = readPos
+
+-- --------------------------------------------------------------------
+-- Measurement
+-- --------------------------------------------------------------------
+
+-- | Measure the serialized size of a write operation in bits.
+--
+-- Runs the provided serialization function on an empty buffer and
+-- returns the resulting write cursor position. Since Haskell allocates
+-- on every write anyway, there is no benefit to a separate "measure
+-- only" mode — we simply serialize and check the position.
+serializedSizeBits :: (BitBuffer -> BitBuffer) -> Int
+serializedSizeBits serialize = bitPos (serialize empty)
+
+-- | Measure the serialized size of a write operation in bytes
+-- (rounded up to the next byte boundary).
+serializedSizeBytes :: (BitBuffer -> BitBuffer) -> Int
+serializedSizeBytes serialize =
+  let bits = serializedSizeBits serialize
+  in (bits + msbIndex) `div` bitsPerByte
+
+-- --------------------------------------------------------------------
+-- Debug
+-- --------------------------------------------------------------------
+
+-- | Convert buffer contents to a human-readable bit string.
+--
+-- Each byte is shown as 8 bits (MSB-first), separated by spaces.
+-- The final byte is truncated to only show the bits that were
+-- actually written.
+--
+-- Example: @"11010101 10110011 1"@ for 17 bits of data.
+toBitString :: BitBuffer -> String
+toBitString buf
+  | bitPos buf == 0 = ""
+  | otherwise =
+      let totalBits  = bitPos buf
+          totalBytes = (totalBits + msbIndex) `div` bitsPerByte
+          bytes      = bufferBytes buf
+          showByte :: Int -> Word8 -> Int -> String
+          showByte byteIdx w bitsToShow =
+            [ if testBit w (msbIndex - i) then '1' else '0'
+            | i <- [0 .. bitsToShow - 1]
+            ]
+            ++ if byteIdx < totalBytes - 1 then " " else ""
+          lastByteBits = case totalBits `mod` bitsPerByte of
+                           0 -> bitsPerByte
+                           r -> r
+      in concatMap (\i ->
+            let w = BS.index bytes i
+                bitsInThisByte = if i == totalBytes - 1
+                                 then lastByteBits
+                                 else bitsPerByte
+            in showByte i w bitsInThisByte
+         ) [0 .. totalBytes - 1]

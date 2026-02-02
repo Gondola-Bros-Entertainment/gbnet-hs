@@ -1,60 +1,85 @@
 {-# LANGUAGE ScopedTypeVariables #-}
--- ^ 'ScopedTypeVariables' is a GHC language extension that lets type
--- annotations inside patterns refer to type variables from the outer
--- signature. Without it, writing @(v1 :: Bool)@ in a pattern would
--- not work — Haskell2010 only allows type annotations on top-level
--- bindings.
---
--- We need this because 'bitDeserialize' is polymorphic — it can return
--- any type with a 'BitDeserialize' instance. The pattern annotation
--- @(v1 :: Bool)@ tells GHC which instance to use. Without it, GHC
--- would report an "ambiguous type variable" error.
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Main where
 
--- Import the buffer operations directly (writeBit, readBit, etc.)
 import GBNet.Serialize.BitBuffer
--- Import the typeclass methods (bitSerialize, bitDeserialize)
 import GBNet.Serialize.Class
--- Import the monadic reader for cleaner deserialization
 import GBNet.Serialize.Reader
--- Import the packet types and header
+import GBNet.Serialize.TH
 import GBNet.Packet
 
--- Unsigned integer types
-import Data.Word (Word8, Word16, Word32)
--- Signed integer types for testing two's complement serialization
+import Data.Word (Word8, Word16, Word32, Word64)
 import Data.Int (Int8, Int16, Int32, Int64)
+import qualified Data.Text as T
 
--- | Entry point. Runs all test groups sequentially and prints results.
---
--- This is a simple test harness — each test function prints PASS/FAIL
--- for its assertions. If any assertion fails, 'error' is called, which
--- terminates the program with a non-zero exit code. The cabal test
--- runner detects this via @exitcode-stdio-1.0@ and reports failure.
---
--- A production test suite would use a framework like HUnit or Hspec,
--- but this direct approach has zero dependencies and makes the test
--- logic completely transparent.
+-- TH-derived test types (must be before main due to TH staging restriction)
+data Vec3 = Vec3
+  { vecX :: Float
+  , vecY :: Float
+  , vecZ :: Float
+  } deriving (Eq, Show)
+
+deriveNetworkSerialize ''Vec3
+
+data Color = Red | Green | Blue | Yellow deriving (Eq, Show)
+
+deriveNetworkSerialize ''Color
+
+data GameEvent
+  = PlayerJoin Word8
+  | PlayerLeave Word8
+  | ChatMessage Word8 Word16
+  deriving (Eq, Show)
+
+deriveNetworkSerialize ''GameEvent
+
+data SimpleRecord = SimpleRecord
+  { srFlag  :: Bool
+  , srValue :: Word16
+  } deriving (Eq, Show)
+
+deriveNetworkSerialize ''SimpleRecord
+
 main :: IO ()
 main = do
   putStrLn "=== GB-Net Haskell Serialization Tests ==="
   putStrLn ""
 
-  -- Original tests (Phase 1 — must still pass after ByteString refactor)
+  -- Primitive types
   testBoolRoundTrip
   testWord8RoundTrip
   testWord16RoundTrip
   testMultiField
   testBitPacking
   testMonadicReader
-
-  -- New tests (Phase 3 — signed integers, floats, packet header)
   testSignedIntegers
   testFloatingPoint
+
+  -- Packet types
   testPacketType
   testPacketHeaderRoundTrip
   testPacketHeaderMonadic
+
+  -- Collection types
+  testMaybeRoundTrip
+  testListRoundTrip
+  testStringRoundTrip
+  testTextRoundTrip
+  testTupleRoundTrip
+
+  -- Phase 1: Measure mode + debug
+  testSerializedSize
+  testToBitString
+
+  -- Phase 2: Fast paths (verified via existing tests passing)
+  testFastPathAligned
+
+  -- Phase 3: TH derive
+  testTHRecord
+  testTHEnum
+  testTHEnumWithPayloads
 
   putStrLn ""
   putStrLn "All tests passed!"
@@ -63,12 +88,6 @@ main = do
 -- Helpers
 -- --------------------------------------------------------------------
 
--- | Assert that two values are equal. Prints PASS on success, calls
--- 'error' on failure (which terminates the program).
---
--- The @(Eq a, Show a)@ constraint requires that the type supports
--- both equality testing and string conversion. This is Haskell's
--- equivalent of Rust's @where T: PartialEq + Debug@ bound.
 assertEqual :: (Eq a, Show a) => String -> a -> a -> IO ()
 assertEqual name expected actual =
   if expected == actual
@@ -77,63 +96,39 @@ assertEqual name expected actual =
               ++ " expected " ++ show expected
               ++ " got " ++ show actual
 
+-- | Helper to run a BitReader and assert the result.
+assertDeserialize :: (Eq a, Show a) => String -> a -> BitReader a -> BitBuffer -> IO ()
+assertDeserialize name expected reader buf =
+  case runBitReader reader buf of
+    Left err -> error $ "  FAIL: " ++ name ++ " deserialization error: " ++ err
+    Right (val, _) -> assertEqual name expected val
 
 -- --------------------------------------------------------------------
--- Original tests
+-- Primitive tests
 -- --------------------------------------------------------------------
 
--- | Test that Bool values (single bits) round-trip correctly.
---
--- Writes True then False into an empty buffer, reads them back.
--- Note that writes compose right-to-left via @$@, so True is written
--- first (into the empty buffer), then False is written second.
--- Reading happens left-to-right (from bit 0), so we read True first.
 testBoolRoundTrip :: IO ()
 testBoolRoundTrip = do
   putStrLn "Bool round-trip:"
   let buf = writeBit False $ writeBit True empty
-  -- ^ Buffer now contains: bit0=True, bit1=False
-  -- The nested case pattern: each read returns Either, so we must
-  -- pattern-match on Left/Right, then extract the ReadResult to get
-  -- both the value and the updated buffer for the next read.
-  case readBit buf of
-    Left err -> error err
-    Right (ReadResult val1 buf') ->
-      case readBit buf' of
-        Left err -> error err
-        Right (ReadResult val2 _buf'') -> do
-          assertEqual "first bit = True" True val1
-          assertEqual "second bit = False" False val2
+  let reader = do
+        v1 <- readBitM
+        v2 <- readBitM
+        pure (v1, v2)
+  assertDeserialize "Bool (True, False)" (True, False) reader buf
 
--- | Test Word8 serialization round-trip.
 testWord8RoundTrip :: IO ()
 testWord8RoundTrip = do
   putStrLn "Word8 round-trip:"
   let buf = bitSerialize (42 :: Word8) empty
-  case bitDeserialize buf of
-    Left err -> error err
-    Right (ReadResult val _) ->
-      assertEqual "Word8 42" (42 :: Word8) val
+  assertDeserialize "Word8 42" (42 :: Word8) deserializeM buf
 
--- | Test Word16 serialization round-trip.
 testWord16RoundTrip :: IO ()
 testWord16RoundTrip = do
   putStrLn "Word16 round-trip:"
   let buf = bitSerialize (1234 :: Word16) empty
-  case bitDeserialize buf of
-    Left err -> error err
-    Right (ReadResult val _) ->
-      assertEqual "Word16 1234" (1234 :: Word16) val
+  assertDeserialize "Word16 1234" (1234 :: Word16) deserializeM buf
 
--- | Test serializing multiple fields of different types.
---
--- Demonstrates the "builder" pattern: values are serialized
--- right-to-left (innermost @$@ first), creating a buffer with
--- True, then Word16 5000, then Word8 99. Reading back happens
--- left-to-right, matching the write order.
---
--- The nested case pattern here shows exactly why the BitReader monad
--- exists — see testMonadicReader for the clean version.
 testMultiField :: IO ()
 testMultiField = do
   putStrLn "Multi-field serialization:"
@@ -141,25 +136,13 @@ testMultiField = do
           $ bitSerialize (5000 :: Word16)
           $ bitSerialize True
             empty
-  case bitDeserialize buf of
-    Left err -> error err
-    Right (ReadResult (v1 :: Bool) buf1) ->
-      case bitDeserialize buf1 of
-        Left err -> error err
-        Right (ReadResult (v2 :: Word16) buf2) ->
-          case bitDeserialize buf2 of
-            Left err -> error err
-            Right (ReadResult (v3 :: Word8) _) -> do
-              assertEqual "field 1 (Bool)" True v1
-              assertEqual "field 2 (Word16)" (5000 :: Word16) v2
-              assertEqual "field 3 (Word8)" (99 :: Word8) v3
+  let reader = do
+        v1 <- deserializeM :: BitReader Bool
+        v2 <- deserializeM :: BitReader Word16
+        v3 <- deserializeM :: BitReader Word8
+        pure (v1, v2, v3)
+  assertDeserialize "multi-field" (True, 5000 :: Word16, 99 :: Word8) reader buf
 
--- | Test sub-byte bit packing with arbitrary widths.
---
--- Writes 4 fields at non-standard widths (1, 7, 10, 10 bits = 28 total).
--- Verifies the write cursor is at position 28, then reads all fields back.
--- This is the core use case for game networking: packing a position
--- update into as few bits as possible.
 testBitPacking :: IO ()
 testBitPacking = do
   putStrLn "Bit-level packing:"
@@ -169,29 +152,14 @@ testBitPacking = do
           $ writeBits 1   1
             empty
   assertEqual "bit position = 28" 28 (bitPosition buf)
-  case readBits 1 buf of
-    Left err -> error err
-    Right (ReadResult mv buf1) ->
-      case readBits 7 buf1 of
-        Left err -> error err
-        Right (ReadResult hp buf2) ->
-          case readBits 10 buf2 of
-            Left err -> error err
-            Right (ReadResult y buf3) ->
-              case readBits 10 buf3 of
-                Left err -> error err
-                Right (ReadResult x _) -> do
-                  assertEqual "moving = 1" 1 mv
-                  assertEqual "health = 100" 100 hp
-                  assertEqual "y = 768" 768 y
-                  assertEqual "x = 512" 512 x
+  let reader = do
+        mv <- readBitsM 1
+        hp <- readBitsM 7
+        y  <- readBitsM 10
+        x  <- readBitsM 10
+        pure (mv, hp, y, x)
+  assertDeserialize "bit packing" (1, 100, 768, 512) reader buf
 
--- | Test the monadic reader — same data as testMultiField but with
--- clean @do@-notation instead of nested cases.
---
--- Compare the 12 lines of nested cases in testMultiField to the 4
--- lines of @do@-notation here. The monad handles buffer threading
--- and error propagation automatically.
 testMonadicReader :: IO ()
 testMonadicReader = do
   putStrLn "Monadic reader:"
@@ -199,95 +167,77 @@ testMonadicReader = do
           $ bitSerialize (5000 :: Word16)
           $ bitSerialize True
             empty
-  let readFields = do
+  let reader = do
         v1 <- deserializeM :: BitReader Bool
         v2 <- deserializeM :: BitReader Word16
         v3 <- deserializeM :: BitReader Word8
         pure (v1, v2, v3)
-  case runBitReader readFields buf of
-    Left err -> error $ "Monadic read failed: " ++ err
-    Right ((v1, v2, v3), _remainingBuf) -> do
-      assertEqual "monad: Bool" True v1
-      assertEqual "monad: Word16" (5000 :: Word16) v2
-      assertEqual "monad: Word8" (99 :: Word8) v3
+  assertDeserialize "monadic multi-field" (True, 5000 :: Word16, 99 :: Word8) reader buf
 
 -- --------------------------------------------------------------------
 -- Signed integer tests
 -- --------------------------------------------------------------------
 
--- | Test signed integer round-trips across all widths.
---
--- Two's complement ensures that negative values survive the
--- signed -> unsigned -> write -> read -> unsigned -> signed conversion.
--- We test boundary values (min/max) and typical negative values.
 testSignedIntegers :: IO ()
 testSignedIntegers = do
   putStrLn "Signed integer round-trips:"
 
   -- Int8: range -128 to 127
-  let buf8 = bitSerialize (-1 :: Int8) $ bitSerialize (127 :: Int8) $ bitSerialize (-128 :: Int8) empty
-  case runBitReader (do { a <- deserializeM; b <- deserializeM; c <- deserializeM; pure (a :: Int8, b :: Int8, c :: Int8) }) buf8 of
-    Left err -> error err
-    Right ((a, b, c), _) -> do
-      assertEqual "Int8 -128" (-128 :: Int8) a
-      assertEqual "Int8 127" (127 :: Int8) b
-      assertEqual "Int8 -1" (-1 :: Int8) c
+  let buf8 = bitSerialize (-1 :: Int8)
+           $ bitSerialize (127 :: Int8)
+           $ bitSerialize (-128 :: Int8)
+             empty
+  let reader8 = do
+        a <- deserializeM :: BitReader Int8
+        b <- deserializeM :: BitReader Int8
+        c <- deserializeM :: BitReader Int8
+        pure (a, b, c)
+  assertDeserialize "Int8 boundary" (-128, 127, -1 :: Int8) reader8 buf8
 
-  -- Int16: range -32768 to 32767
-  let buf16 = bitSerialize (-1000 :: Int16) $ bitSerialize (32767 :: Int16) empty
-  case runBitReader (do { a <- deserializeM; b <- deserializeM; pure (a :: Int16, b :: Int16) }) buf16 of
-    Left err -> error err
-    Right ((a, b), _) -> do
-      assertEqual "Int16 32767" (32767 :: Int16) a
-      assertEqual "Int16 -1000" (-1000 :: Int16) b
+  -- Int16
+  let buf16 = bitSerialize (-1000 :: Int16)
+            $ bitSerialize (32767 :: Int16)
+              empty
+  let reader16 = do
+        a <- deserializeM :: BitReader Int16
+        b <- deserializeM :: BitReader Int16
+        pure (a, b)
+  assertDeserialize "Int16 boundary" (32767, -1000 :: Int16) reader16 buf16
 
   -- Int32
   let buf32 = bitSerialize (-100000 :: Int32) empty
-  case runBitReader (deserializeM :: BitReader Int32) buf32 of
-    Left err -> error err
-    Right (a, _) -> assertEqual "Int32 -100000" (-100000 :: Int32) a
+  assertDeserialize "Int32 -100000" (-100000 :: Int32) deserializeM buf32
 
   -- Int64
   let buf64 = bitSerialize (-9999999999 :: Int64) empty
-  case runBitReader (deserializeM :: BitReader Int64) buf64 of
-    Left err -> error err
-    Right (a, _) -> assertEqual "Int64 -9999999999" (-9999999999 :: Int64) a
+  assertDeserialize "Int64 -9999999999" (-9999999999 :: Int64) deserializeM buf64
 
 -- --------------------------------------------------------------------
 -- Floating-point tests
 -- --------------------------------------------------------------------
 
--- | Test Float and Double round-trips via IEEE 754 bit representation.
---
--- The cast functions (castFloatToWord32, etc.) preserve the exact bit
--- pattern, so round-tripping should be bit-exact — not just approximate.
--- We test with assertApproxEqual as a safety measure.
 testFloatingPoint :: IO ()
 testFloatingPoint = do
   putStrLn "Floating-point round-trips:"
 
-  -- Float (32-bit IEEE 754)
-  -- The bit cast is exact — no rounding occurs. So we can compare
-  -- directly with assertEqual. We just need to compare Float to Float
-  -- (not Float to Double), since the literal 3.14159 as a Float is
-  -- a slightly different value than 3.14159 as a Double.
-  let bufF = bitSerialize (3.14159 :: Float) $ bitSerialize (-0.0 :: Float) empty
-  case runBitReader (do { a <- deserializeM; b <- deserializeM; pure (a :: Float, b :: Float) }) bufF of
-    Left err -> error err
-    Right ((a, b), _) -> do
-      assertEqual "Float -0.0" (-0.0 :: Float) a
-      assertEqual "Float 3.14159" (3.14159 :: Float) b
+  -- Float
+  let bufF = bitSerialize (3.14159 :: Float)
+           $ bitSerialize (-0.0 :: Float)
+             empty
+  let readerF = do
+        a <- deserializeM :: BitReader Float
+        b <- deserializeM :: BitReader Float
+        pure (a, b)
+  assertDeserialize "Float pair" (-0.0, 3.14159 :: Float) readerF bufF
 
-  -- Double (64-bit IEEE 754)
+  -- Double
   let bufD = bitSerialize (2.718281828459045 :: Double) empty
-  case runBitReader (deserializeM :: BitReader Double) bufD of
-    Left err -> error err
-    Right (a, _) -> assertEqual "Double 2.71828..." (2.718281828459045 :: Double) a
+  assertDeserialize "Double e" (2.718281828459045 :: Double) deserializeM bufD
 
-  -- Special values
+  -- Infinity
   let bufInf = bitSerialize (1.0 / 0.0 :: Float) empty
   case runBitReader (deserializeM :: BitReader Float) bufInf of
-    Left err -> error err
+    Left err -> error $ "  FAIL: Float Infinity: " ++ err
     Right (a, _) ->
       if isInfinite a
         then putStrLn "  PASS: Float Infinity"
@@ -297,28 +247,20 @@ testFloatingPoint = do
 -- Packet type tests
 -- --------------------------------------------------------------------
 
--- | Test PacketType serialization round-trip for all 6 variants.
 testPacketType :: IO ()
 testPacketType = do
   putStrLn "PacketType round-trips:"
   let allTypes = [ConnectionRequest, ConnectionAccepted, ConnectionDenied,
                   Payload, Disconnect, Keepalive]
-  -- Serialize all types into one buffer. We use 'foldl' with 'flip'
-  -- because 'bitSerialize' takes @value -> buffer -> buffer@, so
-  -- @flip bitSerialize@ gives us @buffer -> value -> buffer@, which
-  -- is the accumulator signature 'foldl' expects. This writes the
-  -- types left-to-right (ConnectionRequest first).
   let buf = foldl (flip bitSerialize) empty allTypes
-  -- Read them back
-  let readAll = mapM (\_ -> deserializeM :: BitReader PacketType) allTypes
-  case runBitReader readAll buf of
+  let reader = mapM (\_ -> deserializeM :: BitReader PacketType) allTypes
+  case runBitReader reader buf of
     Left err -> error err
     Right (results, _) ->
       mapM_ (\(expected, actual) ->
         assertEqual ("PacketType " ++ show expected) expected actual
       ) (zip allTypes results)
 
--- | Test PacketHeader full round-trip.
 testPacketHeaderRoundTrip :: IO ()
 testPacketHeaderRoundTrip = do
   putStrLn "PacketHeader round-trip:"
@@ -329,17 +271,15 @@ testPacketHeaderRoundTrip = do
         , ackBitfield = 0xDEADBEEF
         }
   let buf = bitSerialize hdr empty
-  -- Verify the header occupies exactly 68 bits
   assertEqual "header bit size" packetHeaderBitSize (bitPosition buf)
-  case bitDeserialize buf of
+  case runBitReader (deserializeM :: BitReader PacketHeader) buf of
     Left err -> error err
-    Right (ReadResult hdr' _) -> do
-      assertEqual "packetType" (packetType hdr) (packetType hdr')
+    Right (hdr', _) -> do
+      assertEqual "packetType"  (packetType hdr)  (packetType hdr')
       assertEqual "sequenceNum" (sequenceNum hdr) (sequenceNum hdr')
-      assertEqual "ack" (ack hdr) (ack hdr')
+      assertEqual "ack"         (ack hdr)         (ack hdr')
       assertEqual "ackBitfield" (ackBitfield hdr) (ackBitfield hdr')
 
--- | Test PacketHeader deserialization using the monadic reader.
 testPacketHeaderMonadic :: IO ()
 testPacketHeaderMonadic = do
   putStrLn "PacketHeader monadic round-trip:"
@@ -350,16 +290,192 @@ testPacketHeaderMonadic = do
         , ackBitfield = 0xFFFFFFFF
         }
   let buf = bitSerialize (99 :: Word8) $ bitSerialize hdr empty
-  -- Read header then a trailing Word8 using the monad
-  let readAll = do
-        h <- deserializeM :: BitReader PacketHeader
+  let reader = do
+        h        <- deserializeM :: BitReader PacketHeader
         trailing <- deserializeM :: BitReader Word8
         pure (h, trailing)
-  case runBitReader readAll buf of
+  case runBitReader reader buf of
     Left err -> error $ "Monadic header read failed: " ++ err
     Right ((h, trailing), _) -> do
-      assertEqual "monadic packetType" ConnectionRequest (packetType h)
-      assertEqual "monadic sequenceNum" 65535 (sequenceNum h)
-      assertEqual "monadic ack" 0 (ack h)
+      assertEqual "monadic packetType"  ConnectionRequest (packetType h)
+      assertEqual "monadic sequenceNum" 65535             (sequenceNum h)
+      assertEqual "monadic ack"         0                 (ack h)
       assertEqual "monadic ackBitfield" (0xFFFFFFFF :: Word32) (ackBitfield h)
-      assertEqual "monadic trailing Word8" (99 :: Word8) trailing
+      assertEqual "monadic trailing"    (99 :: Word8)     trailing
+
+-- --------------------------------------------------------------------
+-- Collection type tests
+-- --------------------------------------------------------------------
+
+testMaybeRoundTrip :: IO ()
+testMaybeRoundTrip = do
+  putStrLn "Maybe round-trips:"
+  let bufN = bitSerialize (Nothing :: Maybe Word8) empty
+  assertDeserialize "Nothing" (Nothing :: Maybe Word8) deserializeM bufN
+
+  let bufJ = bitSerialize (Just (42 :: Word8)) empty
+  assertDeserialize "Just 42" (Just 42 :: Maybe Word8) deserializeM bufJ
+
+  let bufNested = bitSerialize (Just (Just True) :: Maybe (Maybe Bool)) empty
+  assertDeserialize "Just (Just True)" (Just (Just True) :: Maybe (Maybe Bool)) deserializeM bufNested
+
+testListRoundTrip :: IO ()
+testListRoundTrip = do
+  putStrLn "List round-trips:"
+  let bufEmpty = bitSerialize ([] :: [Word8]) empty
+  assertDeserialize "empty list" ([] :: [Word8]) deserializeM bufEmpty
+
+  let xs = [10, 20, 30] :: [Word16]
+  let bufList = bitSerialize xs empty
+  assertDeserialize "list [10,20,30]" xs deserializeM bufList
+
+testStringRoundTrip :: IO ()
+testStringRoundTrip = do
+  putStrLn "String round-trips:"
+  let bufEmpty = bitSerialize ("" :: String) empty
+  assertDeserialize "empty string" ("" :: String) deserializeM bufEmpty
+
+  let bufHello = bitSerialize ("hello" :: String) empty
+  assertDeserialize "string hello" "hello" (deserializeM :: BitReader String) bufHello
+
+testTextRoundTrip :: IO ()
+testTextRoundTrip = do
+  putStrLn "Text round-trips:"
+
+  -- Empty text
+  let bufEmpty = bitSerialize (T.empty :: T.Text) empty
+  assertDeserialize "empty Text" T.empty deserializeM bufEmpty
+
+  -- ASCII
+  let bufHello = bitSerialize ("hello" :: T.Text) empty
+  assertDeserialize "Text hello" ("hello" :: T.Text) deserializeM bufHello
+
+  -- Unicode (multi-byte UTF-8)
+  let bufUni = bitSerialize ("café" :: T.Text) empty
+  assertDeserialize "Text café" ("café" :: T.Text) deserializeM bufUni
+
+  -- Emoji (4-byte UTF-8)
+  let bufEmoji = bitSerialize ("\x1F680" :: T.Text) empty
+  assertDeserialize "Text rocket emoji" ("\x1F680" :: T.Text) deserializeM bufEmoji
+
+testTupleRoundTrip :: IO ()
+testTupleRoundTrip = do
+  putStrLn "Tuple round-trips:"
+  let buf2 = bitSerialize (True, 42 :: Word8) empty
+  assertDeserialize "2-tuple" (True, 42 :: Word8) deserializeM buf2
+
+  let buf3 = bitSerialize (False, 1000 :: Word16, -5 :: Int8) empty
+  assertDeserialize "3-tuple" (False, 1000 :: Word16, -5 :: Int8) deserializeM buf3
+
+  let buf4 = bitSerialize (True, 255 :: Word8, 3.14 :: Float, -100 :: Int16) empty
+  assertDeserialize "4-tuple" (True, 255 :: Word8, 3.14 :: Float, -100 :: Int16) deserializeM buf4
+
+-- --------------------------------------------------------------------
+-- Phase 1: Measure mode + debug tests
+-- --------------------------------------------------------------------
+
+testSerializedSize :: IO ()
+testSerializedSize = do
+  putStrLn "Serialized size measurement:"
+  assertEqual "Bool = 1 bit" 1 (serializedSizeBits (bitSerialize True))
+  assertEqual "Word8 = 8 bits" 8 (serializedSizeBits (bitSerialize (42 :: Word8)))
+  assertEqual "Word16 = 16 bits" 16 (serializedSizeBits (bitSerialize (0 :: Word16)))
+  assertEqual "Word32 = 32 bits" 32 (serializedSizeBits (bitSerialize (0 :: Word32)))
+  assertEqual "Word64 = 64 bits" 64 (serializedSizeBits (bitSerialize (0 :: Word64)))
+  assertEqual "Word8 = 1 byte" 1 (serializedSizeBytes (bitSerialize (42 :: Word8)))
+  assertEqual "Bool = 1 byte (rounded)" 1 (serializedSizeBytes (bitSerialize True))
+  assertEqual "9 bits = 2 bytes" 2 (serializedSizeBytes (writeBits 0 9))
+  -- PacketHeader should be 68 bits = 9 bytes
+  let hdr = PacketHeader Payload 0 0 0
+  assertEqual "PacketHeader = 68 bits" 68 (serializedSizeBits (bitSerialize hdr))
+  assertEqual "PacketHeader = 9 bytes" 9 (serializedSizeBytes (bitSerialize hdr))
+
+testToBitString :: IO ()
+testToBitString = do
+  putStrLn "toBitString debug output:"
+  -- Single bit
+  let buf1 = writeBit True empty
+  assertEqual "single 1" "1" (toBitString buf1)
+  -- Single zero bit
+  let buf0 = writeBit False empty
+  assertEqual "single 0" "0" (toBitString buf0)
+  -- Full byte: 0xFF = 11111111
+  let bufFF = writeBits 0xFF 8 empty
+  assertEqual "0xFF" "11111111" (toBitString bufFF)
+  -- 0x00 = 00000000
+  let buf00 = writeBits 0x00 8 empty
+  assertEqual "0x00" "00000000" (toBitString buf00)
+  -- Multi-byte: 0xAB = 10101011, then 3 more bits of value 5 (101)
+  let bufMixed = writeBits 5 3 $ writeBits 0xAB 8 empty
+  assertEqual "0xAB + 3 bits" "10101011 101" (toBitString bufMixed)
+  -- Empty buffer
+  assertEqual "empty" "" (toBitString empty)
+
+-- --------------------------------------------------------------------
+-- Phase 2: Fast path tests
+-- --------------------------------------------------------------------
+
+testFastPathAligned :: IO ()
+testFastPathAligned = do
+  putStrLn "Fast path (byte-aligned) round-trips:"
+  -- Write aligned bytes and read them back
+  let buf = writeBits 0xDEADBEEF 32 $ writeBits 0xCAFE 16 $ writeBits 0x42 8 empty
+  let reader = do
+        a <- readBitsM 8
+        b <- readBitsM 16
+        c <- readBitsM 32
+        pure (a, b, c)
+  assertDeserialize "aligned 8+16+32" (0x42, 0xCAFE, 0xDEADBEEF) reader buf
+
+  -- Verify fast path produces same result as bit-by-bit for Word64
+  let buf64 = writeBits 0x0123456789ABCDEF 64 empty
+  assertDeserialize "aligned 64-bit" (0x0123456789ABCDEF :: Word64) (readBitsM 64) buf64
+
+  -- Mixed: non-aligned write followed by aligned
+  let bufMixed = writeBits 0xFF 8 $ writeBit True empty
+  let readerMixed = do
+        b <- readBitM
+        v <- readBitsM 8
+        pure (b, v)
+  assertDeserialize "non-aligned then aligned" (True, 0xFF) readerMixed bufMixed
+
+-- --------------------------------------------------------------------
+-- Phase 3: TH derive tests
+-- --------------------------------------------------------------------
+
+testTHRecord :: IO ()
+testTHRecord = do
+  putStrLn "TH derive record round-trips:"
+  let v = Vec3 { vecX = 1.0, vecY = -2.5, vecZ = 100.0 }
+  let buf = bitSerialize v empty
+  assertDeserialize "Vec3" v deserializeM buf
+
+  let sr = SimpleRecord { srFlag = True, srValue = 12345 }
+  let bufSR = bitSerialize sr empty
+  assertDeserialize "SimpleRecord" sr deserializeM bufSR
+
+testTHEnum :: IO ()
+testTHEnum = do
+  putStrLn "TH derive enum round-trips:"
+  let colors = [Red, Green, Blue, Yellow]
+  let buf = foldl (flip bitSerialize) empty colors
+  let reader = mapM (\_ -> deserializeM :: BitReader Color) colors
+  case runBitReader reader buf of
+    Left err -> error err
+    Right (results, _) ->
+      mapM_ (\(expected, actual) ->
+        assertEqual ("Color " ++ show expected) expected actual
+      ) (zip colors results)
+
+testTHEnumWithPayloads :: IO ()
+testTHEnumWithPayloads = do
+  putStrLn "TH derive enum with payloads:"
+  let events = [PlayerJoin 1, PlayerLeave 2, ChatMessage 3 1000]
+  let buf = foldl (flip bitSerialize) empty events
+  let reader = mapM (\_ -> deserializeM :: BitReader GameEvent) events
+  case runBitReader reader buf of
+    Left err -> error err
+    Right (results, _) ->
+      mapM_ (\(expected, actual) ->
+        assertEqual ("GameEvent " ++ show expected) expected actual
+      ) (zip events results)

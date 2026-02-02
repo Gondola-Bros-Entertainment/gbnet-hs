@@ -1,3 +1,6 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
 -- |
 -- Module      : GBNet.Serialize.Class
 -- Description : Typeclasses for bitpacked serialization
@@ -52,10 +55,17 @@ module GBNet.Serialize.Class
   , word32BitWidth
   , word64BitWidth
   , packetTypeBitWidth
+    -- * Collection constants
+  , defaultMaxLength
+  , lengthPrefixBitWidth
   ) where
 
 import Data.Word (Word8, Word16, Word32, Word64)
 import Data.Int (Int8, Int16, Int32, Int64)
+import Data.Char (ord, chr)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString as BS
 
 -- 'castWord32ToFloat' and friends let us reinterpret the bits of a
 -- 'Word32' as a 'Float' (IEEE 754) without changing the underlying
@@ -321,3 +331,203 @@ instance BitDeserialize Double where
           { readValue  = castWord64ToDouble val
           , readBuffer = buf'
           }
+
+-- ====================================================================
+-- Collection constants
+-- ====================================================================
+
+-- | Maximum number of elements in a serialized list or string.
+-- Matches the Rust version's default max_len of 65535 (2^16 - 1).
+defaultMaxLength :: Int
+defaultMaxLength = 65535
+
+-- | Bit width of the length prefix for collections. 16 bits can
+-- represent lengths 0 through 65535, matching 'defaultMaxLength'.
+lengthPrefixBitWidth :: Int
+lengthPrefixBitWidth = 16
+
+-- ====================================================================
+-- Maybe instance
+-- ====================================================================
+
+-- | @Maybe a@ is serialized as a 1-bit presence flag followed by the
+-- value (if present). This is the Haskell equivalent of Rust's
+-- @Option<T>@ serialization: 1 bit for @Some@/@None@, then the payload.
+--
+-- Wire format:
+--   * @Nothing@ → 0 (1 bit)
+--   * @Just x@  → 1 (1 bit) ++ serialize(x)
+instance (BitSerialize a) => BitSerialize (Maybe a) where
+  bitSerialize Nothing  = writeBit False
+  bitSerialize (Just x) = bitSerialize x . writeBit True
+
+instance (BitDeserialize a) => BitDeserialize (Maybe a) where
+  bitDeserialize buf =
+    case readBit buf of
+      Left err -> Left err
+      Right (ReadResult present buf') ->
+        if present
+          then case bitDeserialize buf' of
+            Left err -> Left err
+            Right (ReadResult val buf'') ->
+              Right $ ReadResult { readValue = Just val, readBuffer = buf'' }
+          else Right $ ReadResult { readValue = Nothing, readBuffer = buf' }
+
+-- ====================================================================
+-- List instance
+-- ====================================================================
+
+-- | Lists are serialized as a 16-bit length prefix followed by each
+-- element in order. This matches the Rust @Vec<T>@ serialization.
+--
+-- Wire format: length (16 bits) ++ element_0 ++ element_1 ++ ...
+--
+-- The length is capped at 'defaultMaxLength' (65535). Attempting to
+-- serialize a longer list would silently truncate — matching the Rust
+-- behavior where the length is cast to u16.
+instance (BitSerialize a) => BitSerialize [a] where
+  bitSerialize xs buf =
+    let len = min (length xs) defaultMaxLength
+        buf' = writeBits (fromIntegral len) lengthPrefixBitWidth buf
+    in foldl (flip bitSerialize) buf' xs
+
+instance (BitDeserialize a) => BitDeserialize [a] where
+  bitDeserialize buf =
+    case readBits lengthPrefixBitWidth buf of
+      Left err -> Left err
+      Right (ReadResult lenW64 buf') ->
+        let len = fromIntegral lenW64 :: Int
+        in readNElements len [] buf'
+    where
+      readNElements 0 acc b =
+        Right $ ReadResult { readValue = reverse acc, readBuffer = b }
+      readNElements n acc b =
+        case bitDeserialize b of
+          Left err -> Left err
+          Right (ReadResult val b') -> readNElements (n - 1) (val : acc) b'
+
+-- ====================================================================
+-- Char instance
+-- ====================================================================
+
+-- | Char is serialized as an 8-bit value (ASCII/Latin-1). This means
+-- @String@ (which is @[Char]@) automatically gets serialization through
+-- the list instance above — serialized as a 16-bit length prefix
+-- followed by one byte per character.
+--
+-- For game networking, single-byte characters cover the common case:
+-- player names, chat messages, server names are typically ASCII.
+-- Characters beyond codepoint 255 are truncated to their low 8 bits.
+instance BitSerialize Char where
+  bitSerialize c = writeBits (fromIntegral (ord c)) word8BitWidth
+
+instance BitDeserialize Char where
+  bitDeserialize buf =
+    case readBits word8BitWidth buf of
+      Left err -> Left err
+      Right (ReadResult val buf') ->
+        Right $ ReadResult
+          { readValue  = chr (fromIntegral val)
+          , readBuffer = buf'
+          }
+
+-- ====================================================================
+-- Text instance (production-grade strings)
+-- ====================================================================
+
+-- | @Text@ is the recommended string type for production use. Unlike
+-- @[Char]@ (a linked list costing ~40 bytes per character), @Text@ is
+-- a packed UTF-8 array — the same internal representation as Rust's
+-- @String@.
+--
+-- Wire format matches the Rust version exactly:
+--   * 16-bit length prefix (byte count, not character count)
+--   * Raw UTF-8 bytes
+--
+-- This means a Haskell client and Rust server can exchange strings
+-- with zero conversion overhead — the bytes on the wire are identical.
+instance BitSerialize T.Text where
+  bitSerialize t buf =
+    let bytes = TE.encodeUtf8 t
+        len   = min (BS.length bytes) defaultMaxLength
+        buf'  = writeBits (fromIntegral len) lengthPrefixBitWidth buf
+    in BS.foldl' (\b w -> bitSerialize w b) buf' (BS.take len bytes)
+
+instance BitDeserialize T.Text where
+  bitDeserialize buf =
+    case readBits lengthPrefixBitWidth buf of
+      Left err -> Left err
+      Right (ReadResult lenW64 buf') ->
+        let len = fromIntegral lenW64 :: Int
+        in readNBytes len [] buf'
+    where
+      readNBytes :: Int -> [Word8] -> BitBuffer -> Either String (ReadResult T.Text)
+      readNBytes 0 acc b =
+        case TE.decodeUtf8' (BS.pack (reverse acc)) of
+          Left err -> Left $ "Text: invalid UTF-8: " ++ show err
+          Right t  -> Right $ ReadResult { readValue = t, readBuffer = b }
+      readNBytes n acc b =
+        case readBits word8BitWidth b of
+          Left err -> Left err
+          Right (ReadResult val b') ->
+            readNBytes (n - 1) (fromIntegral val : acc) b'
+
+-- ====================================================================
+-- Tuple instances
+-- ====================================================================
+
+-- | 2-tuple: serialized as first element followed by second.
+instance (BitSerialize a, BitSerialize b) => BitSerialize (a, b) where
+  bitSerialize (a, b) = bitSerialize b . bitSerialize a
+
+instance (BitDeserialize a, BitDeserialize b) => BitDeserialize (a, b) where
+  bitDeserialize buf =
+    case bitDeserialize buf of
+      Left err -> Left err
+      Right (ReadResult a buf') ->
+        case bitDeserialize buf' of
+          Left err -> Left err
+          Right (ReadResult b buf'') ->
+            Right $ ReadResult { readValue = (a, b), readBuffer = buf'' }
+
+-- | 3-tuple: serialized in order (first, second, third).
+instance (BitSerialize a, BitSerialize b, BitSerialize c) =>
+         BitSerialize (a, b, c) where
+  bitSerialize (a, b, c) = bitSerialize c . bitSerialize b . bitSerialize a
+
+instance (BitDeserialize a, BitDeserialize b, BitDeserialize c) =>
+         BitDeserialize (a, b, c) where
+  bitDeserialize buf =
+    case bitDeserialize buf of
+      Left err -> Left err
+      Right (ReadResult a buf') ->
+        case bitDeserialize buf' of
+          Left err -> Left err
+          Right (ReadResult b buf'') ->
+            case bitDeserialize buf'' of
+              Left err -> Left err
+              Right (ReadResult c buf''') ->
+                Right $ ReadResult { readValue = (a, b, c), readBuffer = buf''' }
+
+-- | 4-tuple: serialized in order.
+instance (BitSerialize a, BitSerialize b, BitSerialize c, BitSerialize d) =>
+         BitSerialize (a, b, c, d) where
+  bitSerialize (a, b, c, d) =
+    bitSerialize d . bitSerialize c . bitSerialize b . bitSerialize a
+
+instance (BitDeserialize a, BitDeserialize b, BitDeserialize c, BitDeserialize d) =>
+         BitDeserialize (a, b, c, d) where
+  bitDeserialize buf =
+    case bitDeserialize buf of
+      Left err -> Left err
+      Right (ReadResult a buf1) ->
+        case bitDeserialize buf1 of
+          Left err -> Left err
+          Right (ReadResult b buf2) ->
+            case bitDeserialize buf2 of
+              Left err -> Left err
+              Right (ReadResult c buf3) ->
+                case bitDeserialize buf3 of
+                  Left err -> Left err
+                  Right (ReadResult d buf4) ->
+                    Right $ ReadResult { readValue = (a, b, c, d), readBuffer = buf4 }

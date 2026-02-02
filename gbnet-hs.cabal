@@ -19,11 +19,14 @@ library
     GBNet.Serialize.BitBuffer
     GBNet.Serialize.Class
     GBNet.Serialize.Reader
+    GBNet.Serialize.TH
     GBNet.Packet
 
   build-depends:
-      base        >= 4.16 && < 5
-    , bytestring  >= 0.11
+      base                >= 4.16 && < 5
+    , bytestring          >= 0.11
+    , text                >= 2.0
+    , template-haskell    >= 2.18
 
   hs-source-dirs:   src
   default-language:  Haskell2010
@@ -37,5 +40,6 @@ test-suite gbnet-test
       base
     , gbnet-hs
     , bytestring
+    , text
   default-language: Haskell2010
   ghc-options:      -Wall
