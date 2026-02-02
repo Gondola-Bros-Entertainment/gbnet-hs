@@ -88,6 +88,12 @@ case runBitReader reader buf of
 | `Word16` | 16 | `bitSerialize (1234 :: Word16)` | `bit_serialize(&1234u16)` |
 | `Word32` | 32 | `bitSerialize (n :: Word32)` | `bit_serialize(&n)` |
 | `Word64` | 64 | `bitSerialize (n :: Word64)` | `bit_serialize(&n)` |
+| `Int8` | 8 | `bitSerialize (-1 :: Int8)` | `bit_serialize(&-1i8)` |
+| `Int16` | 16 | `bitSerialize (n :: Int16)` | `bit_serialize(&n)` |
+| `Int32` | 32 | `bitSerialize (n :: Int32)` | `bit_serialize(&n)` |
+| `Int64` | 64 | `bitSerialize (n :: Int64)` | `bit_serialize(&n)` |
+| `Float` | 32 | `bitSerialize (3.14 :: Float)` | `bit_serialize(&3.14f32)` |
+| `Double` | 64 | `bitSerialize (n :: Double)` | `bit_serialize(&n)` |
 | Custom N | N | `writeBits value n` | `write_bits(value, n)` |
 
 ---
@@ -98,16 +104,17 @@ case runBitReader reader buf of
 gbnet-hs/
 ├── src/
 │   └── GBNet/
+│       ├── Packet.hs              # Packet types & header wire format
 │       └── Serialize/
-│           ├── BitBuffer.hs    # Bit-level read/write buffer
-│           ├── Class.hs        # BitSerialize / BitDeserialize typeclasses
-│           └── Reader.hs       # BitReader monad for clean deserialization
+│           ├── BitBuffer.hs       # Bit-level read/write buffer
+│           ├── Class.hs           # BitSerialize / BitDeserialize typeclasses
+│           └── Reader.hs          # BitReader monad for clean deserialization
 ├── test/
-│   └── Main.hs                # Serialization round-trip tests
+│   └── Main.hs                   # Serialization round-trip tests
 ├── .github/
 │   └── workflows/
-│       └── ci.yml             # GitHub Actions CI
-└── gbnet-hs.cabal            # Package manifest
+│       └── ci.yml                # GitHub Actions CI
+└── gbnet-hs.cabal               # Package manifest
 ```
 
 ---
@@ -130,7 +137,7 @@ cabal haddock            # Generate docs
 - [x] Bitpacked serialization (BitBuffer)
 - [x] Typeclass-based serialize/deserialize
 - [x] Monadic reader (BitReader)
-- [ ] Packet header / wire format
+- [x] Packet header / wire format
 - [ ] Reliability layer (RTT, ACK, retransmit)
 - [ ] Channel system (delivery modes)
 - [ ] Connection state machine
