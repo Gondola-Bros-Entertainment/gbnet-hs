@@ -183,6 +183,7 @@ cabal haddock            # Generate docs
 
 ## Roadmap
 
+**Serialization (complete):**
 - [x] Bitpacked serialization (BitBuffer)
 - [x] Typeclass-based serialize/deserialize
 - [x] Collections (Maybe, List, String, Text, tuples)
@@ -192,9 +193,21 @@ cabal haddock            # Generate docs
 - [x] Measurement utilities (serializedSizeBits/Bytes)
 - [x] Debug visualization (toBitString)
 - [x] Byte-aligned fast paths (writeBits/readBits)
+
+**Serialization (remaining):**
+- [ ] Custom bit widths (`BitWidth n a` via type-level Nat)
+- [ ] Deserialization bounds checking (prevent OOM from malicious packets)
+- [ ] Fix writeBits fast-path edge case (buffer truncation on mixed writes)
+- [ ] Fix Char instance for Unicode > 255 (or remove, Text works)
+
+**Transport layer:**
 - [ ] Reliability layer (RTT, ACK, retransmit)
 - [ ] Channel system (delivery modes)
 - [ ] Connection state machine
+- [ ] Fragmentation / reassembly
+- [ ] Security (CRC32C, connect tokens, rate limiting)
+- [ ] Congestion control
+- [ ] Network simulator (loss, latency, jitter)
 - [ ] UDP transport (NetServer / NetClient)
 
 ---
