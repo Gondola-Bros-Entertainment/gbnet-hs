@@ -35,4 +35,9 @@ jobs:
         run: cabal test
 
       - name: Check warnings
-        run: cabal build --ghc-options="-Werror"
+        run: cabal build --ghc-options="-Wall -Werror"
+
+      - name: Lint (HLint)
+        run: |
+          cabal install hlint
+          hlint src/ test/
