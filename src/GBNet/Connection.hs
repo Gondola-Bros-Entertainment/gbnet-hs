@@ -193,7 +193,9 @@ newConnection :: NetworkConfig -> Word64 -> MonoTime -> Connection
 newConnection config clientSalt now =
   let numChannels = ncMaxChannels config
       defaultCfg = ncDefaultChannelConfig config
-      channels = map (\i -> Channel.newChannel (fromIntegral i) defaultCfg) [0 .. numChannels - 1]
+      -- Pad custom configs with defaults, then take exactly numChannels
+      configs = take numChannels $ ncChannelConfigs config ++ repeat defaultCfg
+      channels = zipWith Channel.newChannel [0 ..] configs
       priorityOrder = [0 .. numChannels - 1] -- TODO: sort by priority
       congestion =
         newCongestionController
