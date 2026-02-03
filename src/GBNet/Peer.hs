@@ -35,6 +35,7 @@ module GBNet.Peer
     -- * Net peer
     NetPeer (..),
     newPeer,
+    newPeerState,
 
     -- * Connection management
     peerConnect,
@@ -44,7 +45,13 @@ module GBNet.Peer
     -- * Pure processing
     peerProcess,
 
-    -- * IO helpers
+    -- * Polymorphic IO helpers
+    peerRecvAllM,
+    peerSendAllM,
+    peerShutdownM,
+    peerTick,
+
+    -- * Legacy IO helpers (for backward compatibility)
     peerRecvAll,
     peerSendAll,
     drainPeerSendQueue,
@@ -73,6 +80,7 @@ import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word64, Word8)
+import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime)
 import GBNet.Config (NetworkConfig (..))
 import GBNet.Connection
   ( Connection,
@@ -95,7 +103,7 @@ import GBNet.Packet
     deserializePacket,
     serializePacket,
   )
-import GBNet.Reliability (MonoTime, elapsedMs)
+import GBNet.Reliability (elapsedMs)
 import GBNet.Security (RateLimiter, appendCrc32, newRateLimiter, rateLimiterAllow, rateLimiterCleanup, validateAndStripCrc32)
 import GBNet.Serialize.BitBuffer (ReadResult (..), empty, fromBytes, toBytes)
 import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..))
@@ -195,6 +203,8 @@ migrationCooldownMs = 5000.0
 -- | A network peer that can accept and initiate connections.
 data NetPeer = NetPeer
   { npSocket :: !UdpSocket,
+    -- | Local address this peer is bound to (for polymorphic operations)
+    npLocalAddr :: !SockAddr,
     npConnections :: !(Map PeerId Connection),
     npPending :: !(Map PeerId PendingConnection),
     npConfig :: !NetworkConfig,
@@ -209,33 +219,48 @@ data NetPeer = NetPeer
   }
 
 -- | Create a new peer bound to the given address.
+-- Returns the peer and socket. The socket is also stored in the peer for
+-- backward compatibility, but new code should use the polymorphic API.
 newPeer ::
   SockAddr ->
   NetworkConfig ->
   MonoTime ->
-  IO (Either SocketError NetPeer)
+  IO (Either SocketError (NetPeer, UdpSocket))
 newPeer addr config now = do
   socketResult <- newUdpSocket addr
   case socketResult of
     Left err -> return $ Left err
     Right sock -> do
-      -- Generate cookie secret from time-based RNG
-      let rng0 = now
-          (secret, rng1) = generateCookieSecret rng0
-      return $
-        Right
-          NetPeer
-            { npSocket = sock,
-              npConnections = Map.empty,
-              npPending = Map.empty,
-              npConfig = config,
-              npRateLimiter = newRateLimiter (ncRateLimitPerSecond config),
-              npCookieSecret = secret,
-              npRngState = rng1,
-              npFragmentAssemblers = Map.empty,
-              npMigrationCooldowns = Map.empty,
-              npSendQueue = Seq.empty
-            }
+      localAddrResult <- socketLocalAddr sock
+      let localAddr = case localAddrResult of
+            Left _ -> addr -- Fallback to bind address
+            Right a -> a
+      let peer = newPeerState sock localAddr config now
+      return $ Right (peer, sock)
+
+-- | Create peer state (pure). Used internally and for polymorphic backends.
+newPeerState ::
+  UdpSocket ->
+  SockAddr ->
+  NetworkConfig ->
+  MonoTime ->
+  NetPeer
+newPeerState sock localAddr config now =
+  let rng0 = now
+      (secret, rng1) = generateCookieSecret rng0
+   in NetPeer
+        { npSocket = sock,
+          npLocalAddr = localAddr,
+          npConnections = Map.empty,
+          npPending = Map.empty,
+          npConfig = config,
+          npRateLimiter = newRateLimiter (ncRateLimitPerSecond config),
+          npCookieSecret = secret,
+          npRngState = rng1,
+          npFragmentAssemblers = Map.empty,
+          npMigrationCooldowns = Map.empty,
+          npSendQueue = Seq.empty
+        }
 
 -- | Generate a pseudo-random cookie secret.
 generateCookieSecret :: Word64 -> (BS.ByteString, Word64)
@@ -392,11 +417,79 @@ drainAllConnectionQueues _now peer =
        in RawPacket peerId raw
 
 -- -----------------------------------------------------------------------------
--- IO helpers
+-- Polymorphic IO helpers
+-- -----------------------------------------------------------------------------
+
+-- | Receive all available packets (polymorphic, non-blocking).
+-- Returns immediately if no data is available.
+peerRecvAllM :: MonadNetwork m => m [IncomingPacket]
+peerRecvAllM = go []
+  where
+    go acc = do
+      result <- netRecv
+      case result of
+        Nothing -> pure (reverse acc)
+        Just (dat, addr) ->
+          let pkt = IncomingPacket (PeerId addr) dat
+           in go (pkt : acc)
+
+-- | Send all outgoing packets (polymorphic).
+peerSendAllM :: MonadNetwork m => [RawPacket] -> m ()
+peerSendAllM packets = mapM_ sendOne packets
+  where
+    sendOne (RawPacket pid dat) = netSend (unPeerId pid) dat
+
+-- | Shutdown the peer (polymorphic).
+-- Sends disconnect packets to all connections and closes the network.
+peerShutdownM :: MonadNetwork m => NetPeer -> m ()
+peerShutdownM peer = do
+  let peerIds = Map.keys (npConnections peer)
+      peer' = foldr (queueControlPacket Disconnect BS.empty) peer peerIds
+      (outgoing, _) = drainPeerSendQueue peer'
+  peerSendAllM outgoing
+  netClose
+
+-- | Convenient single-function tick for game loops (polymorphic).
+--
+-- Combines receive, process, queue messages, and send into one call.
+-- Takes a list of (channel, message) pairs to send and returns events.
+--
+-- @
+-- gameLoop peer = do
+--   (events, peer') <- peerTick [(ch, msg)] peer
+--   -- handle events
+--   gameLoop peer'
+-- @
+peerTick ::
+  MonadNetwork m =>
+  [(Word8, BS.ByteString)] ->
+  NetPeer ->
+  m ([PeerEvent], NetPeer)
+peerTick messages peer = do
+  now <- getMonoTime
+  -- 1. Receive all available packets
+  packets <- peerRecvAllM
+  -- 2. Queue messages to all connections
+  let peer1 = foldl (queueMessage now) peer messages
+  -- 3. Process packets (pure)
+  let result = peerProcess now packets peer1
+      peer2 = prPeer result
+      events = prEvents result
+      outgoing = prOutgoing result
+  -- 4. Send all outgoing packets
+  peerSendAllM outgoing
+  pure (events, peer2)
+  where
+    queueMessage now p (ch, msg) = peerBroadcast ch msg Nothing now p
+
+-- -----------------------------------------------------------------------------
+-- Legacy IO helpers (for backward compatibility)
 -- -----------------------------------------------------------------------------
 
 -- | Receive all available packets from the socket (non-blocking).
 -- Returns immediately if no data is available.
+--
+-- Note: For new code, prefer 'peerRecvAllM' with the polymorphic API.
 peerRecvAll :: UdpSocket -> MonoTime -> IO ([IncomingPacket], UdpSocket)
 peerRecvAll sock now = go sock []
   where
@@ -413,6 +506,8 @@ peerRecvAll sock now = go sock []
                in go s' (pkt : acc)
 
 -- | Send all outgoing packets.
+--
+-- Note: For new code, prefer 'peerSendAllM' with the polymorphic API.
 peerSendAll :: [RawPacket] -> UdpSocket -> MonoTime -> IO UdpSocket
 peerSendAll packets sock now = foldM sendOne sock packets
   where

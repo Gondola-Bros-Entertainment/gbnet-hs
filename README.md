@@ -1,8 +1,8 @@
 <div align="center">
 <h1>gbnet-hs</h1>
 <p><strong>Game Networking for Haskell</strong></p>
-<p>Bitpacked serialization. Reliable UDP transport. Haskell port of <a href="https://github.com/gondola-bros-entertainment/gbnet">GB-Net</a>.</p>
-<p><a href="#quick-start">Quick Start</a> · <a href="#networking">Networking</a> · <a href="#serialization">Serialization</a> · <a href="#architecture">Architecture</a></p>
+<p>Bitpacked serialization. Reliable UDP transport. Effect-abstracted design for pure testing.</p>
+<p><a href="#quick-start">Quick Start</a> · <a href="#networking">Networking</a> · <a href="#serialization">Serialization</a> · <a href="#testing">Testing</a> · <a href="#architecture">Architecture</a></p>
 <p>
 
 [![CI](https://github.com/gondola-bros-entertainment/gbnet-hs/actions/workflows/ci.yml/badge.svg)](https://github.com/gondola-bros-entertainment/gbnet-hs/actions/workflows/ci.yml)
@@ -14,19 +14,15 @@
 
 ---
 
-> **Note:** This library is undergoing a major architecture overhaul to support idiomatic Haskell patterns (effect abstraction, MonadNetwork typeclass, layered design). See [docs/ARCHITECTURE_OVERHAUL.md](docs/ARCHITECTURE_OVERHAUL.md) for the roadmap.
+## What is gbnet-hs?
 
----
+Haskell port of [GB-Net](https://github.com/gondola-bros-entertainment/gbnet), a transport-level game networking library providing:
 
-## What is GB-Net-HS?
-
-Complete Haskell port of [GB-Net](https://github.com/gondola-bros-entertainment/gbnet), a transport-level game networking library providing:
-
-- **Bitpacked serialization** - Sub-byte encoding for bandwidth efficiency
-- **Reliable UDP** - Connection-oriented with ACKs, retransmits, and ordering
-- **Unified Peer API** - Same code for client, server, or P2P mesh
-- **Connection migration** - Seamless IP address change handling
-- **Congestion control** - Adaptive send rates based on network conditions
+- **Bitpacked serialization** — Sub-byte encoding for bandwidth efficiency
+- **Reliable UDP** — Connection-oriented with ACKs, retransmits, and ordering
+- **Unified Peer API** — Same code for client, server, or P2P mesh
+- **Effect abstraction** — `MonadNetwork` typeclass enables pure deterministic testing
+- **Connection migration** — Seamless IP address change handling
 
 ---
 
@@ -39,68 +35,68 @@ build-depends:
     gbnet-hs
 ```
 
-### Creating a Peer
+### Simple Game Loop
 
 ```haskell
-import GBNet.Peer
-import GBNet.Config (defaultNetworkConfig)
+import GBNet
 import Network.Socket (SockAddr(..))
 
 main :: IO ()
 main = do
-  let addr = SockAddrInet 7777 0  -- Bind to port 7777
-  now <- getCurrentTime           -- Your monotonic time source
+  -- Initialize network
+  let bindAddr = SockAddrInet 7777 0
+  Right netState <- initNetState bindAddr
 
-  result <- newPeer addr defaultNetworkConfig now
-  case result of
-    Left err -> print err
-    Right peer -> gameLoop peer now
+  -- Create peer
+  now <- getMonoTimeIO
+  Right (peer, _) <- newPeer bindAddr defaultNetworkConfig now
 
-gameLoop :: NetPeer -> MonoTime -> IO ()
-gameLoop peer now = do
-  -- Process incoming packets and get events
-  (events, peer') <- peerUpdate now peer
+  -- Run game loop inside NetT IO
+  evalNetT (gameLoop peer) netState
+
+gameLoop :: NetPeer -> NetT IO ()
+gameLoop peer = do
+  -- Single call: receive, process, broadcast, send
+  let outgoing = [(0, encodeMyState myState)]
+  (events, peer') <- peerTick outgoing peer
 
   -- Handle events
-  forM_ events $ \case
-    PeerConnected pid dir -> putStrLn $ "Connected: " ++ show pid
-    PeerDisconnected pid reason -> putStrLn $ "Disconnected: " ++ show reason
-    PeerMessage pid channel msg -> handleMessage pid channel msg
-    PeerMigrated oldPid newPid -> putStrLn "Peer address changed"
+  liftIO $ mapM_ handleEvent events
 
-  -- Send messages
-  let peer'' = case peerSend somePeerId 0 myData now peer' of
-        Left err -> peer'  -- Handle error
-        Right p -> p
+  gameLoop peer'
 
-  gameLoop peer'' (now + tickDelta)
+handleEvent :: PeerEvent -> IO ()
+handleEvent = \case
+  PeerConnected pid dir   -> putStrLn $ "Connected: " ++ show pid
+  PeerDisconnected pid _  -> putStrLn $ "Disconnected: " ++ show pid
+  PeerMessage pid ch msg  -> handleMessage pid ch msg
+  PeerMigrated old new    -> putStrLn "Peer address changed"
 ```
 
 ### Connecting to a Remote Peer
 
 ```haskell
 -- Initiate connection (handshake happens automatically)
-peer' <- peerConnect (peerIdFromAddr remoteAddr) now peer
+let peer' = peerConnect (peerIdFromAddr remoteAddr) now peer
 
--- The PeerConnected event will fire when handshake completes
-```
-
-### Sending Messages
-
-```haskell
--- Send on channel 0 (reliability determined by channel config)
-case peerSend peerId 0 myData now peer of
-  Left ErrNotConnected -> handleNotConnected
-  Left ErrChannelFull -> handleBackpressure
-  Right peer' -> continue peer'
-
--- Broadcast to all connected peers
-let peer' = peerBroadcast 0 myData Nothing now peer  -- Nothing = no exclusions
+-- The PeerConnected event fires when handshake completes
 ```
 
 ---
 
 ## Networking
+
+### The `peerTick` Function
+
+The recommended API for game loops — handles receive, process, and send in one call:
+
+```haskell
+peerTick
+  :: MonadNetwork m
+  => [(Word8, ByteString)]    -- Messages to broadcast (channel, data)
+  -> NetPeer                   -- Current peer state
+  -> m ([PeerEvent], NetPeer)  -- Events and updated state
+```
 
 ### Peer Events
 
@@ -108,192 +104,54 @@ let peer' = peerBroadcast 0 myData Nothing now peer  -- Nothing = no exclusions
 data PeerEvent
   = PeerConnected !PeerId !ConnectionDirection  -- Inbound or Outbound
   | PeerDisconnected !PeerId !DisconnectReason
-  | PeerMessage !PeerId !Word8 !BS.ByteString   -- channel, data
+  | PeerMessage !PeerId !Word8 !ByteString      -- channel, data
   | PeerMigrated !PeerId !PeerId                -- old address, new address
 ```
 
 ### Channel Reliability Modes
 
-Configure per-channel delivery guarantees:
-
 ```haskell
-import GBNet.Channel
+import GBNet
 
 -- Unreliable: fire-and-forget (position updates)
-let unreliable = defaultChannelConfig { ccReliabilityMode = Unreliable }
+let unreliable = defaultChannelConfig { ccDeliveryMode = Unreliable }
 
 -- Reliable ordered: guaranteed delivery, in-order (chat, RPC)
-let reliable = defaultChannelConfig { ccReliabilityMode = ReliableOrdered }
+let reliable = defaultChannelConfig { ccDeliveryMode = ReliableOrdered }
 
 -- Reliable sequenced: latest-only, drops stale (state sync)
-let sequenced = defaultChannelConfig { ccReliabilityMode = ReliableSequenced }
+let sequenced = defaultChannelConfig { ccDeliveryMode = ReliableSequenced }
 ```
 
 ### Configuration
 
 ```haskell
-import GBNet.Config
-
 let config = defaultNetworkConfig
       { ncMaxClients = 32
       , ncConnectionTimeoutMs = 10000.0
       , ncKeepaliveIntervalMs = 1000.0
       , ncMtu = 1200
       , ncEnableConnectionMigration = True
+      , ncChannelConfigs = [unreliableChannel, reliableChannel]
       }
-
--- Validate before use
-case validateConfig config of
-  Left err -> handleConfigError err
-  Right () -> proceed
-```
-
-### Connection Migration
-
-When a peer's IP address changes (mobile roaming, NAT rebind), gbnet-hs automatically migrates the connection:
-
-```haskell
--- Enable in config
-let config = defaultNetworkConfig { ncEnableConnectionMigration = True }
-
--- Handle migration event
-case event of
-  PeerMigrated oldPid newPid ->
-    -- Update your peer ID mappings
-    updatePlayerAddress playerId newPid
-```
-
----
-
-## Replication Helpers
-
-### Delta Compression
-
-Only send changed fields to save bandwidth:
-
-```haskell
-import GBNet.Delta
-
--- Implement NetworkDelta for your state type
-instance NetworkDelta PlayerState where
-  type Delta PlayerState = PlayerDelta
-  diff new old = PlayerDelta
-    { dPos = if pos new /= pos old then Just (pos new) else Nothing
-    , dHealth = if health new /= health old then Just (health new) else Nothing
-    }
-  apply state delta = state
-    { pos = fromMaybe (pos state) (dPos delta)
-    , health = fromMaybe (health state) (dHealth delta)
-    }
-
--- Sender: encode against acknowledged baseline
-let (encoded, tracker') = deltaEncode seqNum currentState tracker
-
--- Receiver: decode using baseline manager
-case deltaDecode encoded baselines of
-  Left err -> handleError err
-  Right state -> use state
-```
-
-### Interest Management
-
-Filter entities by area-of-interest:
-
-```haskell
-import GBNet.Interest
-
--- Radius-based: entities within 100 units
-let interest = newRadiusInterest 100.0
-
-if relevant interest entityPos observerPos
-  then sendEntity entity
-  else skip  -- too far away
-
--- Priority modifier: closer = higher priority
-let modifier = priorityMod interest entityPos observerPos
-```
-
-### Priority Accumulator
-
-Fair bandwidth allocation across entities:
-
-```haskell
-import GBNet.Priority
-
-let acc = newPriorityAccumulator
-        & register playerId 10.0   -- high priority
-        & register npcId 2.0       -- low priority
-
--- Each tick: accumulate based on elapsed time
-let acc' = accumulate 0.016 acc
-
--- Drain entities that fit in budget (1200 bytes)
-let (selected, acc'') = drainTop 1200 entitySize acc'
--- selected = entities to replicate this tick
-```
-
-### Snapshot Interpolation
-
-Smooth client-side rendering:
-
-```haskell
-import GBNet.Interpolation
-
--- Push server snapshots as they arrive
-let buffer' = pushSnapshot serverTime state buffer
-
--- Sample interpolated state at render time
-case sampleSnapshot renderTime buffer' of
-  Nothing -> waitForMoreSnapshots
-  Just interpolated -> render interpolated
 ```
 
 ---
 
 ## Serialization
 
-### Writing & Reading Bits
+### Bit-Level Encoding
 
 ```haskell
-import GBNet.Serialize.BitBuffer
+import GBNet
 
 -- Write 28 bits: 1-bit flag, 7-bit health, two 10-bit coords
-let buf = writeBits 512 10
-        $ writeBits 768 10
-        $ writeBits 100 7
-        $ writeBits 1   1
+let buf = bitSerialize (1 :: Word8)     -- 1 bit (flag)
+        $ bitSerialize (100 :: Word8)   -- 8 bits
+        $ bitSerialize (512 :: Word16)  -- 16 bits
         $ empty
 
-bitPosition buf  -- 28 (3.5 bytes on wire)
-```
-
-### Typeclass Serialization
-
-```haskell
-import GBNet.Serialize.BitBuffer
-import GBNet.Serialize.Class
-
--- Serialize multiple typed values
-let buf = bitSerialize (99 :: Word8)
-        $ bitSerialize (5000 :: Word16)
-        $ bitSerialize True
-        $ empty
-```
-
-### Monadic Deserialization
-
-```haskell
-import GBNet.Serialize.Reader
-
-let reader = do
-      flag   <- deserializeM :: BitReader Bool
-      health <- deserializeM :: BitReader Word16
-      id_    <- deserializeM :: BitReader Word8
-      pure (flag, health, id_)
-
-case runBitReader reader buf of
-  Left err -> handleError err
-  Right (result, buf') -> use result
+let bytes = toBytes buf  -- Compact wire format
 ```
 
 ### Template Haskell Derive
@@ -310,13 +168,8 @@ data PlayerState = PlayerState
 
 deriveNetworkSerialize ''PlayerState
 
-data GameEvent
-  = PlayerJoin Word8
-  | PlayerLeave Word8
-  | ChatMessage Word8 Word16
-  deriving (Eq, Show)
-
-deriveNetworkSerialize ''GameEvent
+-- Now PlayerState has BitSerialize/BitDeserialize instances
+let encoded = toBytes (bitSerialize myPlayer empty)
 ```
 
 ### Custom Bit Widths
@@ -325,68 +178,167 @@ deriveNetworkSerialize ''GameEvent
 {-# LANGUAGE DataKinds #-}
 import GBNet.Serialize.Class (BitWidth(..))
 
--- Use exactly 7 bits for health, 4 bits for direction
 data CompactPlayer = CompactPlayer
-  { health    :: BitWidth 7 Word8
-  , direction :: BitWidth 4 Word8
-  } deriving (Eq, Show)
-
-deriveNetworkSerialize ''CompactPlayer
-
+  { health    :: BitWidth 7 Word8   -- 7 bits instead of 8
+  , direction :: BitWidth 4 Word8   -- 4 bits instead of 8
+  }
 -- Only 11 bits on the wire instead of 16
-let player = CompactPlayer (BitWidth 100) (BitWidth 12)
-let buf = bitSerialize player empty
-bitPosition buf  -- 11
 ```
 
-### Primitives Reference
+---
 
-| Type | Bits | Example |
-|------|------|---------|
-| `Bool` | 1 | `bitSerialize True` |
-| `Word8` | 8 | `bitSerialize (42 :: Word8)` |
-| `Word16` | 16 | `bitSerialize (1234 :: Word16)` |
-| `Word32` | 32 | `bitSerialize (n :: Word32)` |
-| `Word64` | 64 | `bitSerialize (n :: Word64)` |
-| `Int8`-`Int64` | 8-64 | Signed integers |
-| `Float` | 32 | `bitSerialize (3.14 :: Float)` |
-| `Double` | 64 | `bitSerialize (n :: Double)` |
-| `Maybe a` | 1 + payload | `bitSerialize (Just 42)` |
-| `[a]` | 16 + elements | Max 65535 elements |
-| `Text` | 16 + UTF-8 | Full Unicode support |
-| `BitWidth n a` | n | Custom bit width |
+## Testing
+
+### Pure Deterministic Testing with TestNet
+
+The `MonadNetwork` typeclass allows swapping real sockets for a pure test implementation:
+
+```haskell
+import GBNet
+import GBNet.TestNet
+
+-- Run peer logic purely — no actual network IO
+testHandshake :: ((), TestNetState)
+testHandshake = runTestNet action (initialTestNetState myAddr)
+  where
+    action = do
+      -- Simulate sending
+      netSend remoteAddr someData
+      -- Advance simulated time
+      advanceTime 100
+      -- Check what would be received
+      result <- netRecv
+      pure ()
+```
+
+### Multi-Peer World Simulation
+
+```haskell
+import GBNet.TestNet
+
+-- Create a world with multiple peers
+let world = newTestWorld
+
+-- Run actions for each peer
+let (result1, world') = runPeerInWorld addr1 action1 world
+let (result2, world'') = runPeerInWorld addr2 action2 world'
+
+-- Deliver packets between peers
+let world''' = worldAdvanceTime 100 world''  -- Advances time and delivers
+```
+
+### Simulating Network Conditions
+
+```haskell
+-- Add 50ms latency
+simulateLatency 50
+
+-- 10% packet loss
+simulateLoss 0.1
+```
 
 ---
 
 ## Architecture
 
 ```
-gbnet-hs/
-├── src/GBNet/
-│   ├── Peer.hs               # Unified networking API
-│   ├── Connection.hs         # Connection state machine
-│   ├── Packet.hs             # Wire protocol (68-bit header)
-│   ├── Reliability.hs        # RTT, ACKs, retransmit
-│   ├── Channel.hs            # Delivery modes
-│   ├── Fragment.hs           # Large message fragmentation
-│   ├── Congestion.hs         # Congestion control
-│   ├── Config.hs             # Configuration & validation
-│   ├── Security.hs           # CRC32, rate limiting
-│   ├── Simulator.hs          # Network condition simulation
-│   ├── Socket.hs             # UDP socket wrapper
-│   ├── Stats.hs              # Network statistics
-│   ├── Util.hs               # Sequence utilities
-│   ├── Delta.hs              # Delta compression for state sync
-│   ├── Interest.hs           # Area-of-interest filtering
-│   ├── Priority.hs           # Bandwidth-fair entity selection
-│   ├── Interpolation.hs      # Client-side snapshot smoothing
-│   └── Serialize/
-│       ├── BitBuffer.hs      # Bit-level read/write
-│       ├── Class.hs          # BitSerialize typeclass
-│       ├── Reader.hs         # BitReader monad
-│       └── TH.hs             # Template Haskell derive
-├── test/Main.hs              # 126+ round-trip tests
-└── gbnet-hs.cabal
+┌─────────────────────────────────────────┐
+│           User Application              │
+├─────────────────────────────────────────┤
+│  GBNet (top-level re-exports)           │
+│  import GBNet -- gets everything        │
+├─────────────────────────────────────────┤
+│  GBNet.Peer                             │
+│  peerTick, peerConnect, PeerEvent       │
+├─────────────────────────────────────────┤
+│  GBNet.Net (NetT transformer)           │
+│  Carries socket state for IO            │
+├──────────────┬──────────────────────────┤
+│  NetT IO     │  TestNet                 │
+│  (real UDP)  │  (pure, deterministic)   │
+├──────────────┴──────────────────────────┤
+│  GBNet.Class                            │
+│  MonadTime, MonadNetwork typeclasses    │
+└─────────────────────────────────────────┘
+```
+
+### Module Overview
+
+| Module | Purpose |
+|--------|---------|
+| `GBNet` | Top-level facade — import this for convenience |
+| `GBNet.Class` | `MonadTime`, `MonadNetwork` typeclasses |
+| `GBNet.Net` | `NetT` monad transformer, `MonadNetwork (NetT IO)` |
+| `GBNet.Net.IO` | `initNetState` — create real UDP socket |
+| `GBNet.Peer` | `NetPeer`, `peerTick`, connection management |
+| `GBNet.TestNet` | Pure test network, `TestWorld` for multi-peer |
+| `GBNet.Serialize.*` | Bit-level serialization, TH derivation |
+
+### Explicit Imports (for larger codebases)
+
+```haskell
+-- Instead of `import GBNet`, be explicit:
+import GBNet.Class (MonadNetwork, MonadTime, MonoTime)
+import GBNet.Net (NetT, runNetT, evalNetT)
+import GBNet.Net.IO (initNetState)
+import GBNet.Peer (NetPeer, peerTick, PeerEvent(..))
+import GBNet.Config (NetworkConfig(..), defaultNetworkConfig)
+```
+
+---
+
+## Replication Helpers
+
+### Delta Compression
+
+Only send changed fields:
+
+```haskell
+import GBNet.Delta
+
+instance NetworkDelta PlayerState where
+  type Delta PlayerState = PlayerDelta
+  diff new old = PlayerDelta { ... }
+  apply state delta = state { ... }
+```
+
+### Interest Management
+
+Filter by area-of-interest:
+
+```haskell
+import GBNet.Interest
+
+let interest = newRadiusInterest 100.0
+if relevant interest entityPos observerPos
+  then sendEntity entity
+  else skip
+```
+
+### Priority Accumulator
+
+Fair bandwidth allocation:
+
+```haskell
+import GBNet.Priority
+
+let acc = newPriorityAccumulator
+        & register playerId 10.0
+        & register npcId 2.0
+let (selected, acc') = drainTop 1200 entitySize acc
+```
+
+### Snapshot Interpolation
+
+Smooth client-side rendering:
+
+```haskell
+import GBNet.Interpolation
+
+let buffer' = pushSnapshot serverTime state buffer
+case sampleSnapshot renderTime buffer' of
+  Nothing -> waitForMoreSnapshots
+  Just interpolated -> render interpolated
 ```
 
 ---
@@ -399,7 +351,6 @@ Requires [GHCup](https://www.haskell.org/ghcup/) with GHC >= 9.6.
 cabal build                              # Build library
 cabal test                               # Run all tests
 cabal build --ghc-options="-Werror"      # Warnings as errors
-hlint src/                               # Lint check
 cabal haddock                            # Generate docs
 ```
 
@@ -407,12 +358,12 @@ cabal haddock                            # Generate docs
 
 ## Performance
 
-The library is optimized for game networking workloads:
+Optimized for game networking:
 
 - **Strict fields** with bang patterns throughout
-- **GHC optimization flags**: `-O2 -fspecialise-aggressively -fexpose-all-unfoldings`
-- **INLINE pragmas** on hot paths (serialization, packet handling)
-- **Byte-aligned fast paths** when bit position is aligned
+- **GHC flags**: `-O2 -fspecialise-aggressively -fexpose-all-unfoldings`
+- **INLINE pragmas** on hot paths
+- **Byte-aligned fast paths** when bit position allows
 
 ---
 
@@ -424,32 +375,33 @@ The library is optimized for game networking workloads:
 - [x] Custom bit widths via `BitWidth n a`
 - [x] Reliable/unreliable/sequenced delivery modes
 - [x] RTT estimation and adaptive retransmit
-- [x] Large message fragmentation and reassembly
-- [x] Connection migration (IP address changes)
+- [x] Large message fragmentation
+- [x] Connection migration
 - [x] CRC32 packet validation
-- [x] Rate limiting for DoS protection
-- [x] Network condition simulation (loss, latency, jitter)
-- [x] Congestion control (binary and window-based)
-- [x] Full Unicode text support via `Text`
+- [x] Rate limiting
 
-### High-Level Replication
-- [x] Delta compression (only send changed fields)
-- [x] Interest management (radius/grid area-of-interest)
-- [x] Priority accumulator (fair bandwidth allocation)
-- [x] Snapshot interpolation (smooth client-side rendering)
+### Effect Abstraction
+- [x] `MonadNetwork` typeclass
+- [x] `NetT` monad transformer for IO
+- [x] `TestNet` pure deterministic network
+- [x] `TestWorld` multi-peer simulation
+
+### Replication Helpers
+- [x] Delta compression
+- [x] Interest management
+- [x] Priority accumulator
+- [x] Snapshot interpolation
 
 ---
 
 ## Contributing
 
-Contributions welcome. Run before submitting PRs:
-
 ```bash
-cabal test && cabal build --ghc-options="-Werror" && hlint src/
+cabal test && cabal build --ghc-options="-Werror"
 ```
 
 ---
 
 <p align="center">
-  <sub>MIT License · Built by <a href="https://github.com/gondola-bros-entertainment">Gondola Bros Entertainment</a></sub>
+  <sub>MIT License · <a href="https://github.com/gondola-bros-entertainment">Gondola Bros Entertainment</a></sub>
 </p>
