@@ -1,9 +1,10 @@
 -- | Shared sequence number utilities for Word16 wraparound arithmetic.
 module GBNet.Util
-  ( sequenceHalfRange
-  , sequenceGreaterThan
-  , sequenceDiff
-  ) where
+  ( sequenceHalfRange,
+    sequenceGreaterThan,
+    sequenceDiff,
+  )
+where
 
 import Data.Int (Int32)
 import Data.Word (Word16)
@@ -26,8 +27,9 @@ sequenceDiff s1 s2 =
   let half = fromIntegral sequenceHalfRange :: Int32
       full = half * 2
       diff = fromIntegral s1 - fromIntegral s2 :: Int32
-  in if diff > half
-       then diff - full
-       else if diff < negate half
-              then diff + full
-              else diff
+   in if diff > half
+        then diff - full
+        else
+          if diff < negate half
+            then diff + full
+            else diff

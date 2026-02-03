@@ -1,24 +1,25 @@
 {-# LANGUAGE TemplateHaskell #-}
+
 -- |
 -- Module      : GBNet.Serialize.TH
 -- Description : Template Haskell derive for BitSerialize/BitDeserialize
 --
 -- Provides 'deriveNetworkSerialize' to auto-generate serialization instances.
 -- Supports records, simple enums, and enums with payloads.
-
 module GBNet.Serialize.TH
-  ( deriveNetworkSerialize
-  ) where
+  ( deriveNetworkSerialize,
+  )
+where
 
+import GBNet.Serialize.BitBuffer (ReadResult (..), readBits, writeBits)
+import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..), BitWidth (..))
 import Language.Haskell.TH
-import GBNet.Serialize.BitBuffer (ReadResult(..), writeBits, readBits)
-import GBNet.Serialize.Class (BitSerialize(..), BitDeserialize(..), BitWidth(..))
 
 -- | Number of bits needed to represent n distinct values.
 ceilLog2 :: Int -> Int
 ceilLog2 n
-  | n <= 1    = 0
-  | n <= 2    = 1
+  | n <= 1 = 0
+  | n <= 2 = 1
   | otherwise = 1 + ceilLog2 ((n + 1) `div` 2)
 
 -- | Derive BitSerialize and BitDeserialize instances for a type.
@@ -27,7 +28,7 @@ deriveNetworkSerialize typeName = do
   info <- reify typeName
   case info of
     TyConI (DataD _ _ _ _ cons _) -> do
-      serInst   <- mkSerializeInstance typeName cons
+      serInst <- mkSerializeInstance typeName cons
       deserInst <- mkDeserializeInstance typeName cons
       return [serInst, deserInst]
     _ -> fail $ "deriveNetworkSerialize: " ++ show typeName ++ " is not a data type"
@@ -35,10 +36,13 @@ deriveNetworkSerialize typeName = do
 mkSerializeInstance :: Name -> [Con] -> Q Dec
 mkSerializeInstance typeName cons = do
   let tagBits = ceilLog2 (length cons)
-  clauses <- mapM (mkSerClause tagBits (length cons)) (zip [0..] cons)
-  return $ InstanceD Nothing []
-    (AppT (ConT ''BitSerialize) (ConT typeName))
-    [FunD 'bitSerialize clauses]
+  clauses <- mapM (mkSerClause tagBits (length cons)) (zip [0 ..] cons)
+  return $
+    InstanceD
+      Nothing
+      []
+      (AppT (ConT ''BitSerialize) (ConT typeName))
+      [FunD 'bitSerialize clauses]
 
 mkSerClause :: Int -> Int -> (Int, Con) -> Q Clause
 mkSerClause tagBits numCons (tagVal, con) = do
@@ -46,26 +50,32 @@ mkSerClause tagBits numCons (tagVal, con) = do
       fieldCount = length fieldTypes
   varNames <- mapM (\i -> newName ("f" ++ show i)) [0 .. fieldCount - 1]
   let pat = ConP conName [] (map VarP varNames)
-      tagExpr = if numCons > 1
-                then Just [| writeBits $(litE (integerL (fromIntegral tagVal)))
-                                       $(litE (integerL (fromIntegral tagBits))) |]
-                else Nothing
+      tagExpr =
+        if numCons > 1
+          then
+            Just
+              [|
+                writeBits
+                  $(litE (integerL (fromIntegral tagVal)))
+                  $(litE (integerL (fromIntegral tagBits)))
+                |]
+          else Nothing
       fieldExprs = zipWith mkFieldSerExpr varNames fieldTypes
       allExprs = case tagExpr of
-                   Just t  -> t : fieldExprs
-                   Nothing -> fieldExprs
+        Just t -> t : fieldExprs
+        Nothing -> fieldExprs
   body <- case allExprs of
-    []  -> [| id |]
+    [] -> [|id|]
     [e] -> e
-    es  -> foldr1 (\later earlier -> [| $later . $earlier |]) (reverse es)
+    es -> foldr1 (\later earlier -> [|$later . $earlier|]) (reverse es)
   return $ Clause [pat] (NormalB body) []
 
 mkFieldSerExpr :: Name -> Type -> Q Exp
 mkFieldSerExpr v ty
   | Just n <- extractBitWidth ty =
-      [| writeBits (fromIntegral (unBitWidth $(varE v))) $(litE (integerL (fromIntegral n))) |]
+      [|writeBits (fromIntegral (unBitWidth $(varE v))) $(litE (integerL (fromIntegral n)))|]
   | otherwise =
-      [| bitSerialize $(varE v) |]
+      [|bitSerialize $(varE v)|]
 
 extractBitWidth :: Type -> Maybe Integer
 extractBitWidth (AppT (AppT (ConT name) (LitT (NumTyLit n))) _)
@@ -76,27 +86,32 @@ mkDeserializeInstance :: Name -> [Con] -> Q Dec
 mkDeserializeInstance typeName cons = do
   let tagBits = ceilLog2 (length cons)
   deserClause <- mkDeserClause tagBits cons
-  return $ InstanceD Nothing []
-    (AppT (ConT ''BitDeserialize) (ConT typeName))
-    [FunD 'bitDeserialize [deserClause]]
+  return $
+    InstanceD
+      Nothing
+      []
+      (AppT (ConT ''BitDeserialize) (ConT typeName))
+      [FunD 'bitDeserialize [deserClause]]
 
 mkDeserClause :: Int -> [Con] -> Q Clause
 mkDeserClause tagBits cons = do
   bufName <- newName "buf"
-  body <- if length cons == 1
-    then do
-      let (conName, fieldTypes) = conFieldTypes (head cons)
-      mkReadFields conName fieldTypes (varE bufName)
-    else do
-      tagName <- newName "tagVal"
-      buf'Name <- newName "buf'"
-      matches <- mapM (mkConMatch buf'Name) (zip [0..] cons)
-      let wildMatch = Match WildP (NormalB (AppE (ConE 'Left) (LitE (StringL "bitDeserialize: invalid tag")))) []
-      [| case readBits $(litE (integerL (fromIntegral tagBits))) $(varE bufName) of
-           Left err -> Left err
-           Right (ReadResult $(varP tagName) $(varP buf'Name)) ->
-             $(return $ CaseE (VarE tagName) (matches ++ [wildMatch]))
-       |]
+  body <-
+    if length cons == 1
+      then do
+        let (conName, fieldTypes) = conFieldTypes (head cons)
+        mkReadFields conName fieldTypes (varE bufName)
+      else do
+        tagName <- newName "tagVal"
+        buf'Name <- newName "buf'"
+        matches <- mapM (mkConMatch buf'Name) (zip [0 ..] cons)
+        let wildMatch = Match WildP (NormalB (AppE (ConE 'Left) (LitE (StringL "bitDeserialize: invalid tag")))) []
+        [|
+          case readBits $(litE (integerL (fromIntegral tagBits))) $(varE bufName) of
+            Left err -> Left err
+            Right (ReadResult $(varP tagName) $(varP buf'Name)) ->
+              $(return $ CaseE (VarE tagName) (matches ++ [wildMatch]))
+          |]
   return $ Clause [VarP bufName] (NormalB body) []
 
 mkConMatch :: Name -> (Int, Con) -> Q Match
@@ -107,7 +122,7 @@ mkConMatch bufName (tagVal, con) = do
 
 mkReadFields :: Name -> [Type] -> Q Exp -> Q Exp
 mkReadFields conName [] bufExpr =
-  [| Right (ReadResult $(conE conName) $bufExpr) |]
+  [|Right (ReadResult $(conE conName) $bufExpr)|]
 mkReadFields conName fieldTypes bufExpr =
   mkReadFieldsLoop conName fieldTypes 0 [] bufExpr
 
@@ -115,31 +130,33 @@ mkReadFieldsLoop :: Name -> [Type] -> Int -> [Name] -> Q Exp -> Q Exp
 mkReadFieldsLoop conName types current vars bufExpr
   | current == length types = do
       let conApp = foldl (\e v -> AppE e (VarE v)) (ConE conName) vars
-      [| Right (ReadResult $(return conApp) $bufExpr) |]
+      [|Right (ReadResult $(return conApp) $bufExpr)|]
   | otherwise = do
       let ty = types !! current
-      vName  <- newName ("v" ++ show current)
-      bName  <- newName ("b" ++ show current)
-      rest   <- mkReadFieldsLoop conName types (current + 1) (vars ++ [vName]) (varE bName)
+      vName <- newName ("v" ++ show current)
+      bName <- newName ("b" ++ show current)
+      rest <- mkReadFieldsLoop conName types (current + 1) (vars ++ [vName]) (varE bName)
       case extractBitWidth ty of
         Just n ->
-          [| case readBits $(litE (integerL (fromIntegral n))) $bufExpr of
-               Left err -> Left err
-               Right (ReadResult val $(varP bName)) ->
-                 let $(varP vName) = BitWidth (fromIntegral val)
+          [|
+            case readBits $(litE (integerL (fromIntegral n))) $bufExpr of
+              Left err -> Left err
+              Right (ReadResult val $(varP bName)) ->
+                let $(varP vName) = BitWidth (fromIntegral val)
                  in $(return rest)
-           |]
+            |]
         Nothing ->
-          [| case bitDeserialize $bufExpr of
-               Left err -> Left err
-               Right (ReadResult $(varP vName) $(varP bName)) -> $(return rest)
-           |]
+          [|
+            case bitDeserialize $bufExpr of
+              Left err -> Left err
+              Right (ReadResult $(varP vName) $(varP bName)) -> $(return rest)
+            |]
 
 conFieldTypes :: Con -> (Name, [Type])
-conFieldTypes (NormalC name fields)      = (name, map snd fields)
-conFieldTypes (RecC name fields)         = (name, map (\(_, _, t) -> t) fields)
+conFieldTypes (NormalC name fields) = (name, map snd fields)
+conFieldTypes (RecC name fields) = (name, map (\(_, _, t) -> t) fields)
 conFieldTypes (InfixC (_, t1) name (_, t2)) = (name, [t1, t2])
-conFieldTypes (ForallC _ _ con)          = conFieldTypes con
-conFieldTypes (GadtC [name] fields _)    = (name, map snd fields)
+conFieldTypes (ForallC _ _ con) = conFieldTypes con
+conFieldTypes (GadtC [name] fields _) = (name, map snd fields)
 conFieldTypes (RecGadtC [name] fields _) = (name, map (\(_, _, t) -> t) fields)
 conFieldTypes _ = error "deriveNetworkSerialize: unsupported constructor form"

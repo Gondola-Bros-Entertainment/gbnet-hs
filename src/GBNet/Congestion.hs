@@ -1,0 +1,415 @@
+-- |
+-- Module      : GBNet.Congestion
+-- Description : Binary congestion control and bandwidth tracking
+--
+-- Gaffer-style Good/Bad mode congestion control, byte-budget gating,
+-- adaptive recovery timer, message batching, and bandwidth tracking.
+module GBNet.Congestion
+  ( -- * Constants
+    congestionRateReduction,
+    minSendRate,
+    batchHeaderSize,
+    batchLengthSize,
+    maxBatchMessages,
+    initialCwndPackets,
+    minCwndBytes,
+    minRecoverySecs,
+    maxRecoverySecs,
+    recoveryHalveIntervalSecs,
+    quickDropThresholdSecs,
+
+    -- * Congestion mode
+    CongestionMode (..),
+    CongestionPhase (..),
+
+    -- * Binary congestion controller
+    CongestionController (..),
+    newCongestionController,
+    ccRefillBudget,
+    ccDeductBudget,
+    ccUpdate,
+    ccCanSend,
+
+    -- * Window-based congestion controller
+    CongestionWindow (..),
+    newCongestionWindow,
+    cwOnAck,
+    cwOnLoss,
+    cwExitRecovery,
+    cwOnSend,
+    cwCanSend,
+    cwUpdatePacing,
+    cwCanSendPaced,
+
+    -- * Bandwidth tracking
+    BandwidthTracker (..),
+    newBandwidthTracker,
+    btRecord,
+    btBytesPerSecond,
+
+    -- * Message batching
+    batchMessages,
+    unbatchMessages,
+  )
+where
+
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Builder as BSB
+import qualified Data.ByteString.Lazy as BSL
+import Data.Sequence (Seq)
+import qualified Data.Sequence as Seq
+import Data.Word (Word64, Word8)
+import GBNet.Reliability (MonoTime, elapsedMs)
+
+-- Constants
+
+congestionRateReduction :: Float
+congestionRateReduction = 0.5
+
+minSendRate :: Float
+minSendRate = 1.0
+
+batchHeaderSize :: Int
+batchHeaderSize = 1
+
+batchLengthSize :: Int
+batchLengthSize = 2
+
+maxBatchMessages :: Word8
+maxBatchMessages = 255
+
+initialCwndPackets :: Int
+initialCwndPackets = 10
+
+minCwndBytes :: Int
+minCwndBytes = 1200
+
+minRecoverySecs :: Double
+minRecoverySecs = 1.0
+
+maxRecoverySecs :: Double
+maxRecoverySecs = 60.0
+
+recoveryHalveIntervalSecs :: Double
+recoveryHalveIntervalSecs = 10.0
+
+quickDropThresholdSecs :: Double
+quickDropThresholdSecs = 10.0
+
+-- | Binary congestion state.
+data CongestionMode
+  = CongestionGood
+  | CongestionBad
+  deriving (Eq, Show)
+
+-- | Phase for window-based congestion control.
+data CongestionPhase
+  = SlowStart
+  | Avoidance
+  | Recovery
+  deriving (Eq, Show)
+
+-- | Binary congestion controller (Gaffer-style).
+data CongestionController = CongestionController
+  { ccMode :: !CongestionMode,
+    ccGoodConditionsStart :: !(Maybe MonoTime),
+    ccLossThreshold :: !Float,
+    ccRttThresholdMs :: !Float,
+    ccBaseSendRate :: !Float,
+    ccCurrentSendRate :: !Float,
+    ccBudgetBytesRemaining :: !Int,
+    ccBytesPerTick :: !Int,
+    ccAdaptiveRecoverySecs :: !Double,
+    ccLastGoodEntry :: !(Maybe MonoTime),
+    ccLastBadEntry :: !(Maybe MonoTime)
+  }
+  deriving (Show)
+
+-- | Create a new congestion controller.
+newCongestionController :: Float -> Float -> Float -> Double -> CongestionController
+newCongestionController baseSendRate lossThreshold rttThresholdMs recoveryTimeMs =
+  CongestionController
+    { ccMode = CongestionGood,
+      ccGoodConditionsStart = Nothing,
+      ccLossThreshold = lossThreshold,
+      ccRttThresholdMs = rttThresholdMs,
+      ccBaseSendRate = baseSendRate,
+      ccCurrentSendRate = baseSendRate,
+      ccBudgetBytesRemaining = 0,
+      ccBytesPerTick = 0,
+      ccAdaptiveRecoverySecs = recoveryTimeMs / 1000.0,
+      ccLastGoodEntry = Nothing,
+      ccLastBadEntry = Nothing
+    }
+
+-- | Refill the byte budget at the start of each tick.
+ccRefillBudget :: Int -> CongestionController -> CongestionController
+ccRefillBudget mtu cc =
+  let bytesPerTick = floor (ccCurrentSendRate cc * fromIntegral mtu)
+   in cc
+        { ccBytesPerTick = bytesPerTick,
+          ccBudgetBytesRemaining = bytesPerTick
+        }
+
+-- | Deduct bytes from the send budget.
+ccDeductBudget :: Int -> CongestionController -> CongestionController
+ccDeductBudget bytes cc =
+  cc {ccBudgetBytesRemaining = ccBudgetBytesRemaining cc - bytes}
+
+-- | Update congestion state based on current network conditions.
+ccUpdate :: Float -> Float -> MonoTime -> CongestionController -> CongestionController
+ccUpdate packetLoss rttMs now cc =
+  let isBad = packetLoss > ccLossThreshold cc || rttMs > ccRttThresholdMs cc
+   in case ccMode cc of
+        CongestionGood
+          | isBad ->
+              -- Quick re-entry to Bad doubles recovery timer
+              let recoveryMult = case ccLastGoodEntry cc of
+                    Just goodEntry ->
+                      if elapsedMs goodEntry now < quickDropThresholdSecs * 1000.0
+                        then 2.0
+                        else 1.0
+                    Nothing -> 1.0
+                  newRecovery = min maxRecoverySecs (ccAdaptiveRecoverySecs cc * recoveryMult)
+                  newRate = max minSendRate (ccBaseSendRate cc * congestionRateReduction)
+               in cc
+                    { ccMode = CongestionBad,
+                      ccLastBadEntry = Just now,
+                      ccCurrentSendRate = newRate,
+                      ccGoodConditionsStart = Nothing,
+                      ccAdaptiveRecoverySecs = newRecovery
+                    }
+          | otherwise ->
+              -- Halve recovery time after sustained good conditions
+              case ccLastGoodEntry cc of
+                Just goodEntry ->
+                  let elapsed = elapsedMs goodEntry now / 1000.0
+                      intervals = floor (elapsed / recoveryHalveIntervalSecs) :: Int
+                   in if intervals > 0
+                        then
+                          let newRecovery =
+                                max
+                                  minRecoverySecs
+                                  (ccAdaptiveRecoverySecs cc / (2.0 ^ intervals))
+                           in cc
+                                { ccAdaptiveRecoverySecs = newRecovery,
+                                  ccLastGoodEntry = Just now
+                                }
+                        else cc
+                Nothing -> cc
+        CongestionBad
+          | not isBad ->
+              case ccGoodConditionsStart cc of
+                Nothing ->
+                  cc {ccGoodConditionsStart = Just now}
+                Just start ->
+                  let requiredMs = ccAdaptiveRecoverySecs cc * 1000.0
+                   in if elapsedMs start now >= requiredMs
+                        then
+                          cc
+                            { ccMode = CongestionGood,
+                              ccLastGoodEntry = Just now,
+                              ccCurrentSendRate = ccBaseSendRate cc,
+                              ccGoodConditionsStart = Nothing
+                            }
+                        else cc
+          | otherwise ->
+              cc {ccGoodConditionsStart = Nothing}
+
+-- | Check if a packet can be sent given packets sent and size.
+ccCanSend :: Int -> Int -> CongestionController -> Bool
+ccCanSend packetsSentThisCycle packetBytes cc =
+  fromIntegral packetsSentThisCycle < ccCurrentSendRate cc
+    && ccBudgetBytesRemaining cc >= packetBytes
+
+-- | Window-based congestion controller (TCP-like).
+data CongestionWindow = CongestionWindow
+  { cwPhase :: !CongestionPhase,
+    cwCwnd :: !Double,
+    cwSsthresh :: !Double,
+    cwBytesInFlight :: !Word64,
+    cwMtu :: !Int,
+    cwLastSendTime :: !(Maybe MonoTime),
+    cwMinInterPacketDelay :: !Double -- milliseconds
+  }
+  deriving (Show)
+
+-- | Create a new congestion window.
+newCongestionWindow :: Int -> CongestionWindow
+newCongestionWindow mtu =
+  CongestionWindow
+    { cwPhase = SlowStart,
+      cwCwnd = fromIntegral (initialCwndPackets * mtu),
+      cwSsthresh = 1e308, -- effectively infinity
+      cwBytesInFlight = 0,
+      cwMtu = mtu,
+      cwLastSendTime = Nothing,
+      cwMinInterPacketDelay = 0.0
+    }
+
+-- | Called when bytes are acknowledged.
+cwOnAck :: Int -> CongestionWindow -> CongestionWindow
+cwOnAck bytes cw =
+  let cw' = cw {cwBytesInFlight = cwBytesInFlight cw - fromIntegral (min bytes (fromIntegral (cwBytesInFlight cw)))}
+   in case cwPhase cw' of
+        SlowStart ->
+          let newCwnd = cwCwnd cw' + fromIntegral bytes
+           in if newCwnd >= cwSsthresh cw'
+                then cw' {cwCwnd = newCwnd, cwPhase = Avoidance}
+                else cw' {cwCwnd = newCwnd}
+        Avoidance ->
+          -- Additive increase: cwnd += mtu * bytes / cwnd
+          let increase = fromIntegral (cwMtu cw') * fromIntegral bytes / cwCwnd cw'
+           in cw' {cwCwnd = cwCwnd cw' + increase}
+        Recovery ->
+          cw' -- Conservative in recovery
+
+-- | Called on packet loss detection.
+cwOnLoss :: CongestionWindow -> CongestionWindow
+cwOnLoss cw =
+  let newSsthresh = max (fromIntegral minCwndBytes) (cwCwnd cw / 2.0)
+   in cw
+        { cwSsthresh = newSsthresh,
+          cwCwnd = newSsthresh,
+          cwPhase = Recovery
+        }
+
+-- | Exit recovery and return to avoidance.
+cwExitRecovery :: CongestionWindow -> CongestionWindow
+cwExitRecovery cw
+  | cwPhase cw == Recovery = cw {cwPhase = Avoidance}
+  | otherwise = cw
+
+-- | Record bytes sent.
+cwOnSend :: Int -> MonoTime -> CongestionWindow -> CongestionWindow
+cwOnSend bytes now cw =
+  cw
+    { cwBytesInFlight = cwBytesInFlight cw + fromIntegral bytes,
+      cwLastSendTime = Just now
+    }
+
+-- | Check if a packet can be sent.
+cwCanSend :: Int -> CongestionWindow -> Bool
+cwCanSend packetBytes cw =
+  cwBytesInFlight cw + fromIntegral packetBytes <= floor (cwCwnd cw)
+
+-- | Update pacing delay from cwnd and RTT.
+cwUpdatePacing :: Double -> CongestionWindow -> CongestionWindow
+cwUpdatePacing rttMs cw
+  | cwCwnd cw > 0 && rttMs > 0 =
+      let packetsInWindow = cwCwnd cw / fromIntegral (cwMtu cw)
+          delay =
+            if packetsInWindow > 0
+              then rttMs / packetsInWindow
+              else 0.0
+       in cw {cwMinInterPacketDelay = delay}
+  | otherwise = cw
+
+-- | Check if enough time has elapsed for pacing.
+cwCanSendPaced :: MonoTime -> CongestionWindow -> Bool
+cwCanSendPaced now cw =
+  case cwLastSendTime cw of
+    Nothing -> True
+    Just lastSend -> elapsedMs lastSend now >= cwMinInterPacketDelay cw
+
+-- | Bandwidth tracker using a sliding window.
+data BandwidthTracker = BandwidthTracker
+  { btWindow :: !(Seq (MonoTime, Int)),
+    btWindowDurationMs :: !Double
+  }
+  deriving (Show)
+
+-- | Create a new bandwidth tracker.
+newBandwidthTracker :: Double -> BandwidthTracker
+newBandwidthTracker windowDurationMs =
+  BandwidthTracker
+    { btWindow = Seq.empty,
+      btWindowDurationMs = windowDurationMs
+    }
+
+-- | Record bytes at the given time.
+btRecord :: Int -> MonoTime -> BandwidthTracker -> BandwidthTracker
+btRecord bytes now bt =
+  let bt' = bt {btWindow = btWindow bt Seq.|> (now, bytes)}
+   in btCleanup now bt'
+
+-- | Get bytes per second.
+btBytesPerSecond :: BandwidthTracker -> Double
+btBytesPerSecond bt
+  | Seq.null (btWindow bt) = 0.0
+  | otherwise =
+      let totalBytes = sum $ fmap snd $ btWindow bt
+          elapsedSecs = btWindowDurationMs bt / 1000.0
+       in if elapsedSecs > 0
+            then fromIntegral totalBytes / elapsedSecs
+            else 0.0
+
+-- | Clean up old entries.
+btCleanup :: MonoTime -> BandwidthTracker -> BandwidthTracker
+btCleanup now bt =
+  let cutoffMs = btWindowDurationMs bt
+      isRecent (t, _) = elapsedMs t now < cutoffMs
+   in bt {btWindow = Seq.filter isRecent (btWindow bt)}
+
+-- | Pack multiple messages into batched packets.
+-- Wire format: [u8 count][u16 len][data]...
+batchMessages :: [BS.ByteString] -> Int -> [BS.ByteString]
+batchMessages messages maxSize = go messages [] [] batchHeaderSize 0
+  where
+    go [] currentBatch batches _ msgCount
+      | msgCount > 0 = batches ++ [finalizeBatch msgCount currentBatch]
+      | otherwise = batches
+    go (msg : rest) currentBatch batches currentSize msgCount =
+      let msgWireSize = batchLengthSize + BS.length msg
+       in if currentSize + msgWireSize > maxSize && msgCount > 0
+            then
+              go
+                (msg : rest)
+                []
+                (batches ++ [finalizeBatch msgCount currentBatch])
+                batchHeaderSize
+                0
+            else
+              if msgCount >= fromIntegral maxBatchMessages
+                then
+                  go
+                    (msg : rest)
+                    []
+                    (batches ++ [finalizeBatch msgCount currentBatch])
+                    batchHeaderSize
+                    0
+                else
+                  go
+                    rest
+                    (currentBatch ++ [msg])
+                    batches
+                    (currentSize + msgWireSize)
+                    (msgCount + 1)
+
+    finalizeBatch :: Int -> [BS.ByteString] -> BS.ByteString
+    finalizeBatch count msgs =
+      let countByte = BSB.word8 (fromIntegral count)
+          msgBuilders = map (\m -> BSB.word16BE (fromIntegral (BS.length m)) <> BSB.byteString m) msgs
+       in BSL.toStrict $ BSB.toLazyByteString $ countByte <> mconcat msgBuilders
+
+-- | Unbatch a batched packet into individual messages.
+unbatchMessages :: BS.ByteString -> Maybe [BS.ByteString]
+unbatchMessages dat
+  | BS.null dat = Nothing
+  | otherwise =
+      let msgCount = fromIntegral (BS.index dat 0) :: Int
+       in readMessages msgCount 1 []
+  where
+    readMessages 0 _ acc = Just (reverse acc)
+    readMessages n offset acc
+      | offset + 2 > BS.length dat = Nothing
+      | otherwise =
+          let len =
+                fromIntegral (BS.index dat offset) * 256
+                  + fromIntegral (BS.index dat (offset + 1))
+              msgStart = offset + 2
+           in if msgStart + len > BS.length dat
+                then Nothing
+                else
+                  let msg = BS.take len (BS.drop msgStart dat)
+                   in readMessages (n - 1) (msgStart + len) (msg : acc)

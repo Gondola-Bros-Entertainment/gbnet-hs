@@ -1,44 +1,52 @@
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
 -- |
 -- Module      : GBNet.Serialize.Class
 -- Description : Typeclasses for bitpacked serialization
 --
 -- Defines 'BitSerialize' and 'BitDeserialize' typeclasses with instances
 -- for all primitive types, collections, and custom bit widths.
-
 module GBNet.Serialize.Class
-  ( BitSerialize(..)
-  , BitDeserialize(..)
-    -- * Monadic deserialization
-  , deserializeM
-  , runDeserialize
-    -- * Custom bit widths
-  , BitWidth(..)
-    -- * Bit width constants
-  , word8BitWidth
-  , word16BitWidth
-  , word32BitWidth
-  , word64BitWidth
-  , packetTypeBitWidth
-    -- * Collection constants
-  , defaultMaxLength
-  , lengthPrefixBitWidth
-  ) where
+  ( BitSerialize (..),
+    BitDeserialize (..),
 
-import Data.Word (Word8, Word16, Word32, Word64)
-import Data.Int (Int8, Int16, Int32, Int64)
-import GHC.TypeLits (Nat, KnownNat, natVal)
-import Data.Proxy (Proxy(..))
+    -- * Monadic deserialization
+    deserializeM,
+    runDeserialize,
+
+    -- * Custom bit widths
+    BitWidth (..),
+
+    -- * Bit width constants
+    word8BitWidth,
+    word16BitWidth,
+    word32BitWidth,
+    word64BitWidth,
+    packetTypeBitWidth,
+
+    -- * Collection constants
+    defaultMaxLength,
+    lengthPrefixBitWidth,
+  )
+where
+
+import qualified Data.ByteString as BS
+import Data.Int (Int16, Int32, Int64, Int8)
+import Data.Proxy (Proxy (..))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.ByteString as BS
-import GHC.Float (castWord32ToFloat, castFloatToWord32,
-                  castWord64ToDouble, castDoubleToWord64)
-
+import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Serialize.BitBuffer
+import GHC.Float
+  ( castDoubleToWord64,
+    castFloatToWord32,
+    castWord32ToFloat,
+    castWord64ToDouble,
+  )
+import GHC.TypeLits (KnownNat, Nat, natVal)
 
 -- Bit width constants
 
@@ -70,14 +78,14 @@ class BitDeserialize a where
 deserializeM :: (BitDeserialize a) => BitReader a
 deserializeM = BitReader $ \buf ->
   case bitDeserialize buf of
-    Left err                    -> Left err
+    Left err -> Left err
     Right (ReadResult val buf') -> Right (val, buf')
 
 -- | Run BitReader and wrap result in ReadResult.
 runDeserialize :: BitReader a -> BitBuffer -> Either String (ReadResult a)
 runDeserialize reader buf =
   case runBitReader reader buf of
-    Left err        -> Left err
+    Left err -> Left err
     Right (val, buf') -> Right $ ReadResult val buf'
 
 -- Unsigned integers
@@ -174,7 +182,7 @@ lengthPrefixBitWidth = 16
 
 -- | 1-bit presence flag + payload.
 instance (BitSerialize a) => BitSerialize (Maybe a) where
-  bitSerialize Nothing  = writeBit False
+  bitSerialize Nothing = writeBit False
   bitSerialize (Just x) = bitSerialize x . writeBit True
 
 instance (BitDeserialize a) => BitDeserialize (Maybe a) where
@@ -191,7 +199,7 @@ instance (BitSerialize a) => BitSerialize [a] where
   bitSerialize xs buf =
     let len = min (length xs) defaultMaxLength
         buf' = writeBits (fromIntegral len) lengthPrefixBitWidth buf
-    in foldl (flip bitSerialize) buf' xs
+     in foldl (flip bitSerialize) buf' xs
 
 instance (BitDeserialize a) => BitDeserialize [a] where
   bitDeserialize = runDeserialize $ do
@@ -212,9 +220,9 @@ instance (BitDeserialize a) => BitDeserialize [a] where
 instance BitSerialize T.Text where
   bitSerialize t buf =
     let bytes = TE.encodeUtf8 t
-        len   = min (BS.length bytes) defaultMaxLength
-        buf'  = writeBits (fromIntegral len) lengthPrefixBitWidth buf
-    in BS.foldl' (flip bitSerialize) buf' (BS.take len bytes)
+        len = min (BS.length bytes) defaultMaxLength
+        buf' = writeBits (fromIntegral len) lengthPrefixBitWidth buf
+     in BS.foldl' (flip bitSerialize) buf' (BS.take len bytes)
 
 instance BitDeserialize T.Text where
   bitDeserialize = runDeserialize $ do
@@ -226,7 +234,7 @@ instance BitDeserialize T.Text where
         bytes <- readNBytes len []
         case TE.decodeUtf8' (BS.pack (reverse bytes)) of
           Left err -> BitReader $ \_ -> Left $ "Text: invalid UTF-8: " ++ show err
-          Right t  -> pure t
+          Right t -> pure t
     where
       readNBytes 0 acc = pure acc
       readNBytes n acc = do
@@ -244,25 +252,33 @@ instance (BitDeserialize a, BitDeserialize b) => BitDeserialize (a, b) where
     b <- deserializeM
     pure (a, b)
 
-instance (BitSerialize a, BitSerialize b, BitSerialize c) =>
-         BitSerialize (a, b, c) where
+instance
+  (BitSerialize a, BitSerialize b, BitSerialize c) =>
+  BitSerialize (a, b, c)
+  where
   bitSerialize (a, b, c) = bitSerialize c . bitSerialize b . bitSerialize a
 
-instance (BitDeserialize a, BitDeserialize b, BitDeserialize c) =>
-         BitDeserialize (a, b, c) where
+instance
+  (BitDeserialize a, BitDeserialize b, BitDeserialize c) =>
+  BitDeserialize (a, b, c)
+  where
   bitDeserialize = runDeserialize $ do
     a <- deserializeM
     b <- deserializeM
     c <- deserializeM
     pure (a, b, c)
 
-instance (BitSerialize a, BitSerialize b, BitSerialize c, BitSerialize d) =>
-         BitSerialize (a, b, c, d) where
+instance
+  (BitSerialize a, BitSerialize b, BitSerialize c, BitSerialize d) =>
+  BitSerialize (a, b, c, d)
+  where
   bitSerialize (a, b, c, d) =
     bitSerialize d . bitSerialize c . bitSerialize b . bitSerialize a
 
-instance (BitDeserialize a, BitDeserialize b, BitDeserialize c, BitDeserialize d) =>
-         BitDeserialize (a, b, c, d) where
+instance
+  (BitDeserialize a, BitDeserialize b, BitDeserialize c, BitDeserialize d) =>
+  BitDeserialize (a, b, c, d)
+  where
   bitDeserialize = runDeserialize $ do
     a <- deserializeM
     b <- deserializeM
@@ -273,15 +289,15 @@ instance (BitDeserialize a, BitDeserialize b, BitDeserialize c, BitDeserialize d
 -- BitWidth: custom bit-width serialization
 
 -- | Newtype tagging a value with a type-level bit width.
-newtype BitWidth (n :: Nat) a = BitWidth { unBitWidth :: a }
+newtype BitWidth (n :: Nat) a = BitWidth {unBitWidth :: a}
   deriving (Eq, Show)
 
 instance (KnownNat n, Integral a) => BitSerialize (BitWidth n a) where
   bitSerialize (BitWidth val) =
     let n = fromIntegral (natVal (Proxy :: Proxy n))
-    in writeBits (fromIntegral val) n
+     in writeBits (fromIntegral val) n
 
 instance (KnownNat n, Integral a) => BitDeserialize (BitWidth n a) where
   bitDeserialize buf =
     let n = fromIntegral (natVal (Proxy :: Proxy n))
-    in runDeserialize (BitWidth . fromIntegral <$> readBitsM n) buf
+     in runDeserialize (BitWidth . fromIntegral <$> readBitsM n) buf

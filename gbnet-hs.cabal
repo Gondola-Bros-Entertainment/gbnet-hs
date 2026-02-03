@@ -24,6 +24,9 @@ library
     GBNet.Util
     GBNet.Reliability
     GBNet.Channel
+    GBNet.Config
+    GBNet.Congestion
+    GBNet.Stats
 
   build-depends:
       base                >= 4.16 && < 5
