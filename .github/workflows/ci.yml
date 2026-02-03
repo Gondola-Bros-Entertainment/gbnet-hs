@@ -8,40 +8,69 @@ on:
 
 jobs:
   build:
+    name: Build
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: haskell-actions/setup@v2
         with:
           ghc-version: '9.6.7'
           cabal-version: '3.14'
-
-      - name: Cache cabal store
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
-          path: ~/.cabal/store
-          key: ${{ runner.os }}-cabal-${{ hashFiles('gbnet-hs.cabal') }}
-          restore-keys: ${{ runner.os }}-cabal-
+          path: |
+            ~/.cabal/store
+            dist-newstyle
+          key: ${{ runner.os }}-ghc-9.6.7-${{ hashFiles('gbnet-hs.cabal') }}
+          restore-keys: ${{ runner.os }}-ghc-9.6.7-
+      - run: cabal build --only-dependencies
+      - run: cabal build
 
-      - name: Build dependencies
-        run: cabal build --only-dependencies
+  test:
+    name: Test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6.7'
+          cabal-version: '3.14'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cabal/store
+            dist-newstyle
+          key: ${{ runner.os }}-ghc-9.6.7-${{ hashFiles('gbnet-hs.cabal') }}
+          restore-keys: ${{ runner.os }}-ghc-9.6.7-
+      - run: cabal test
 
-      - name: Build
-        run: cabal build
+  warnings:
+    name: Warnings
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6.7'
+          cabal-version: '3.14'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cabal/store
+            dist-newstyle
+          key: ${{ runner.os }}-ghc-9.6.7-${{ hashFiles('gbnet-hs.cabal') }}
+          restore-keys: ${{ runner.os }}-ghc-9.6.7-
+      - run: cabal build --ghc-options="-Wall -Werror"
 
-      - name: Test
-        run: cabal test
-
-      - name: Check warnings
-        run: cabal build --ghc-options="-Wall -Werror"
-
-      - name: Lint (HLint)
-        uses: haskell-actions/hlint-setup@v2
-
-      - name: Run HLint
-        uses: haskell-actions/hlint-run@v2
+  lint:
+    name: HLint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/hlint-setup@v2
+      - uses: haskell-actions/hlint-run@v2
         with:
           path: '["src/", "test/"]'
           fail-on: warning

@@ -468,7 +468,7 @@ instance BitSerialize T.Text where
     let bytes = TE.encodeUtf8 t
         len   = min (BS.length bytes) defaultMaxLength
         buf'  = writeBits (fromIntegral len) lengthPrefixBitWidth buf
-    in BS.foldl' (\b w -> bitSerialize w b) buf' (BS.take len bytes)
+    in BS.foldl' (flip bitSerialize) buf' (BS.take len bytes)
 
 instance BitDeserialize T.Text where
   bitDeserialize buf =
