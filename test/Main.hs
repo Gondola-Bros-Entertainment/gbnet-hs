@@ -7,7 +7,6 @@ module Main where
 
 import GBNet.Serialize.BitBuffer
 import GBNet.Serialize.Class
-import GBNet.Serialize.Reader
 import GBNet.Serialize.TH
 import GBNet.Packet
 import GBNet.Util

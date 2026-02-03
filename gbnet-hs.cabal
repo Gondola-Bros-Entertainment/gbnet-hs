@@ -23,6 +23,7 @@ library
     GBNet.Packet
     GBNet.Util
     GBNet.Reliability
+    GBNet.Channel
 
   build-depends:
       base                >= 4.16 && < 5

@@ -12,6 +12,9 @@
 module GBNet.Serialize.Class
   ( BitSerialize(..)
   , BitDeserialize(..)
+    -- * Monadic deserialization
+  , deserializeM
+  , runDeserialize
     -- * Custom bit widths
   , BitWidth(..)
     -- * Bit width constants
@@ -63,6 +66,20 @@ class BitSerialize a where
 class BitDeserialize a where
   bitDeserialize :: BitBuffer -> Either String (ReadResult a)
 
+-- | Deserialize in the BitReader monad.
+deserializeM :: (BitDeserialize a) => BitReader a
+deserializeM = BitReader $ \buf ->
+  case bitDeserialize buf of
+    Left err                    -> Left err
+    Right (ReadResult val buf') -> Right (val, buf')
+
+-- | Run BitReader and wrap result in ReadResult.
+runDeserialize :: BitReader a -> BitBuffer -> Either String (ReadResult a)
+runDeserialize reader buf =
+  case runBitReader reader buf of
+    Left err        -> Left err
+    Right (val, buf') -> Right $ ReadResult val buf'
+
 -- Unsigned integers
 
 instance BitSerialize Bool where
@@ -75,37 +92,25 @@ instance BitSerialize Word8 where
   bitSerialize val = writeBits (fromIntegral val) word8BitWidth
 
 instance BitDeserialize Word8 where
-  bitDeserialize buf =
-    case readBits word8BitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        Right $ ReadResult { readValue = fromIntegral val, readBuffer = buf' }
+  bitDeserialize = runDeserialize $ fromIntegral <$> readBitsM word8BitWidth
 
 instance BitSerialize Word16 where
   bitSerialize val = writeBits (fromIntegral val) word16BitWidth
 
 instance BitDeserialize Word16 where
-  bitDeserialize buf =
-    case readBits word16BitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        Right $ ReadResult { readValue = fromIntegral val, readBuffer = buf' }
+  bitDeserialize = runDeserialize $ fromIntegral <$> readBitsM word16BitWidth
 
 instance BitSerialize Word32 where
   bitSerialize val = writeBits (fromIntegral val) word32BitWidth
 
 instance BitDeserialize Word32 where
-  bitDeserialize buf =
-    case readBits word32BitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        Right $ ReadResult { readValue = fromIntegral val, readBuffer = buf' }
+  bitDeserialize = runDeserialize $ fromIntegral <$> readBitsM word32BitWidth
 
 instance BitSerialize Word64 where
   bitSerialize val = writeBits val word64BitWidth
 
 instance BitDeserialize Word64 where
-  bitDeserialize = readBits word64BitWidth
+  bitDeserialize = runDeserialize $ readBitsM word64BitWidth
 
 -- Signed integers (two's complement)
 
@@ -113,53 +118,31 @@ instance BitSerialize Int8 where
   bitSerialize val = writeBits (fromIntegral val) word8BitWidth
 
 instance BitDeserialize Int8 where
-  bitDeserialize buf =
-    case readBits word8BitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        Right $ ReadResult
-          { readValue  = fromIntegral (fromIntegral val :: Word8)
-          , readBuffer = buf'
-          }
+  bitDeserialize = runDeserialize $ do
+    val <- readBitsM word8BitWidth
+    pure $ fromIntegral (fromIntegral val :: Word8)
 
 instance BitSerialize Int16 where
   bitSerialize val = writeBits (fromIntegral val) word16BitWidth
 
 instance BitDeserialize Int16 where
-  bitDeserialize buf =
-    case readBits word16BitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        Right $ ReadResult
-          { readValue  = fromIntegral (fromIntegral val :: Word16)
-          , readBuffer = buf'
-          }
+  bitDeserialize = runDeserialize $ do
+    val <- readBitsM word16BitWidth
+    pure $ fromIntegral (fromIntegral val :: Word16)
 
 instance BitSerialize Int32 where
   bitSerialize val = writeBits (fromIntegral val) word32BitWidth
 
 instance BitDeserialize Int32 where
-  bitDeserialize buf =
-    case readBits word32BitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        Right $ ReadResult
-          { readValue  = fromIntegral (fromIntegral val :: Word32)
-          , readBuffer = buf'
-          }
+  bitDeserialize = runDeserialize $ do
+    val <- readBitsM word32BitWidth
+    pure $ fromIntegral (fromIntegral val :: Word32)
 
 instance BitSerialize Int64 where
   bitSerialize val = writeBits (fromIntegral val) word64BitWidth
 
 instance BitDeserialize Int64 where
-  bitDeserialize buf =
-    case readBits word64BitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        Right $ ReadResult
-          { readValue  = fromIntegral val
-          , readBuffer = buf'
-          }
+  bitDeserialize = runDeserialize $ fromIntegral <$> readBitsM word64BitWidth
 
 -- Floating-point (IEEE 754 bit cast)
 
@@ -167,27 +150,15 @@ instance BitSerialize Float where
   bitSerialize val = writeBits (fromIntegral (castFloatToWord32 val)) word32BitWidth
 
 instance BitDeserialize Float where
-  bitDeserialize buf =
-    case readBits word32BitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        Right $ ReadResult
-          { readValue  = castWord32ToFloat (fromIntegral val)
-          , readBuffer = buf'
-          }
+  bitDeserialize = runDeserialize $ do
+    val <- readBitsM word32BitWidth
+    pure $ castWord32ToFloat (fromIntegral val)
 
 instance BitSerialize Double where
   bitSerialize val = writeBits (castDoubleToWord64 val) word64BitWidth
 
 instance BitDeserialize Double where
-  bitDeserialize buf =
-    case readBits word64BitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        Right $ ReadResult
-          { readValue  = castWord64ToDouble val
-          , readBuffer = buf'
-          }
+  bitDeserialize = runDeserialize $ castWord64ToDouble <$> readBitsM word64BitWidth
 
 -- Collection constants
 
@@ -207,16 +178,11 @@ instance (BitSerialize a) => BitSerialize (Maybe a) where
   bitSerialize (Just x) = bitSerialize x . writeBit True
 
 instance (BitDeserialize a) => BitDeserialize (Maybe a) where
-  bitDeserialize buf =
-    case readBit buf of
-      Left err -> Left err
-      Right (ReadResult present buf') ->
-        if present
-          then case bitDeserialize buf' of
-            Left err -> Left err
-            Right (ReadResult val buf'') ->
-              Right $ ReadResult { readValue = Just val, readBuffer = buf'' }
-          else Right $ ReadResult { readValue = Nothing, readBuffer = buf' }
+  bitDeserialize = runDeserialize $ do
+    present <- readBitM
+    if present
+      then Just <$> deserializeM
+      else pure Nothing
 
 -- List
 
@@ -228,21 +194,17 @@ instance (BitSerialize a) => BitSerialize [a] where
     in foldl (flip bitSerialize) buf' xs
 
 instance (BitDeserialize a) => BitDeserialize [a] where
-  bitDeserialize buf =
-    case readBits lengthPrefixBitWidth buf of
-      Left err -> Left err
-      Right (ReadResult lenW64 buf') ->
-        let len = fromIntegral lenW64 :: Int
-        in if len > defaultMaxLength
-           then Left $ "list deserialize: length " ++ show len ++ " exceeds max " ++ show defaultMaxLength
-           else readNElements len [] buf'
+  bitDeserialize = runDeserialize $ do
+    lenW64 <- readBitsM lengthPrefixBitWidth
+    let len = fromIntegral lenW64 :: Int
+    if len > defaultMaxLength
+      then BitReader $ \_ -> Left $ "list: length " ++ show len ++ " exceeds max"
+      else readN len []
     where
-      readNElements 0 acc b =
-        Right $ ReadResult { readValue = reverse acc, readBuffer = b }
-      readNElements n acc b =
-        case bitDeserialize b of
-          Left err -> Left err
-          Right (ReadResult val b') -> readNElements (n - 1) (val : acc) b'
+      readN 0 acc = pure (reverse acc)
+      readN n acc = do
+        val <- deserializeM
+        readN (n - 1) (val : acc)
 
 -- Text
 
@@ -255,25 +217,21 @@ instance BitSerialize T.Text where
     in BS.foldl' (flip bitSerialize) buf' (BS.take len bytes)
 
 instance BitDeserialize T.Text where
-  bitDeserialize buf =
-    case readBits lengthPrefixBitWidth buf of
-      Left err -> Left err
-      Right (ReadResult lenW64 buf') ->
-        let len = fromIntegral lenW64 :: Int
-        in if len > defaultMaxLength
-           then Left $ "Text deserialize: length " ++ show len ++ " exceeds max " ++ show defaultMaxLength
-           else readNBytes len [] buf'
+  bitDeserialize = runDeserialize $ do
+    lenW64 <- readBitsM lengthPrefixBitWidth
+    let len = fromIntegral lenW64 :: Int
+    if len > defaultMaxLength
+      then BitReader $ \_ -> Left $ "Text: length " ++ show len ++ " exceeds max"
+      else do
+        bytes <- readNBytes len []
+        case TE.decodeUtf8' (BS.pack (reverse bytes)) of
+          Left err -> BitReader $ \_ -> Left $ "Text: invalid UTF-8: " ++ show err
+          Right t  -> pure t
     where
-      readNBytes :: Int -> [Word8] -> BitBuffer -> Either String (ReadResult T.Text)
-      readNBytes 0 acc b =
-        case TE.decodeUtf8' (BS.pack (reverse acc)) of
-          Left err -> Left $ "Text: invalid UTF-8: " ++ show err
-          Right t  -> Right $ ReadResult { readValue = t, readBuffer = b }
-      readNBytes n acc b =
-        case readBits word8BitWidth b of
-          Left err -> Left err
-          Right (ReadResult val b') ->
-            readNBytes (n - 1) (fromIntegral val : acc) b'
+      readNBytes 0 acc = pure acc
+      readNBytes n acc = do
+        val <- readBitsM word8BitWidth
+        readNBytes (n - 1) (fromIntegral val : acc)
 
 -- Tuples
 
@@ -281,14 +239,10 @@ instance (BitSerialize a, BitSerialize b) => BitSerialize (a, b) where
   bitSerialize (a, b) = bitSerialize b . bitSerialize a
 
 instance (BitDeserialize a, BitDeserialize b) => BitDeserialize (a, b) where
-  bitDeserialize buf =
-    case bitDeserialize buf of
-      Left err -> Left err
-      Right (ReadResult a buf') ->
-        case bitDeserialize buf' of
-          Left err -> Left err
-          Right (ReadResult b buf'') ->
-            Right $ ReadResult { readValue = (a, b), readBuffer = buf'' }
+  bitDeserialize = runDeserialize $ do
+    a <- deserializeM
+    b <- deserializeM
+    pure (a, b)
 
 instance (BitSerialize a, BitSerialize b, BitSerialize c) =>
          BitSerialize (a, b, c) where
@@ -296,17 +250,11 @@ instance (BitSerialize a, BitSerialize b, BitSerialize c) =>
 
 instance (BitDeserialize a, BitDeserialize b, BitDeserialize c) =>
          BitDeserialize (a, b, c) where
-  bitDeserialize buf =
-    case bitDeserialize buf of
-      Left err -> Left err
-      Right (ReadResult a buf') ->
-        case bitDeserialize buf' of
-          Left err -> Left err
-          Right (ReadResult b buf'') ->
-            case bitDeserialize buf'' of
-              Left err -> Left err
-              Right (ReadResult c buf''') ->
-                Right $ ReadResult { readValue = (a, b, c), readBuffer = buf''' }
+  bitDeserialize = runDeserialize $ do
+    a <- deserializeM
+    b <- deserializeM
+    c <- deserializeM
+    pure (a, b, c)
 
 instance (BitSerialize a, BitSerialize b, BitSerialize c, BitSerialize d) =>
          BitSerialize (a, b, c, d) where
@@ -315,20 +263,12 @@ instance (BitSerialize a, BitSerialize b, BitSerialize c, BitSerialize d) =>
 
 instance (BitDeserialize a, BitDeserialize b, BitDeserialize c, BitDeserialize d) =>
          BitDeserialize (a, b, c, d) where
-  bitDeserialize buf =
-    case bitDeserialize buf of
-      Left err -> Left err
-      Right (ReadResult a buf1) ->
-        case bitDeserialize buf1 of
-          Left err -> Left err
-          Right (ReadResult b buf2) ->
-            case bitDeserialize buf2 of
-              Left err -> Left err
-              Right (ReadResult c buf3) ->
-                case bitDeserialize buf3 of
-                  Left err -> Left err
-                  Right (ReadResult d buf4) ->
-                    Right $ ReadResult { readValue = (a, b, c, d), readBuffer = buf4 }
+  bitDeserialize = runDeserialize $ do
+    a <- deserializeM
+    b <- deserializeM
+    c <- deserializeM
+    d <- deserializeM
+    pure (a, b, c, d)
 
 -- BitWidth: custom bit-width serialization
 
@@ -344,7 +284,4 @@ instance (KnownNat n, Integral a) => BitSerialize (BitWidth n a) where
 instance (KnownNat n, Integral a) => BitDeserialize (BitWidth n a) where
   bitDeserialize buf =
     let n = fromIntegral (natVal (Proxy :: Proxy n))
-    in case readBits n buf of
-         Left err -> Left err
-         Right (ReadResult val buf') ->
-           Right $ ReadResult { readValue = BitWidth (fromIntegral val), readBuffer = buf' }
+    in runDeserialize (BitWidth . fromIntegral <$> readBitsM n) buf

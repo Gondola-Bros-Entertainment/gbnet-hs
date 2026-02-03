@@ -12,9 +12,9 @@ module GBNet.Packet
   ) where
 
 import Data.Word (Word16, Word32)
-import GBNet.Serialize.BitBuffer
-import GBNet.Serialize.Class
-import GBNet.Serialize.Reader
+import GBNet.Serialize.BitBuffer (BitReader(..), readBitsM, writeBits)
+import GBNet.Serialize.Class (BitSerialize(..), BitDeserialize(..),
+                               packetTypeBitWidth, runDeserialize, deserializeM)
 
 -- | Header size in bits (4 + 16 + 16 + 32 = 68).
 packetHeaderBitSize :: Int
@@ -34,17 +34,12 @@ instance BitSerialize PacketType where
   bitSerialize pt = writeBits (fromIntegral (fromEnum pt)) packetTypeBitWidth
 
 instance BitDeserialize PacketType where
-  bitDeserialize buf =
-    case readBits packetTypeBitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        let tag = fromIntegral val :: Int
-        in if tag > fromEnum (maxBound :: PacketType)
-           then Left $ "bitDeserialize PacketType: invalid tag " ++ show tag
-           else Right $ ReadResult
-                  { readValue  = toEnum tag
-                  , readBuffer = buf'
-                  }
+  bitDeserialize = runDeserialize $ do
+    val <- readBitsM packetTypeBitWidth
+    let tag = fromIntegral val :: Int
+    if tag > fromEnum (maxBound :: PacketType)
+      then BitReader $ \_ -> Left $ "PacketType: invalid tag " ++ show tag
+      else pure $ toEnum tag
 
 -- | Packet header (68 bits on wire).
 data PacketHeader = PacketHeader
@@ -63,19 +58,14 @@ instance BitSerialize PacketHeader where
     . bitSerialize (packetType hdr)
 
 instance BitDeserialize PacketHeader where
-  bitDeserialize buf =
-    case runBitReader reader buf of
-      Left err         -> Left err
-      Right (hdr, buf') -> Right $ ReadResult { readValue = hdr, readBuffer = buf' }
-    where
-      reader = do
-        pt  <- deserializeM
-        sn  <- deserializeM
-        ak  <- deserializeM
-        abf <- deserializeM
-        pure PacketHeader
-          { packetType  = pt
-          , sequenceNum = sn
-          , ack         = ak
-          , ackBitfield = abf
-          }
+  bitDeserialize = runDeserialize $ do
+    pt  <- deserializeM
+    sn  <- deserializeM
+    ak  <- deserializeM
+    abf <- deserializeM
+    pure PacketHeader
+      { packetType  = pt
+      , sequenceNum = sn
+      , ack         = ak
+      , ackBitfield = abf
+      }

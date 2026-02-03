@@ -33,6 +33,11 @@ module GBNet.Serialize.BitBuffer
 
     -- * Debug
   , toBitString
+
+    -- * BitReader monad
+  , BitReader(..)
+  , readBitM
+  , readBitsM
   ) where
 
 import Data.Word (Word8, Word64)
@@ -225,3 +230,45 @@ toBitString buf
                                  else bitsPerByte
             in showByte i w bitsInThisByte
          ) [0 .. totalBytes - 1]
+
+-- | Monad for threading buffer state through sequential reads.
+newtype BitReader a = BitReader
+  { runBitReader :: BitBuffer -> Either String (a, BitBuffer) }
+
+instance Functor BitReader where
+  fmap f (BitReader run) = BitReader $ \buf ->
+    case run buf of
+      Left err        -> Left err
+      Right (val, buf') -> Right (f val, buf')
+
+instance Applicative BitReader where
+  pure val = BitReader $ \buf -> Right (val, buf)
+  (BitReader runF) <*> (BitReader runA) = BitReader $ \buf ->
+    case runF buf of
+      Left err       -> Left err
+      Right (f, buf') ->
+        case runA buf' of
+          Left err         -> Left err
+          Right (val, buf'') -> Right (f val, buf'')
+
+instance Monad BitReader where
+  (BitReader run) >>= f = BitReader $ \buf ->
+    case run buf of
+      Left err        -> Left err
+      Right (val, buf') ->
+        let (BitReader run') = f val
+        in run' buf'
+
+-- | Read a single bit in the monad.
+readBitM :: BitReader Bool
+readBitM = BitReader $ \buf ->
+  case readBit buf of
+    Left err                    -> Left err
+    Right (ReadResult val buf') -> Right (val, buf')
+
+-- | Read N bits as Word64 in the monad.
+readBitsM :: Int -> BitReader Word64
+readBitsM n = BitReader $ \buf ->
+  case readBits n buf of
+    Left err                    -> Left err
+    Right (ReadResult val buf') -> Right (val, buf')
