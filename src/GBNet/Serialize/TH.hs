@@ -17,7 +17,7 @@ module GBNet.Serialize.TH
 
 import Language.Haskell.TH
 import GBNet.Serialize.BitBuffer (ReadResult(..), writeBits, readBits)
-import GBNet.Serialize.Class (BitSerialize(..), BitDeserialize(..))
+import GBNet.Serialize.Class (BitSerialize(..), BitDeserialize(..), BitWidth(..))
 
 -- | Number of bits needed to represent @n@ distinct values.
 ceilLog2 :: Int -> Int
@@ -51,17 +51,18 @@ mkSerializeInstance typeName cons = do
 
 mkSerClause :: Int -> Int -> (Int, Con) -> Q Clause
 mkSerClause tagBits numCons (tagVal, con) = do
-  let (conName, fieldCount) = conInfo con
+  let (conName, fieldTypes) = conFieldTypes con
+      fieldCount = length fieldTypes
   varNames <- mapM (\i -> newName ("f" ++ show i)) [0 .. fieldCount - 1]
   let pat = ConP conName [] (map VarP varNames)
-  -- Build the body as a composition of writes
-  -- We need: \buf -> writeFieldN ... (writeField1 (writeTag buf))
-  -- As a composition: bitSerialize fN . ... . bitSerialize f1 . writeBits tag tagBits
+  -- Build the body as a composition of writes.
+  -- For BitWidth fields, generate writeBits directly instead of going
+  -- through the typeclass — this inlines the bit count at compile time.
   let tagExpr = if numCons > 1
                 then Just [| writeBits $(litE (integerL (fromIntegral tagVal)))
                                        $(litE (integerL (fromIntegral tagBits))) |]
                 else Nothing
-      fieldExprs = map (\v -> [| bitSerialize $(varE v) |]) varNames
+      fieldExprs = zipWith mkFieldSerExpr varNames fieldTypes
       allExprs = case tagExpr of
                    Just t  -> t : fieldExprs
                    Nothing -> fieldExprs
@@ -70,6 +71,22 @@ mkSerClause tagBits numCons (tagVal, con) = do
     [e] -> e
     es  -> foldr1 (\later earlier -> [| $later . $earlier |]) (reverse es)
   return $ Clause [pat] (NormalB body) []
+
+-- | Generate the serialize expression for a single field.
+-- Recognizes @BitWidth n a@ and emits a direct @writeBits@ call.
+mkFieldSerExpr :: Name -> Type -> Q Exp
+mkFieldSerExpr v ty
+  | Just n <- extractBitWidth ty =
+      [| writeBits (fromIntegral (unBitWidth $(varE v))) $(litE (integerL (fromIntegral n))) |]
+  | otherwise =
+      [| bitSerialize $(varE v) |]
+
+-- | Try to extract the bit count from a @BitWidth n a@ type.
+-- Returns 'Just n' if the type matches, 'Nothing' otherwise.
+extractBitWidth :: Type -> Maybe Integer
+extractBitWidth (AppT (AppT (ConT name) (LitT (NumTyLit n))) _)
+  | nameBase name == "BitWidth" = Just n
+extractBitWidth _ = Nothing
 
 -- ====================================================================
 -- Deserialization
@@ -88,11 +105,9 @@ mkDeserClause tagBits cons = do
   bufName <- newName "buf"
   body <- if length cons == 1
     then do
-      -- Single constructor, no tag
-      let (conName, fieldCount) = conInfo (head cons)
-      mkReadFields conName fieldCount (varE bufName)
+      let (conName, fieldTypes) = conFieldTypes (head cons)
+      mkReadFields conName fieldTypes (varE bufName)
     else do
-      -- Read tag, then dispatch
       tagName <- newName "tagVal"
       buf'Name <- newName "buf'"
       matches <- mapM (mkConMatch buf'Name) (zip [0..] cons)
@@ -106,38 +121,49 @@ mkDeserClause tagBits cons = do
 
 mkConMatch :: Name -> (Int, Con) -> Q Match
 mkConMatch bufName (tagVal, con) = do
-  let (conName, fieldCount) = conInfo con
-  body <- mkReadFields conName fieldCount (varE bufName)
+  let (conName, fieldTypes) = conFieldTypes con
+  body <- mkReadFields conName fieldTypes (varE bufName)
   return $ Match (LitP (IntegerL (fromIntegral tagVal))) (NormalB body) []
 
 -- | Generate code that reads N fields and applies them to a constructor.
-mkReadFields :: Name -> Int -> Q Exp -> Q Exp
-mkReadFields conName 0 bufExpr =
+-- For @BitWidth n a@ fields, emits @readBits n@ directly.
+mkReadFields :: Name -> [Type] -> Q Exp -> Q Exp
+mkReadFields conName [] bufExpr =
   [| Right (ReadResult $(conE conName) $bufExpr) |]
-mkReadFields conName fieldCount bufExpr = do
-  -- Generate a chain of bitDeserialize calls
-  mkReadFieldsLoop conName fieldCount 0 [] bufExpr
+mkReadFields conName fieldTypes bufExpr =
+  mkReadFieldsLoop conName fieldTypes 0 [] bufExpr
 
-mkReadFieldsLoop :: Name -> Int -> Int -> [Name] -> Q Exp -> Q Exp
-mkReadFieldsLoop conName total current vars bufExpr
-  | current == total = do
+mkReadFieldsLoop :: Name -> [Type] -> Int -> [Name] -> Q Exp -> Q Exp
+mkReadFieldsLoop conName types current vars bufExpr
+  | current == length types = do
       let conApp = foldl (\e v -> AppE e (VarE v)) (ConE conName) vars
       [| Right (ReadResult $(return conApp) $bufExpr) |]
   | otherwise = do
+      let ty = types !! current
       vName  <- newName ("v" ++ show current)
       bName  <- newName ("b" ++ show current)
-      rest   <- mkReadFieldsLoop conName total (current + 1) (vars ++ [vName]) (varE bName)
-      [| case bitDeserialize $bufExpr of
-           Left err -> Left err
-           Right (ReadResult $(varP vName) $(varP bName)) -> $(return rest)
-       |]
+      rest   <- mkReadFieldsLoop conName types (current + 1) (vars ++ [vName]) (varE bName)
+      case extractBitWidth ty of
+        Just n ->
+          -- Read exactly n bits and wrap in BitWidth constructor
+          [| case readBits $(litE (integerL (fromIntegral n))) $bufExpr of
+               Left err -> Left err
+               Right (ReadResult val $(varP bName)) ->
+                 let $(varP vName) = BitWidth (fromIntegral val)
+                 in $(return rest)
+           |]
+        Nothing ->
+          [| case bitDeserialize $bufExpr of
+               Left err -> Left err
+               Right (ReadResult $(varP vName) $(varP bName)) -> $(return rest)
+           |]
 
--- | Extract constructor name and field count.
-conInfo :: Con -> (Name, Int)
-conInfo (NormalC name fields)      = (name, length fields)
-conInfo (RecC name fields)         = (name, length fields)
-conInfo (InfixC _ name _)          = (name, 2)
-conInfo (ForallC _ _ con)          = conInfo con
-conInfo (GadtC [name] fields _)    = (name, length fields)
-conInfo (RecGadtC [name] fields _) = (name, length fields)
-conInfo _ = error "deriveNetworkSerialize: unsupported constructor form"
+-- | Extract constructor name and field types.
+conFieldTypes :: Con -> (Name, [Type])
+conFieldTypes (NormalC name fields)      = (name, map snd fields)
+conFieldTypes (RecC name fields)         = (name, map (\(_, _, t) -> t) fields)
+conFieldTypes (InfixC (_, t1) name (_, t2)) = (name, [t1, t2])
+conFieldTypes (ForallC _ _ con)          = conFieldTypes con
+conFieldTypes (GadtC [name] fields _)    = (name, map snd fields)
+conFieldTypes (RecGadtC [name] fields _) = (name, map (\(_, _, t) -> t) fields)
+conFieldTypes _ = error "deriveNetworkSerialize: unsupported constructor form"

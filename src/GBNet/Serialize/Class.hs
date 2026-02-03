@@ -1,6 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE KindSignatures #-}
 -- |
 -- Module      : GBNet.Serialize.Class
 -- Description : Typeclasses for bitpacked serialization
@@ -49,6 +50,8 @@
 module GBNet.Serialize.Class
   ( BitSerialize(..)
   , BitDeserialize(..)
+    -- * Custom bit widths
+  , BitWidth(..)
     -- * Bit width constants
   , word8BitWidth
   , word16BitWidth
@@ -63,6 +66,8 @@ module GBNet.Serialize.Class
 import Data.Word (Word8, Word16, Word32, Word64)
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Char (ord, chr)
+import GHC.TypeLits (Nat, KnownNat, natVal)
+import Data.Proxy (Proxy(..))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
@@ -397,7 +402,9 @@ instance (BitDeserialize a) => BitDeserialize [a] where
       Left err -> Left err
       Right (ReadResult lenW64 buf') ->
         let len = fromIntegral lenW64 :: Int
-        in readNElements len [] buf'
+        in if len > defaultMaxLength
+           then Left $ "list deserialize: length " ++ show len ++ " exceeds max " ++ show defaultMaxLength
+           else readNElements len [] buf'
     where
       readNElements 0 acc b =
         Right $ ReadResult { readValue = reverse acc, readBuffer = b }
@@ -417,9 +424,19 @@ instance (BitDeserialize a) => BitDeserialize [a] where
 --
 -- For game networking, single-byte characters cover the common case:
 -- player names, chat messages, server names are typically ASCII.
--- Characters beyond codepoint 255 are truncated to their low 8 bits.
+-- Characters beyond codepoint 255 cause a runtime error rather than
+-- silently truncating. Use 'Text' for Unicode strings.
+
+-- | Maximum codepoint that fits in 8 bits (Latin-1 range).
+maxCharCodepoint :: Int
+maxCharCodepoint = 255
+
 instance BitSerialize Char where
-  bitSerialize c = writeBits (fromIntegral (ord c)) word8BitWidth
+  bitSerialize c
+    | ord c > maxCharCodepoint =
+        error $ "bitSerialize Char: codepoint " ++ show (ord c)
+             ++ " exceeds 8-bit range (max " ++ show maxCharCodepoint ++ ")"
+    | otherwise = writeBits (fromIntegral (ord c)) word8BitWidth
 
 instance BitDeserialize Char where
   bitDeserialize buf =
@@ -459,7 +476,9 @@ instance BitDeserialize T.Text where
       Left err -> Left err
       Right (ReadResult lenW64 buf') ->
         let len = fromIntegral lenW64 :: Int
-        in readNBytes len [] buf'
+        in if len > defaultMaxLength
+           then Left $ "Text deserialize: length " ++ show len ++ " exceeds max " ++ show defaultMaxLength
+           else readNBytes len [] buf'
     where
       readNBytes :: Int -> [Word8] -> BitBuffer -> Either String (ReadResult T.Text)
       readNBytes 0 acc b =
@@ -531,3 +550,36 @@ instance (BitDeserialize a, BitDeserialize b, BitDeserialize c, BitDeserialize d
                   Left err -> Left err
                   Right (ReadResult d buf4) ->
                     Right $ ReadResult { readValue = (a, b, c, d), readBuffer = buf4 }
+
+-- ====================================================================
+-- BitWidth: custom bit-width serialization
+-- ====================================================================
+
+-- | A newtype that tags a value with a type-level bit width.
+--
+-- In game networking you often need fields smaller than a full byte —
+-- e.g. a health value in 7 bits or a direction in 3 bits. Wrapping
+-- a field as @BitWidth 7 Word8@ tells the serializer to use exactly
+-- 7 bits on the wire instead of the type's default 8.
+--
+-- The @n@ parameter is a type-level natural number ('Nat' from
+-- GHC.TypeLits). It exists only at compile time — at runtime,
+-- 'KnownNat' lets us recover the value via 'natVal'.
+newtype BitWidth (n :: Nat) a = BitWidth { unBitWidth :: a }
+  deriving (Eq, Show)
+
+-- | Serialize using exactly @n@ bits. The value is converted to
+-- 'Word64' via 'fromIntegral' and written with 'writeBits'.
+instance (KnownNat n, Integral a) => BitSerialize (BitWidth n a) where
+  bitSerialize (BitWidth val) =
+    let n = fromIntegral (natVal (Proxy :: Proxy n))
+    in writeBits (fromIntegral val) n
+
+-- | Deserialize exactly @n@ bits back into the underlying type.
+instance (KnownNat n, Integral a) => BitDeserialize (BitWidth n a) where
+  bitDeserialize buf =
+    let n = fromIntegral (natVal (Proxy :: Proxy n))
+    in case readBits n buf of
+         Left err -> Left err
+         Right (ReadResult val buf') ->
+           Right $ ReadResult { readValue = BitWidth (fromIntegral val), readBuffer = buf' }

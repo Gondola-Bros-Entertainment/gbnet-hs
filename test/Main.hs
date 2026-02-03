@@ -1,6 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DataKinds #-}
 
 module Main where
 
@@ -13,6 +14,7 @@ import GBNet.Packet
 import Data.Word (Word8, Word16, Word32, Word64)
 import Data.Int (Int8, Int16, Int32, Int64)
 import qualified Data.Text as T
+import Control.Exception (evaluate, try, SomeException)
 
 -- TH-derived test types (must be before main due to TH staging restriction)
 data Vec3 = Vec3
@@ -41,6 +43,15 @@ data SimpleRecord = SimpleRecord
   } deriving (Eq, Show)
 
 deriveNetworkSerialize ''SimpleRecord
+
+-- Test type using BitWidth for custom bit-width fields.
+-- A compact player state: 7-bit health (0-127), 4-bit direction (0-15).
+data CompactPlayer = CompactPlayer
+  { cpHealth    :: BitWidth 7 Word8
+  , cpDirection :: BitWidth 4 Word8
+  } deriving (Eq, Show)
+
+deriveNetworkSerialize ''CompactPlayer
 
 main :: IO ()
 main = do
@@ -80,6 +91,12 @@ main = do
   testTHRecord
   testTHEnum
   testTHEnumWithPayloads
+
+  -- Phase 4: Serialization fixes
+  testFastPathAfterNonAligned
+  testDeserializeBoundsCheck
+  testCharUnicodeValidation
+  testBitWidthRoundTrip
 
   putStrLn ""
   putStrLn "All tests passed!"
@@ -479,3 +496,87 @@ testTHEnumWithPayloads = do
       mapM_ (\(expected, actual) ->
         assertEqual ("GameEvent " ++ show expected) expected actual
       ) (zip events results)
+
+-- --------------------------------------------------------------------
+-- Phase 4: Serialization fix tests
+-- --------------------------------------------------------------------
+
+-- | Fix 1: Writing non-aligned bits then aligned bytes should preserve
+-- all data. The old code truncated the buffer in the fast path.
+testFastPathAfterNonAligned :: IO ()
+testFastPathAfterNonAligned = do
+  putStrLn "Fast path after non-aligned write:"
+  -- Write 1 bit (non-aligned), then 7 bits to fill the byte,
+  -- then 16 aligned bits via fast path
+  let buf = writeBits 0xBEEF 16 $ writeBits 0x7F 7 $ writeBit True empty
+  let reader = do
+        b  <- readBitM
+        v7 <- readBitsM 7
+        v16 <- readBitsM 16
+        pure (b, v7, v16)
+  assertDeserialize "1+7+16 bits" (True, 0x7F, 0xBEEF) reader buf
+
+  -- Write 8 aligned bits, then 8 more aligned (fast path overwrote the first 8 before fix)
+  let buf2 = writeBits 0xCD 8 $ writeBits 0xAB 8 empty
+  let reader2 = do
+        a <- readBitsM 8
+        b <- readBitsM 8
+        pure (a, b)
+  assertDeserialize "8+8 aligned" (0xAB, 0xCD) reader2 buf2
+
+-- | Fix 2: Deserializing a buffer with a huge length prefix should
+-- fail gracefully instead of attempting unbounded allocation.
+testDeserializeBoundsCheck :: IO ()
+testDeserializeBoundsCheck = do
+  putStrLn "Deserialization bounds checking:"
+  -- Craft a buffer with a 16-bit length of 65535 but no actual data.
+  -- The deserializer should fail with a buffer underflow, not hang.
+  let buf = writeBits 65535 16 empty
+  case runBitReader (deserializeM :: BitReader [Word8]) buf of
+    Left _  -> putStrLn "  PASS: huge list length rejected"
+    Right _ -> error "  FAIL: should have rejected list with length 65535 and no data"
+
+  case runBitReader (deserializeM :: BitReader T.Text) buf of
+    Left _  -> putStrLn "  PASS: huge Text length rejected"
+    Right _ -> error "  FAIL: should have rejected Text with length 65535 and no data"
+
+-- | Fix 3: Serializing a Char with codepoint > 255 should error
+-- instead of silently truncating.
+testCharUnicodeValidation :: IO ()
+testCharUnicodeValidation = do
+  putStrLn "Char Unicode validation:"
+  -- ASCII char should work fine
+  let buf = bitSerialize 'A' empty
+  assertDeserialize "Char A" 'A' deserializeM buf
+
+  -- Codepoint 255 (ÿ) should be the max allowed
+  let buf255 = bitSerialize '\255' empty
+  assertDeserialize "Char 255" '\255' deserializeM buf255
+
+  -- Codepoint 256+ should throw an error
+  result <- try (evaluate (bitSerialize '\x100' empty)) :: IO (Either SomeException BitBuffer)
+  case result of
+    Left _  -> putStrLn "  PASS: Char U+0100 rejected"
+    Right _ -> error "  FAIL: should have rejected Char with codepoint > 255"
+
+-- | Fix 4: BitWidth newtype for custom bit-width fields.
+testBitWidthRoundTrip :: IO ()
+testBitWidthRoundTrip = do
+  putStrLn "BitWidth round-trips:"
+
+  -- Direct BitWidth usage: 7 bits for a value 0-127
+  let bw7 = BitWidth 100 :: BitWidth 7 Word8
+  let buf7 = bitSerialize bw7 empty
+  -- Should use exactly 7 bits
+  assertEqual "BitWidth 7 = 7 bits" 7 (bitPosition buf7)
+  assertDeserialize "BitWidth 7 Word8" bw7 deserializeM buf7
+
+  -- TH-derived struct with BitWidth fields
+  let player = CompactPlayer
+        { cpHealth    = BitWidth 100
+        , cpDirection = BitWidth 12
+        }
+  let bufP = bitSerialize player empty
+  -- 7 + 4 = 11 bits total
+  assertEqual "CompactPlayer = 11 bits" 11 (bitPosition bufP)
+  assertDeserialize "CompactPlayer" player deserializeM bufP

@@ -302,12 +302,14 @@ writeBits value numBits buf
             let shift = (n - 1) * bitsPerByte
             in fromIntegral ((v `shiftR` shift) .&. 0xFF) : extractBytes (n - 1) v
           newBytes  = BS.pack (extractBytes numBytes value)
-          -- Pad buffer to the current byte boundary if needed.
+          -- Splice new bytes into the buffer at the current byte position,
+          -- preserving any data before and after the write region.
           byteIndex = bitPos buf `div` bitsPerByte
-          padded    = if byteIndex > BS.length (bufferBytes buf)
-                      then bufferBytes buf `BS.append` BS.replicate (byteIndex - BS.length (bufferBytes buf)) 0
-                      else BS.take byteIndex (bufferBytes buf)
-      in buf { bufferBytes = padded `BS.append` newBytes
+          existing  = bufferBytes buf
+          before    = BS.take byteIndex existing
+          after     = BS.drop (byteIndex + numBytes) existing
+          padding   = BS.replicate (max 0 (byteIndex - BS.length existing)) 0
+      in buf { bufferBytes = before `BS.append` padding `BS.append` newBytes `BS.append` after
              , bitPos      = bitPos buf + numBits
              }
   | otherwise     = foldl writeSingleBit buf [numBits - 1, numBits - 2 .. 0]
