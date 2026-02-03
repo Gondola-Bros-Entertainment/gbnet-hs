@@ -201,8 +201,9 @@ newConnection config clientSalt now =
       configs = take numChannels $ ncChannelConfigs config ++ repeat defaultCfg
       channels = V.fromList $ zipWith Channel.newChannel [0 ..] configs
       -- Sort channel indices by priority (highest first)
+      -- Zip indices with configs, sort by priority, extract indices
       priorityOrder =
-        sortBy (comparing (Down . Channel.ccPriority . (configs !!))) [0 .. numChannels - 1]
+        map fst $ sortBy (comparing (Down . Channel.ccPriority . snd)) $ zip [0 ..] configs
       congestion =
         newCongestionController
           (ncSendRate config)
