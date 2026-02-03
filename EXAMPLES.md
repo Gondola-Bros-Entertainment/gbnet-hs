@@ -485,3 +485,189 @@ End-to-end: serialize → `toBytes` → (network) → `fromBytes` → deserializ
 The wire format is identical to the Rust gbnet library, so a Haskell
 client can communicate with a Rust server (and vice versa) with zero
 conversion overhead.
+
+---
+
+## Replication Examples
+
+### 7. Delta Compression
+
+Send only changed fields to minimize bandwidth:
+
+```haskell
+import GBNet.Delta
+import Data.Maybe (fromMaybe)
+
+-- Your game state
+data PlayerState = PlayerState
+  { psPos :: (Float, Float)
+  , psHealth :: Int
+  , psAmmo :: Int
+  } deriving (Eq, Show)
+
+-- Delta contains Maybe for each field
+data PlayerDelta = PlayerDelta
+  { dPos :: Maybe (Float, Float)
+  , dHealth :: Maybe Int
+  , dAmmo :: Maybe Int
+  } deriving (Eq, Show)
+
+instance NetworkDelta PlayerState where
+  type Delta PlayerState = PlayerDelta
+
+  diff new old = PlayerDelta
+    { dPos = if psPos new /= psPos old then Just (psPos new) else Nothing
+    , dHealth = if psHealth new /= psHealth old then Just (psHealth new) else Nothing
+    , dAmmo = if psAmmo new /= psAmmo old then Just (psAmmo new) else Nothing
+    }
+
+  apply state delta = PlayerState
+    { psPos = fromMaybe (psPos state) (dPos delta)
+    , psHealth = fromMaybe (psHealth state) (dHealth delta)
+    , psAmmo = fromMaybe (psAmmo state) (dAmmo delta)
+    }
+
+-- Server: track and encode deltas
+serverTick :: BaselineSeq -> PlayerState -> DeltaTracker PlayerState
+           -> (BS.ByteString, DeltaTracker PlayerState)
+serverTick seq currentState tracker = deltaEncode seq currentState tracker
+
+-- Server: when client ACKs a packet
+onClientAck :: BaselineSeq -> DeltaTracker PlayerState -> DeltaTracker PlayerState
+onClientAck ackSeq tracker = deltaOnAck ackSeq tracker
+
+-- Client: decode received delta
+clientReceive :: BS.ByteString -> BaselineManager PlayerState
+              -> Either String PlayerState
+clientReceive encoded baselines = deltaDecode encoded baselines
+```
+
+---
+
+### 8. Interest Management
+
+Only replicate entities within area-of-interest:
+
+```haskell
+import GBNet.Interest
+
+-- Radius-based AOI (sphere)
+radiusExample :: IO ()
+radiusExample = do
+  let interest = newRadiusInterest 500.0  -- 500 unit radius
+
+  let playerPos = (100.0, 50.0, 0.0)
+  let npc1Pos = (150.0, 60.0, 0.0)   -- close
+  let npc2Pos = (1000.0, 0.0, 0.0)   -- far
+
+  -- Check relevance
+  print $ relevant interest npc1Pos playerPos  -- True (within 500)
+  print $ relevant interest npc2Pos playerPos  -- False (too far)
+
+  -- Get priority modifier (closer = higher)
+  print $ priorityMod interest npc1Pos playerPos  -- ~0.9 (very close)
+  print $ priorityMod interest npc2Pos playerPos  -- 0.0 (out of range)
+
+-- Grid-based AOI (spatial partitioning)
+gridExample :: IO ()
+gridExample = do
+  let interest = newGridInterest 100.0  -- 100 unit cells
+
+  let playerPos = (150.0, 150.0, 0.0)  -- cell (1, 1)
+  let npc1Pos = (180.0, 120.0, 0.0)    -- cell (1, 1) - same cell
+  let npc2Pos = (250.0, 150.0, 0.0)    -- cell (2, 1) - neighbor
+  let npc3Pos = (500.0, 500.0, 0.0)    -- cell (5, 5) - far
+
+  print $ relevant interest npc1Pos playerPos  -- True (same cell)
+  print $ relevant interest npc2Pos playerPos  -- True (neighbor)
+  print $ relevant interest npc3Pos playerPos  -- False (too far)
+```
+
+---
+
+### 9. Priority-Based Replication
+
+Fair bandwidth allocation when you can't send everything:
+
+```haskell
+import GBNet.Priority
+
+replicationExample :: IO ()
+replicationExample = do
+  -- Register entities with base priorities (units per second)
+  let acc = newPriorityAccumulator
+          & register "player1" 20.0   -- players: high priority
+          & register "player2" 20.0
+          & register "npc1" 5.0       -- NPCs: medium priority
+          & register "npc2" 5.0
+          & register "tree1" 1.0      -- scenery: low priority
+          & register "tree2" 1.0
+
+  -- Simulate 100ms tick - priorities accumulate
+  let acc' = accumulate 0.1 acc
+
+  -- Check accumulated priorities
+  print $ getPriority "player1" acc'  -- Just 2.0 (20 * 0.1)
+  print $ getPriority "tree1" acc'    -- Just 0.1 (1 * 0.1)
+
+  -- Drain what fits in 500 byte budget
+  -- Assume each entity is ~100 bytes
+  let entitySize _ = 100
+  let (selected, acc'') = drainTop 500 entitySize acc'
+
+  -- selected will prioritize players, then NPCs
+  print selected  -- ["player1", "player2", "npc1", "npc2", "tree1"]
+                  -- (stops when budget exceeded)
+
+  -- Selected entities have priority reset to 0
+  -- Unselected entities keep accumulating
+  print $ getPriority "tree2" acc''  -- Still has accumulated priority
+```
+
+---
+
+### 10. Snapshot Interpolation
+
+Smooth rendering despite network jitter:
+
+```haskell
+import GBNet.Interpolation
+
+-- Your state must implement Interpolatable
+data Transform = Transform
+  { tX :: Float
+  , tY :: Float
+  } deriving (Eq, Show)
+
+instance Interpolatable Transform where
+  lerp a b t = Transform
+    { tX = tX a + (tX b - tX a) * t
+    , tY = tY a + (tY b - tY a) * t
+    }
+
+interpolationExample :: IO ()
+interpolationExample = do
+  -- Create buffer with 100ms playback delay
+  let buffer = newSnapshotBufferWithConfig 3 100.0
+
+  -- Server sends snapshots at t=0, t=50, t=100, t=150
+  let buffer1 = pushSnapshot 0.0 (Transform 0.0 0.0) buffer
+  let buffer2 = pushSnapshot 50.0 (Transform 10.0 5.0) buffer1
+  let buffer3 = pushSnapshot 100.0 (Transform 20.0 10.0) buffer2
+  let buffer4 = pushSnapshot 150.0 (Transform 30.0 15.0) buffer3
+
+  -- Check if ready for interpolation
+  print $ snapshotReady buffer4  -- True (3+ snapshots)
+
+  -- At render time 175ms, we sample at 175-100 = 75ms
+  -- This interpolates between t=50 and t=100
+  case sampleSnapshot 175.0 buffer4 of
+    Nothing -> putStrLn "Not ready"
+    Just t -> print t  -- Transform 15.0 7.5 (halfway between)
+
+  -- At render time 225ms, we sample at 125ms
+  -- Interpolates between t=100 and t=150
+  case sampleSnapshot 225.0 buffer4 of
+    Nothing -> putStrLn "Not ready"
+    Just t -> print t  -- Transform 25.0 12.5
+```

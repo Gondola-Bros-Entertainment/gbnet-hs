@@ -161,6 +161,91 @@ case event of
 
 ---
 
+## Replication Helpers
+
+### Delta Compression
+
+Only send changed fields to save bandwidth:
+
+```haskell
+import GBNet.Delta
+
+-- Implement NetworkDelta for your state type
+instance NetworkDelta PlayerState where
+  type Delta PlayerState = PlayerDelta
+  diff new old = PlayerDelta
+    { dPos = if pos new /= pos old then Just (pos new) else Nothing
+    , dHealth = if health new /= health old then Just (health new) else Nothing
+    }
+  apply state delta = state
+    { pos = fromMaybe (pos state) (dPos delta)
+    , health = fromMaybe (health state) (dHealth delta)
+    }
+
+-- Sender: encode against acknowledged baseline
+let (encoded, tracker') = deltaEncode seqNum currentState tracker
+
+-- Receiver: decode using baseline manager
+case deltaDecode encoded baselines of
+  Left err -> handleError err
+  Right state -> use state
+```
+
+### Interest Management
+
+Filter entities by area-of-interest:
+
+```haskell
+import GBNet.Interest
+
+-- Radius-based: entities within 100 units
+let interest = newRadiusInterest 100.0
+
+if relevant interest entityPos observerPos
+  then sendEntity entity
+  else skip  -- too far away
+
+-- Priority modifier: closer = higher priority
+let modifier = priorityMod interest entityPos observerPos
+```
+
+### Priority Accumulator
+
+Fair bandwidth allocation across entities:
+
+```haskell
+import GBNet.Priority
+
+let acc = newPriorityAccumulator
+        & register playerId 10.0   -- high priority
+        & register npcId 2.0       -- low priority
+
+-- Each tick: accumulate based on elapsed time
+let acc' = accumulate 0.016 acc
+
+-- Drain entities that fit in budget (1200 bytes)
+let (selected, acc'') = drainTop 1200 entitySize acc'
+-- selected = entities to replicate this tick
+```
+
+### Snapshot Interpolation
+
+Smooth client-side rendering:
+
+```haskell
+import GBNet.Interpolation
+
+-- Push server snapshots as they arrive
+let buffer' = pushSnapshot serverTime state buffer
+
+-- Sample interpolated state at render time
+case sampleSnapshot renderTime buffer' of
+  Nothing -> waitForMoreSnapshots
+  Just interpolated -> render interpolated
+```
+
+---
+
 ## Serialization
 
 ### Writing & Reading Bits
@@ -287,6 +372,10 @@ gbnet-hs/
 │   ├── Socket.hs             # UDP socket wrapper
 │   ├── Stats.hs              # Network statistics
 │   ├── Util.hs               # Sequence utilities
+│   ├── Delta.hs              # Delta compression for state sync
+│   ├── Interest.hs           # Area-of-interest filtering
+│   ├── Priority.hs           # Bandwidth-fair entity selection
+│   ├── Interpolation.hs      # Client-side snapshot smoothing
 │   └── Serialize/
 │       ├── BitBuffer.hs      # Bit-level read/write
 │       ├── Class.hs          # BitSerialize typeclass
@@ -325,6 +414,7 @@ The library is optimized for game networking workloads:
 
 ## Features
 
+### Core Transport
 - [x] Bitpacked serialization with sub-byte encoding
 - [x] Template Haskell derive for records and enums
 - [x] Custom bit widths via `BitWidth n a`
@@ -337,6 +427,12 @@ The library is optimized for game networking workloads:
 - [x] Network condition simulation (loss, latency, jitter)
 - [x] Congestion control (binary and window-based)
 - [x] Full Unicode text support via `Text`
+
+### High-Level Replication
+- [x] Delta compression (only send changed fields)
+- [x] Interest management (radius/grid area-of-interest)
+- [x] Priority accumulator (fair bandwidth allocation)
+- [x] Snapshot interpolation (smooth client-side rendering)
 
 ---
 
