@@ -68,7 +68,7 @@ newPriorityAccumulator = PriorityAccumulator Map.empty
 --
 -- Higher base priority = more frequent sends.
 -- Priority accumulates as @base * dt@ each tick.
-register :: Ord id => id -> Float -> PriorityAccumulator id -> PriorityAccumulator id
+register :: (Ord id) => id -> Float -> PriorityAccumulator id -> PriorityAccumulator id
 register entityId basePriority (PriorityAccumulator entries) =
   PriorityAccumulator $
     Map.insert
@@ -77,7 +77,7 @@ register entityId basePriority (PriorityAccumulator entries) =
       entries
 
 -- | Remove an entity from tracking.
-unregister :: Ord id => id -> PriorityAccumulator id -> PriorityAccumulator id
+unregister :: (Ord id) => id -> PriorityAccumulator id -> PriorityAccumulator id
 unregister entityId (PriorityAccumulator entries) =
   PriorityAccumulator $ Map.delete entityId entries
 
@@ -95,7 +95,7 @@ accumulate dt (PriorityAccumulator entries) =
 --
 -- Use with interest management: closer entities get modifier > 1.0,
 -- farther entities get modifier < 1.0.
-applyModifier :: Ord id => id -> Float -> PriorityAccumulator id -> PriorityAccumulator id
+applyModifier :: (Ord id) => id -> Float -> PriorityAccumulator id -> PriorityAccumulator id
 applyModifier entityId modifier (PriorityAccumulator entries) =
   PriorityAccumulator $
     Map.adjust
@@ -109,7 +109,7 @@ applyModifier entityId modifier (PriorityAccumulator entries) =
 -- Returns the selected entity IDs in priority order (highest first),
 -- and the updated accumulator with those entities' priorities reset.
 drainTop ::
-  Ord id =>
+  (Ord id) =>
   -- | Byte budget
   Int ->
   -- | Size function: id -> bytes
@@ -156,6 +156,6 @@ priorityIsEmpty :: PriorityAccumulator id -> Bool
 priorityIsEmpty = Map.null . paEntries
 
 -- | Get the current accumulated priority for an entity.
-getPriority :: Ord id => id -> PriorityAccumulator id -> Maybe Float
+getPriority :: (Ord id) => id -> PriorityAccumulator id -> Maybe Float
 getPriority entityId (PriorityAccumulator entries) =
   peAccumulated <$> Map.lookup entityId entries

@@ -36,7 +36,7 @@ data NetError
   deriving (Eq, Show)
 
 -- | Monad that can provide monotonic time.
-class Monad m => MonadTime m where
+class (Monad m) => MonadTime m where
   -- | Get current monotonic time in milliseconds.
   getMonoTime :: m MonoTime
 
@@ -46,7 +46,7 @@ class Monad m => MonadTime m where
 -- - Real IO with UDP sockets
 -- - Pure testing with simulated networks
 -- - Network condition simulation (latency, loss, reordering)
-class MonadTime m => MonadNetwork m where
+class (MonadTime m) => MonadNetwork m where
   -- | Send raw bytes to an address.
   -- Returns Left on failure, Right () on success.
   netSend :: SockAddr -> ByteString -> m (Either NetError ())
@@ -59,11 +59,11 @@ class MonadTime m => MonadNetwork m where
   netClose :: m ()
 
 -- | Lift MonadTime through StateT.
-instance MonadTime m => MonadTime (StateT s m) where
+instance (MonadTime m) => MonadTime (StateT s m) where
   getMonoTime = lift getMonoTime
 
 -- | Lift MonadNetwork through StateT.
-instance MonadNetwork m => MonadNetwork (StateT s m) where
+instance (MonadNetwork m) => MonadNetwork (StateT s m) where
   netSend addr bs = lift (netSend addr bs)
   netRecv = lift netRecv
   netClose = lift netClose

@@ -590,7 +590,7 @@ processChannelMessages now conn chIdx =
                       msgSeq = cmSequence msg
                       -- Prepend payload header: channel (3 bits) + is_fragment (1 bit)
                       -- Format: [is_fragment:1][reserved:4][channel:3]
-                      headerByte = fromIntegral chIdx .&. 0x07  -- Not a fragment
+                      headerByte = fromIntegral chIdx .&. 0x07 -- Not a fragment
                       wireData = BS.cons headerByte msgData
                       channels' = updateAt chIdx channel' channels
                       header = createHeaderInternal conn

@@ -155,8 +155,8 @@ advanceTime newTime = do
         Seq.partition (\p -> ifpDeliverAt p <= newTime) (tnsInFlight st)
       -- Only deliver packets addressed to us
       delivered =
-        fmap (\p -> (ifpData p, ifpFrom p)) $
-          Seq.filter (\p -> ifpTo p == tnsLocalAddr st) ready
+        (\p -> (ifpData p, ifpFrom p))
+          <$> Seq.filter (\p -> ifpTo p == tnsLocalAddr st) ready
   put
     st
       { tnsCurrentTime = newTime,
@@ -234,19 +234,17 @@ deliverPackets world =
       peersWithDelivered = foldr deliverOne peersWithPending ready
    in world {twPeers = peersWithDelivered}
   where
-    putBackPending pkt peers =
+    putBackPending pkt =
       Map.adjust
         (\ps -> ps {tnsInFlight = tnsInFlight ps Seq.|> pkt})
         (ifpFrom pkt)
-        peers
 
-    deliverOne pkt peers =
+    deliverOne pkt =
       Map.adjust
         ( \ps ->
             ps {tnsInbox = tnsInbox ps Seq.|> (ifpData pkt, ifpFrom pkt)}
         )
         (ifpTo pkt)
-        peers
 
 -- | Advance time for all peers in the world.
 worldAdvanceTime :: MonoTime -> TestWorld -> TestWorld

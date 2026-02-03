@@ -422,7 +422,7 @@ drainAllConnectionQueues _now peer =
 
 -- | Receive all available packets (polymorphic, non-blocking).
 -- Returns immediately if no data is available.
-peerRecvAllM :: MonadNetwork m => m [IncomingPacket]
+peerRecvAllM :: (MonadNetwork m) => m [IncomingPacket]
 peerRecvAllM = go []
   where
     go acc = do
@@ -434,14 +434,14 @@ peerRecvAllM = go []
            in go (pkt : acc)
 
 -- | Send all outgoing packets (polymorphic).
-peerSendAllM :: MonadNetwork m => [RawPacket] -> m ()
-peerSendAllM packets = mapM_ sendOne packets
+peerSendAllM :: (MonadNetwork m) => [RawPacket] -> m ()
+peerSendAllM = mapM_ sendOne
   where
     sendOne (RawPacket pid dat) = netSend (unPeerId pid) dat
 
 -- | Shutdown the peer (polymorphic).
 -- Sends disconnect packets to all connections and closes the network.
-peerShutdownM :: MonadNetwork m => NetPeer -> m ()
+peerShutdownM :: (MonadNetwork m) => NetPeer -> m ()
 peerShutdownM peer = do
   let peerIds = Map.keys (npConnections peer)
       peer' = foldr (queueControlPacket Disconnect BS.empty) peer peerIds
@@ -461,7 +461,7 @@ peerShutdownM peer = do
 --   gameLoop peer'
 -- @
 peerTick ::
-  MonadNetwork m =>
+  (MonadNetwork m) =>
   [(Word8, BS.ByteString)] ->
   NetPeer ->
   m ([PeerEvent], NetPeer)
@@ -965,8 +965,8 @@ peerBroadcast channel dat except now peer =
   let peerIds = filter (\p -> Just p /= except) $ Map.keys (npConnections peer)
       -- Queue message to each connection's channel
       peer' = foldr (\pid p -> fromRight p (peerSend pid channel dat now p)) peer peerIds
-      -- Drain connection queues to npSendQueue so packets are ready
-   in drainAllConnectionQueues now peer'
+   in -- Drain connection queues to npSendQueue so packets are ready
+      drainAllConnectionQueues now peer'
 
 -- | Get number of connected peers.
 peerCount :: NetPeer -> Int

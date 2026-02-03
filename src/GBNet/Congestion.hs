@@ -376,9 +376,9 @@ batchMessages messages maxSize = go messages [] [] batchHeaderSize 0
               go
                 rest
                 (currentBatch ++ [msg])
-                    batches
-                    (currentSize + msgWireSize)
-                    (msgCount + 1)
+                batches
+                (currentSize + msgWireSize)
+                (msgCount + 1)
 
     finalizeBatch :: Int -> [BS.ByteString] -> BS.ByteString
     finalizeBatch count msgs =

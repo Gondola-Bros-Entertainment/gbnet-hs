@@ -69,27 +69,27 @@ runNetT :: NetT m a -> NetState -> m (a, NetState)
 runNetT (NetT m) = runStateT m
 
 -- | Run a NetT computation, discarding final state.
-evalNetT :: Monad m => NetT m a -> NetState -> m a
+evalNetT :: (Monad m) => NetT m a -> NetState -> m a
 evalNetT (NetT m) = evalStateT m
 
 -- | Run a NetT computation, returning only final state.
-execNetT :: Monad m => NetT m a -> NetState -> m NetState
+execNetT :: (Monad m) => NetT m a -> NetState -> m NetState
 execNetT (NetT m) = execStateT m
 
 -- | Get the current network state.
-getNetState :: Monad m => NetT m NetState
+getNetState :: (Monad m) => NetT m NetState
 getNetState = NetT get
 
 -- | Get a field from network state.
-getsNetState :: Monad m => (NetState -> a) -> NetT m a
+getsNetState :: (Monad m) => (NetState -> a) -> NetT m a
 getsNetState = NetT . gets
 
 -- | Modify network state.
-modifyNetState :: Monad m => (NetState -> NetState) -> NetT m ()
+modifyNetState :: (Monad m) => (NetState -> NetState) -> NetT m ()
 modifyNetState = NetT . modify'
 
 -- | MonadIO instance for NetT.
-instance MonadIO m => MonadIO (NetT m) where
+instance (MonadIO m) => MonadIO (NetT m) where
   liftIO = NetT . liftIO
 
 -- | MonadTime instance for NetT IO.

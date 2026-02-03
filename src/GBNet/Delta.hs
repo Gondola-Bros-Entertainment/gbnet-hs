@@ -168,8 +168,9 @@ deltaOnAck seq' tracker =
     Just idx ->
       let (ackSeq, snapshot) = Seq.index (dtPending tracker) idx
           -- Drop everything older than the acked position
-          pending' = Seq.filter (\(s, _) -> sequenceDiff s ackSeq >= 0) $
-                     Seq.drop (idx + 1) (dtPending tracker)
+          pending' =
+            Seq.filter (\(s, _) -> sequenceDiff s ackSeq >= 0) $
+              Seq.drop (idx + 1) (dtPending tracker)
        in tracker
             { dtPending = pending',
               dtConfirmed = Just (ackSeq, snapshot)
@@ -218,8 +219,9 @@ newBaselineManager maxSnapshots timeoutMs =
 pushBaseline :: BaselineSeq -> a -> MonoTime -> BaselineManager a -> BaselineManager a
 pushBaseline seq' state now manager =
   let -- Evict expired
-      snapshots = Seq.filter (\(_, _, ts) -> elapsedMs ts now < bmTimeoutMs manager) $
-                  bmSnapshots manager
+      snapshots =
+        Seq.filter (\(_, _, ts) -> elapsedMs ts now < bmTimeoutMs manager) $
+          bmSnapshots manager
       -- Evict oldest if at capacity
       snapshots' =
         if Seq.length snapshots >= bmMaxSnapshots manager

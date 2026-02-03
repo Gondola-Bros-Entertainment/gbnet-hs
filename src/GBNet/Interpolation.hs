@@ -137,7 +137,7 @@ pushSnapshot timestamp state buffer =
 -- | Sample an interpolated state at @renderTime@ (in milliseconds).
 --
 -- Returns 'Nothing' if insufficient snapshots are buffered.
-sampleSnapshot :: Interpolatable a => Double -> SnapshotBuffer a -> Maybe a
+sampleSnapshot :: (Interpolatable a) => Double -> SnapshotBuffer a -> Maybe a
 sampleSnapshot renderTime buffer =
   let targetTime = renderTime - sbPlaybackDelayMs buffer
       snapshots = sbSnapshots buffer
@@ -146,7 +146,7 @@ sampleSnapshot renderTime buffer =
         else findAndInterpolate targetTime snapshots
 
 -- | Find bracketing snapshots and interpolate.
-findAndInterpolate :: Interpolatable a => Double -> Seq (TimestampedSnapshot a) -> Maybe a
+findAndInterpolate :: (Interpolatable a) => Double -> Seq (TimestampedSnapshot a) -> Maybe a
 findAndInterpolate targetTime snapshots =
   case findBracket targetTime (Seq.viewl snapshots) of
     Just (a, b) ->
