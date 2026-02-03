@@ -2,7 +2,7 @@
 <h1>gbnet-hs</h1>
 <p><strong>Game Networking for Haskell</strong></p>
 <p>Bitpacked serialization. Reliable UDP transport. Haskell port of <a href="https://github.com/gondola-bros-entertainment/gbnet">GB-Net</a>.</p>
-<p><a href="#quick-start">Quick Start</a> · <a href="#serialization">Serialization</a> · <a href="#architecture">Architecture</a></p>
+<p><a href="#quick-start">Quick Start</a> · <a href="#networking">Networking</a> · <a href="#serialization">Serialization</a> · <a href="#architecture">Architecture</a></p>
 <p>
 
 [![CI](https://github.com/gondola-bros-entertainment/gbnet-hs/actions/workflows/ci.yml/badge.svg)](https://github.com/gondola-bros-entertainment/gbnet-hs/actions/workflows/ci.yml)
@@ -16,9 +16,13 @@
 
 ## What is GB-Net-HS?
 
-Haskell port of [GB-Net](https://github.com/gondola-bros-entertainment/gbnet), a transport-level game networking library. Currently implements the bitpacked serialization layer with a pure functional API.
+Complete Haskell port of [GB-Net](https://github.com/gondola-bros-entertainment/gbnet), a transport-level game networking library providing:
 
-**Status:** Serialization complete. Transport layer in progress.
+- **Bitpacked serialization** - Sub-byte encoding for bandwidth efficiency
+- **Reliable UDP** - Connection-oriented with ACKs, retransmits, and ordering
+- **Unified Peer API** - Same code for client, server, or P2P mesh
+- **Connection migration** - Seamless IP address change handling
+- **Congestion control** - Adaptive send rates based on network conditions
 
 ---
 
@@ -30,6 +34,134 @@ Add to your `.cabal` file:
 build-depends:
     gbnet-hs
 ```
+
+### Creating a Peer
+
+```haskell
+import GBNet.Peer
+import GBNet.Config (defaultNetworkConfig)
+import Network.Socket (SockAddr(..))
+
+main :: IO ()
+main = do
+  let addr = SockAddrInet 7777 0  -- Bind to port 7777
+  now <- getCurrentTime           -- Your monotonic time source
+
+  result <- newPeer addr defaultNetworkConfig now
+  case result of
+    Left err -> print err
+    Right peer -> gameLoop peer now
+
+gameLoop :: NetPeer -> MonoTime -> IO ()
+gameLoop peer now = do
+  -- Process incoming packets and get events
+  (events, peer') <- peerUpdate now peer
+
+  -- Handle events
+  forM_ events $ \case
+    PeerConnected pid dir -> putStrLn $ "Connected: " ++ show pid
+    PeerDisconnected pid reason -> putStrLn $ "Disconnected: " ++ show reason
+    PeerMessage pid channel msg -> handleMessage pid channel msg
+    PeerMigrated oldPid newPid -> putStrLn "Peer address changed"
+
+  -- Send messages
+  let peer'' = case peerSend somePeerId 0 myData now peer' of
+        Left err -> peer'  -- Handle error
+        Right p -> p
+
+  gameLoop peer'' (now + tickDelta)
+```
+
+### Connecting to a Remote Peer
+
+```haskell
+-- Initiate connection (handshake happens automatically)
+peer' <- peerConnect (peerIdFromAddr remoteAddr) now peer
+
+-- The PeerConnected event will fire when handshake completes
+```
+
+### Sending Messages
+
+```haskell
+-- Send on channel 0 (reliability determined by channel config)
+case peerSend peerId 0 myData now peer of
+  Left ErrNotConnected -> handleNotConnected
+  Left ErrChannelFull -> handleBackpressure
+  Right peer' -> continue peer'
+
+-- Broadcast to all connected peers
+let peer' = peerBroadcast 0 myData Nothing now peer  -- Nothing = no exclusions
+```
+
+---
+
+## Networking
+
+### Peer Events
+
+```haskell
+data PeerEvent
+  = PeerConnected !PeerId !ConnectionDirection  -- Inbound or Outbound
+  | PeerDisconnected !PeerId !DisconnectReason
+  | PeerMessage !PeerId !Word8 !BS.ByteString   -- channel, data
+  | PeerMigrated !PeerId !PeerId                -- old address, new address
+```
+
+### Channel Reliability Modes
+
+Configure per-channel delivery guarantees:
+
+```haskell
+import GBNet.Channel
+
+-- Unreliable: fire-and-forget (position updates)
+let unreliable = defaultChannelConfig { ccReliabilityMode = Unreliable }
+
+-- Reliable ordered: guaranteed delivery, in-order (chat, RPC)
+let reliable = defaultChannelConfig { ccReliabilityMode = ReliableOrdered }
+
+-- Reliable sequenced: latest-only, drops stale (state sync)
+let sequenced = defaultChannelConfig { ccReliabilityMode = ReliableSequenced }
+```
+
+### Configuration
+
+```haskell
+import GBNet.Config
+
+let config = defaultNetworkConfig
+      { ncMaxClients = 32
+      , ncConnectionTimeoutMs = 10000.0
+      , ncKeepaliveIntervalMs = 1000.0
+      , ncMtu = 1200
+      , ncEnableConnectionMigration = True
+      }
+
+-- Validate before use
+case validateConfig config of
+  Left err -> handleConfigError err
+  Right () -> proceed
+```
+
+### Connection Migration
+
+When a peer's IP address changes (mobile roaming, NAT rebind), gbnet-hs automatically migrates the connection:
+
+```haskell
+-- Enable in config
+let config = defaultNetworkConfig { ncEnableConnectionMigration = True }
+
+-- Handle migration event
+case event of
+  PeerMigrated oldPid newPid ->
+    -- Update your peer ID mappings
+    updatePlayerAddress playerId newPid
+```
+
+---
+
+## Serialization
 
 ### Writing & Reading Bits
 
@@ -51,9 +183,8 @@ bitPosition buf  -- 28 (3.5 bytes on wire)
 ```haskell
 import GBNet.Serialize.BitBuffer
 import GBNet.Serialize.Class
-import Data.Word (Word8, Word16)
 
--- Serialize multiple typed values into one buffer
+-- Serialize multiple typed values
 let buf = bitSerialize (99 :: Word8)
         $ bitSerialize (5000 :: Word16)
         $ bitSerialize True
@@ -65,7 +196,6 @@ let buf = bitSerialize (99 :: Word8)
 ```haskell
 import GBNet.Serialize.Reader
 
--- Clean sequential reads with automatic error propagation
 let reader = do
       flag   <- deserializeM :: BitReader Bool
       health <- deserializeM :: BitReader Word16
@@ -73,7 +203,7 @@ let reader = do
       pure (flag, health, id_)
 
 case runBitReader reader buf of
-  Left err            -> handleError err
+  Left err -> handleError err
   Right (result, buf') -> use result
 ```
 
@@ -120,49 +250,22 @@ let buf = bitSerialize player empty
 bitPosition buf  -- 11
 ```
 
-### Measurement & Debug
+### Primitives Reference
 
-```haskell
-import GBNet.Serialize.BitBuffer
-
--- Measure serialized size without keeping the buffer
-serializedSizeBits (bitSerialize myPacket)   -- e.g. 68
-serializedSizeBytes (bitSerialize myPacket)  -- e.g. 9
-
--- Visualize buffer contents as a bit string
-toBitString buf  -- "10101011 00110011 101"
-```
-
----
-
-## Serialization
-
-### Primitives
-
-| Type | Bits | Haskell | Rust Equivalent |
-|------|------|---------|-----------------|
-| `Bool` | 1 | `bitSerialize True` | `bit_serialize(&true)` |
-| `Word8` | 8 | `bitSerialize (42 :: Word8)` | `bit_serialize(&42u8)` |
-| `Word16` | 16 | `bitSerialize (1234 :: Word16)` | `bit_serialize(&1234u16)` |
-| `Word32` | 32 | `bitSerialize (n :: Word32)` | `bit_serialize(&n)` |
-| `Word64` | 64 | `bitSerialize (n :: Word64)` | `bit_serialize(&n)` |
-| `Int8` | 8 | `bitSerialize (-1 :: Int8)` | `bit_serialize(&-1i8)` |
-| `Int16` | 16 | `bitSerialize (n :: Int16)` | `bit_serialize(&n)` |
-| `Int32` | 32 | `bitSerialize (n :: Int32)` | `bit_serialize(&n)` |
-| `Int64` | 64 | `bitSerialize (n :: Int64)` | `bit_serialize(&n)` |
-| `Float` | 32 | `bitSerialize (3.14 :: Float)` | `bit_serialize(&3.14f32)` |
-| `Double` | 64 | `bitSerialize (n :: Double)` | `bit_serialize(&n)` |
-| `BitWidth n a` | N | `bitSerialize (BitWidth 42 :: BitWidth 7 Word8)` | N/A (type-level custom bit width) |
-| Custom N | N | `writeBits value n` | `write_bits(value, n)` |
-
-### Collections & Composites
-
-| Type | Wire Format | Notes |
-|------|-------------|-------|
-| `Maybe a` | 1-bit flag + payload | `Nothing` = 0, `Just x` = 1 + serialize(x) |
-| `[a]` | 16-bit length + elements | Max 65535 elements, bounds-checked on deserialize |
-| `Text` | 16-bit byte-length + UTF-8 | The only string type. Wire-compatible with Rust `String`, full Unicode, bounds-checked |
-| `(a, b)` | serialize a, then b | Also 3-tuples and 4-tuples |
+| Type | Bits | Example |
+|------|------|---------|
+| `Bool` | 1 | `bitSerialize True` |
+| `Word8` | 8 | `bitSerialize (42 :: Word8)` |
+| `Word16` | 16 | `bitSerialize (1234 :: Word16)` |
+| `Word32` | 32 | `bitSerialize (n :: Word32)` |
+| `Word64` | 64 | `bitSerialize (n :: Word64)` |
+| `Int8`-`Int64` | 8-64 | Signed integers |
+| `Float` | 32 | `bitSerialize (3.14 :: Float)` |
+| `Double` | 64 | `bitSerialize (n :: Double)` |
+| `Maybe a` | 1 + payload | `bitSerialize (Just 42)` |
+| `[a]` | 16 + elements | Max 65535 elements |
+| `Text` | 16 + UTF-8 | Full Unicode support |
+| `BitWidth n a` | n | Custom bit width |
 
 ---
 
@@ -170,26 +273,27 @@ toBitString buf  -- "10101011 00110011 101"
 
 ```
 gbnet-hs/
-├── src/
-│   └── GBNet/
-│       ├── Packet.hs              # Packet types & header wire format
-│       ├── Reliability.hs         # RTT, ACK tracking, retransmit logic
-│       ├── Channel.hs             # Delivery modes (unreliable, reliable, ordered)
-│       ├── Config.hs              # Network configuration & validation
-│       ├── Congestion.hs          # Congestion control & bandwidth tracking
-│       ├── Stats.hs               # Connection quality & statistics
-│       ├── Util.hs                # Sequence number arithmetic
-│       └── Serialize/
-│           ├── BitBuffer.hs       # Bit-level read/write buffer
-│           ├── Class.hs           # BitSerialize / BitDeserialize typeclasses
-│           ├── Reader.hs          # BitReader monad for clean deserialization
-│           └── TH.hs              # Template Haskell derive for custom types
-├── test/
-│   └── Main.hs                    # 126 round-trip tests
-├── .github/
-│   └── workflows/
-│       └── ci.yml                 # GitHub Actions CI (build, test, hlint, ormolu)
-└── gbnet-hs.cabal                 # Package manifest
+├── src/GBNet/
+│   ├── Peer.hs               # Unified networking API
+│   ├── Connection.hs         # Connection state machine
+│   ├── Packet.hs             # Wire protocol (68-bit header)
+│   ├── Reliability.hs        # RTT, ACKs, retransmit
+│   ├── Channel.hs            # Delivery modes
+│   ├── Fragment.hs           # Large message fragmentation
+│   ├── Congestion.hs         # Congestion control
+│   ├── Config.hs             # Configuration & validation
+│   ├── Security.hs           # CRC32, rate limiting
+│   ├── Simulator.hs          # Network condition simulation
+│   ├── Socket.hs             # UDP socket wrapper
+│   ├── Stats.hs              # Network statistics
+│   ├── Util.hs               # Sequence utilities
+│   └── Serialize/
+│       ├── BitBuffer.hs      # Bit-level read/write
+│       ├── Class.hs          # BitSerialize typeclass
+│       ├── Reader.hs         # BitReader monad
+│       └── TH.hs             # Template Haskell derive
+├── test/Main.hs              # 126+ round-trip tests
+└── gbnet-hs.cabal
 ```
 
 ---
@@ -199,47 +303,50 @@ gbnet-hs/
 Requires [GHCup](https://www.haskell.org/ghcup/) with GHC >= 9.6.
 
 ```bash
-cabal build              # Build library
-cabal test               # Run all tests
-cabal build -Werror      # Warnings as errors
-cabal haddock            # Generate docs
+cabal build                              # Build library
+cabal test                               # Run all tests
+cabal build --ghc-options="-Werror"      # Warnings as errors
+hlint src/                               # Lint check
+cabal haddock                            # Generate docs
 ```
 
 ---
 
-## Roadmap
+## Performance
 
-**Serialization (complete):**
-- [x] Bitpacked serialization (BitBuffer)
-- [x] Typeclass-based serialize/deserialize
-- [x] Collections (Maybe, List, Text, tuples)
-- [x] Monadic reader (BitReader)
-- [x] Packet header / wire format
-- [x] Template Haskell derive (records, enums, enums with payloads)
-- [x] Measurement utilities (serializedSizeBits/Bytes)
-- [x] Debug visualization (toBitString)
-- [x] Byte-aligned fast paths (writeBits/readBits)
-- [x] Custom bit widths (`BitWidth n a` via type-level Nat)
-- [x] Deserialization bounds checking (List, Text)
-- [x] Text-only strings (full Unicode via Text, no Char/String instances)
+The library is optimized for game networking workloads:
 
-**Transport layer:**
-- [x] Reliability layer (RTT, ACK, retransmit)
-- [x] Channel system (delivery modes)
-- [x] Configuration (NetworkConfig, SimulationConfig)
-- [x] Congestion control (binary Good/Bad, TCP-like window)
-- [x] Statistics (NetworkStats, ChannelStats, ConnectionQuality)
-- [ ] Connection state machine
-- [ ] Fragmentation / reassembly
-- [ ] Security (CRC32C, connect tokens, rate limiting)
-- [ ] Network simulator (loss, latency, jitter)
-- [ ] UDP transport (NetServer / NetClient)
+- **Strict fields** with bang patterns throughout
+- **GHC optimization flags**: `-O2 -fspecialise-aggressively -fexpose-all-unfoldings`
+- **INLINE pragmas** on hot paths (serialization, packet handling)
+- **Byte-aligned fast paths** when bit position is aligned
+
+---
+
+## Features
+
+- [x] Bitpacked serialization with sub-byte encoding
+- [x] Template Haskell derive for records and enums
+- [x] Custom bit widths via `BitWidth n a`
+- [x] Reliable/unreliable/sequenced delivery modes
+- [x] RTT estimation and adaptive retransmit
+- [x] Large message fragmentation and reassembly
+- [x] Connection migration (IP address changes)
+- [x] CRC32 packet validation
+- [x] Rate limiting for DoS protection
+- [x] Network condition simulation (loss, latency, jitter)
+- [x] Congestion control (binary and window-based)
+- [x] Full Unicode text support via `Text`
 
 ---
 
 ## Contributing
 
-Contributions welcome. Run `cabal test && cabal build --ghc-options="-Werror"` before submitting PRs.
+Contributions welcome. Run before submitting PRs:
+
+```bash
+cabal test && cabal build --ghc-options="-Werror" && hlint src/
+```
 
 ---
 

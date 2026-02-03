@@ -201,7 +201,8 @@ data NetworkConfig = NetworkConfig
     ncMaxPending :: !Int,
     ncRateLimitPerSecond :: !Int,
     ncUseCwndCongestion :: !Bool,
-    ncSimulation :: !(Maybe SimulationConfig)
+    ncSimulation :: !(Maybe SimulationConfig),
+    ncEnableConnectionMigration :: !Bool
   }
   deriving (Show)
 
@@ -240,7 +241,8 @@ defaultNetworkConfig =
       ncMaxPending = 256,
       ncRateLimitPerSecond = 10,
       ncUseCwndCongestion = False,
-      ncSimulation = Nothing
+      ncSimulation = Nothing,
+      ncEnableConnectionMigration = True
     }
 
 -- | Validate configuration, returning an error if invalid.

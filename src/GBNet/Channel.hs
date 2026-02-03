@@ -25,6 +25,8 @@ module GBNet.Channel
     -- * Channel
     Channel (..),
     newChannel,
+    resetChannel,
+    channelIsReliable,
     channelSend,
     getOutgoingMessage,
     getRetransmitMessages,
@@ -33,6 +35,9 @@ module GBNet.Channel
     channelReceive,
     takePendingAcks,
     channelUpdate,
+
+    -- * Errors
+    ChannelError (..),
   )
 where
 
@@ -379,3 +384,30 @@ flushTimedOutOrdered now ch
                     }
   where
     timedOut timeout (_, arriveTime) = elapsedMs arriveTime now >= timeout
+
+-- | Reset channel to initial state.
+resetChannel :: Channel -> Channel
+resetChannel ch =
+  ch
+    { chLocalSequence = 0,
+      chRemoteSequence = 0,
+      chSendBuffer = Map.empty,
+      chReceiveBuffer = [],
+      chPendingAck = [],
+      chOrderedReceiveBuffer = Map.empty,
+      chOrderedExpected = 0,
+      chTotalSent = 0,
+      chTotalReceived = 0,
+      chTotalDropped = 0,
+      chTotalRetransmits = 0
+    }
+
+-- | Check if channel uses reliable delivery.
+channelIsReliable :: Channel -> Bool
+channelIsReliable ch = isReliable (ccDeliveryMode (chConfig ch))
+
+-- | Channel errors.
+data ChannelError
+  = ChannelBufferFull
+  | ChannelMessageTooLarge
+  deriving (Eq, Show)

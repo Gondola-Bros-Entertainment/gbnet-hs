@@ -1,8 +1,183 @@
 # Examples
 
-Practical game networking serialization examples showcasing the gbnet-hs API.
+Practical examples showcasing the gbnet-hs API for game networking.
 
-All examples assume these imports:
+---
+
+## Networking Examples
+
+These examples use the Peer API for UDP networking.
+
+```haskell
+import GBNet.Peer
+import GBNet.Config
+import GBNet.Channel
+import Network.Socket (SockAddr(..), tupleToHostAddress)
+import qualified Data.ByteString as BS
+```
+
+### Basic Server
+
+```haskell
+-- A simple server that echoes messages back
+runServer :: IO ()
+runServer = do
+  let addr = SockAddrInet 7777 0  -- Port 7777, all interfaces
+  let config = defaultNetworkConfig { ncMaxClients = 16 }
+
+  result <- newPeer addr config 0  -- 0 = initial time
+  case result of
+    Left err -> putStrLn $ "Failed to bind: " ++ show err
+    Right peer -> serverLoop peer 0
+
+serverLoop :: NetPeer -> MonoTime -> IO ()
+serverLoop peer now = do
+  -- Process network (receive packets, handle connections)
+  (events, peer') <- peerUpdate now peer
+
+  -- Handle events
+  peer'' <- foldM (handleEvent now) peer' events
+
+  -- Tick at ~60hz
+  threadDelay 16667
+  serverLoop peer'' (now + 16.667)
+
+handleEvent :: MonoTime -> NetPeer -> PeerEvent -> IO NetPeer
+handleEvent now peer event = case event of
+  PeerConnected pid dir ->
+    putStrLn ("Connected: " ++ show pid ++ " " ++ show dir) >> return peer
+
+  PeerDisconnected pid reason ->
+    putStrLn ("Disconnected: " ++ show pid ++ " " ++ show reason) >> return peer
+
+  PeerMessage pid channel msg -> do
+    putStrLn $ "Received " ++ show (BS.length msg) ++ " bytes on channel " ++ show channel
+    -- Echo back on same channel
+    case peerSend pid channel msg now peer of
+      Left err -> putStrLn ("Send error: " ++ show err) >> return peer
+      Right peer' -> return peer'
+
+  PeerMigrated oldPid newPid ->
+    putStrLn ("Peer migrated: " ++ show oldPid ++ " -> " ++ show newPid) >> return peer
+```
+
+### Basic Client
+
+```haskell
+-- A client that connects and sends a message
+runClient :: IO ()
+runClient = do
+  let localAddr = SockAddrInet 0 0  -- Ephemeral port
+  let serverAddr = SockAddrInet 7777 (tupleToHostAddress (127, 0, 0, 1))
+
+  result <- newPeer localAddr defaultNetworkConfig 0
+  case result of
+    Left err -> putStrLn $ "Failed to create peer: " ++ show err
+    Right peer -> do
+      -- Initiate connection
+      peer' <- peerConnect (peerIdFromAddr serverAddr) 0 peer
+      clientLoop peer' 0 False
+
+clientLoop :: NetPeer -> MonoTime -> Bool -> IO ()
+clientLoop peer now connected = do
+  (events, peer') <- peerUpdate now peer
+
+  -- Check for connection event
+  (peer'', connected') <- foldM (handleClientEvent now) (peer', connected) events
+
+  -- Tick
+  threadDelay 16667
+  clientLoop peer'' (now + 16.667) connected'
+
+handleClientEvent :: MonoTime -> (NetPeer, Bool) -> PeerEvent -> IO (NetPeer, Bool)
+handleClientEvent now (peer, connected) event = case event of
+  PeerConnected pid _ -> do
+    putStrLn "Connected to server!"
+    -- Send a message on channel 0
+    let msg = BS.pack [72, 101, 108, 108, 111]  -- "Hello"
+    case peerSend pid 0 msg now peer of
+      Left err -> putStrLn ("Send error: " ++ show err) >> return (peer, True)
+      Right peer' -> return (peer', True)
+
+  PeerMessage _ _ msg -> do
+    putStrLn $ "Server replied: " ++ show msg
+    return (peer, connected)
+
+  PeerDisconnected _ reason -> do
+    putStrLn $ "Disconnected: " ++ show reason
+    return (peer, False)
+
+  _ -> return (peer, connected)
+```
+
+### P2P Mesh
+
+```haskell
+-- A peer that both listens and connects (P2P mode)
+runP2PPeer :: Int -> [SockAddr] -> IO ()
+runP2PPeer port remotes = do
+  let addr = SockAddrInet (fromIntegral port) 0
+  let config = defaultNetworkConfig
+        { ncMaxClients = 64
+        , ncEnableConnectionMigration = True
+        }
+
+  result <- newPeer addr config 0
+  case result of
+    Left err -> putStrLn $ "Failed: " ++ show err
+    Right peer -> do
+      -- Connect to all known peers
+      peer' <- foldM (\p remote -> peerConnect (peerIdFromAddr remote) 0 p) peer remotes
+      p2pLoop peer' 0
+
+p2pLoop :: NetPeer -> MonoTime -> IO ()
+p2pLoop peer now = do
+  (events, peer') <- peerUpdate now peer
+
+  -- Broadcast any received message to all other peers
+  peer'' <- foldM (broadcastMessage now) peer' events
+
+  threadDelay 16667
+  p2pLoop peer'' (now + 16.667)
+
+broadcastMessage :: MonoTime -> NetPeer -> PeerEvent -> IO NetPeer
+broadcastMessage now peer event = case event of
+  PeerMessage sender channel msg ->
+    -- Broadcast to everyone except sender
+    return $ peerBroadcast channel msg (Just sender) now peer
+  _ -> return peer
+```
+
+### Channel Configuration
+
+```haskell
+-- Configure different reliability modes per channel
+let config = defaultNetworkConfig
+      { ncChannelConfigs =
+          [ -- Channel 0: Position updates (unreliable, latest-only)
+            defaultChannelConfig
+              { ccReliabilityMode = Unreliable
+              , ccPriority = 200  -- High priority
+              }
+          , -- Channel 1: Player actions (reliable, ordered)
+            defaultChannelConfig
+              { ccReliabilityMode = ReliableOrdered
+              , ccPriority = 150
+              }
+          , -- Channel 2: Chat (reliable, but order doesn't matter)
+            defaultChannelConfig
+              { ccReliabilityMode = ReliableSequenced
+              , ccPriority = 50  -- Low priority
+              }
+          ]
+      }
+```
+
+---
+
+## Serialization Examples
+
+All serialization examples assume these imports:
 
 ```haskell
 {-# LANGUAGE DataKinds #-}

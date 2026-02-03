@@ -27,6 +27,12 @@ library
     GBNet.Config
     GBNet.Congestion
     GBNet.Stats
+    GBNet.Connection
+    GBNet.Fragment
+    GBNet.Security
+    GBNet.Simulator
+    GBNet.Socket
+    GBNet.Peer
 
   build-depends:
       base                >= 4.16 && < 5
@@ -35,10 +41,18 @@ library
     , template-haskell    >= 2.18
     , containers          >= 0.6
     , vector              >= 0.12
+    , network             >= 3.1
 
   hs-source-dirs:   src
   default-language:  Haskell2010
-  ghc-options:       -Wall -Wcompat -Wincomplete-record-updates -Wincomplete-uni-patterns
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -O2
+    -fspecialise-aggressively
+    -fexpose-all-unfoldings
 
 test-suite gbnet-test
   type:             exitcode-stdio-1.0

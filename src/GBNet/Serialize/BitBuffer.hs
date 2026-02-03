@@ -90,6 +90,7 @@ fromBytes bs =
       bitPos = 0,
       readPos = 0
     }
+{-# INLINE fromBytes #-}
 
 -- | Write a single bit (MSB-first within each byte).
 writeBit :: Bool -> BitBuffer -> BitBuffer
@@ -139,6 +140,7 @@ writeBits value numBits buf
   where
     writeSingleBit :: BitBuffer -> Int -> BitBuffer
     writeSingleBit b i = writeBit (testBit value i) b
+{-# INLINE writeBits #-}
 
 -- | Read a single bit from the buffer.
 readBit :: BitBuffer -> Either String (ReadResult Bool)
@@ -156,6 +158,7 @@ readBit buf =
                   { readValue = bit,
                     readBuffer = buf {readPos = readPos buf + 1}
                   }
+{-# INLINE readBit #-}
 
 -- | Read N bits into a Word64.
 readBits :: Int -> BitBuffer -> Either String (ReadResult Word64)
@@ -195,6 +198,7 @@ toBytes :: BitBuffer -> BS.ByteString
 toBytes buf =
   let totalBytes = (bitPos buf + msbIndex) `div` bitsPerByte
    in BS.take totalBytes (bufferBytes buf)
+{-# INLINE toBytes #-}
 
 -- | Current write position in bits.
 bitPosition :: BitBuffer -> Int

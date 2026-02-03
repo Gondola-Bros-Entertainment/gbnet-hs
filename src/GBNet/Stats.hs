@@ -19,10 +19,15 @@ module GBNet.Stats
     -- * Reliability statistics
     ReliabilityStats (..),
     defaultReliabilityStats,
+
+    -- * Socket statistics
+    SocketStats (..),
+    defaultSocketStats,
   )
 where
 
 import Data.Word (Word64)
+import GBNet.Reliability (MonoTime)
 
 -- | Connection quality assessment.
 data ConnectionQuality
@@ -111,4 +116,27 @@ defaultReliabilityStats =
       rsEvicted = 0,
       rsBytesSent = 0,
       rsBytesAcked = 0
+    }
+
+-- | Socket-level statistics.
+data SocketStats = SocketStats
+  { ssPacketsSent :: !Word64,
+    ssPacketsReceived :: !Word64,
+    ssBytesSent :: !Word64,
+    ssBytesReceived :: !Word64,
+    ssLastSendTime :: !(Maybe MonoTime),
+    ssLastReceiveTime :: !(Maybe MonoTime)
+  }
+  deriving (Show)
+
+-- | Default socket statistics.
+defaultSocketStats :: SocketStats
+defaultSocketStats =
+  SocketStats
+    { ssPacketsSent = 0,
+      ssPacketsReceived = 0,
+      ssBytesSent = 0,
+      ssBytesReceived = 0,
+      ssLastSendTime = Nothing,
+      ssLastReceiveTime = Nothing
     }
