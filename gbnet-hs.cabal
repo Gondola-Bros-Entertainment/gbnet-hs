@@ -33,6 +33,10 @@ library
     GBNet.Simulator
     GBNet.Socket
     GBNet.Peer
+    GBNet.Delta
+    GBNet.Interest
+    GBNet.Priority
+    GBNet.Interpolation
 
   build-depends:
       base                >= 4.16 && < 5

@@ -37,6 +37,8 @@ module GBNet.Config
     minMtu,
     maxMtu,
     maxChannelCount,
+    defaultDeltaBaselineTimeoutMs,
+    defaultMaxBaselineSnapshots,
 
     -- * Configuration
     NetworkConfig (..),
@@ -151,6 +153,14 @@ maxMtu = 65535
 maxChannelCount :: Int
 maxChannelCount = 256
 
+-- | Default delta baseline timeout in milliseconds.
+defaultDeltaBaselineTimeoutMs :: Double
+defaultDeltaBaselineTimeoutMs = 2000.0
+
+-- | Default maximum baseline snapshots for delta compression.
+defaultMaxBaselineSnapshots :: Int
+defaultMaxBaselineSnapshots = 32
+
 -- | Configuration validation errors.
 data ConfigError
   = FragmentThresholdExceedsMtu
@@ -202,7 +212,9 @@ data NetworkConfig = NetworkConfig
     ncRateLimitPerSecond :: !Int,
     ncUseCwndCongestion :: !Bool,
     ncSimulation :: !(Maybe SimulationConfig),
-    ncEnableConnectionMigration :: !Bool
+    ncEnableConnectionMigration :: !Bool,
+    ncDeltaBaselineTimeoutMs :: !Double,
+    ncMaxBaselineSnapshots :: !Int
   }
   deriving (Show)
 
@@ -242,7 +254,9 @@ defaultNetworkConfig =
       ncRateLimitPerSecond = 10,
       ncUseCwndCongestion = False,
       ncSimulation = Nothing,
-      ncEnableConnectionMigration = True
+      ncEnableConnectionMigration = True,
+      ncDeltaBaselineTimeoutMs = defaultDeltaBaselineTimeoutMs,
+      ncMaxBaselineSnapshots = defaultMaxBaselineSnapshots
     }
 
 -- | Validate configuration, returning an error if invalid.
