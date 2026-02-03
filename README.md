@@ -39,12 +39,12 @@ build-depends:
 
 ```haskell
 import GBNet
-import Network.Socket (SockAddr(..))
+import Control.Monad.IO.Class (liftIO)
 
 main :: IO ()
 main = do
   -- Initialize network
-  let bindAddr = SockAddrInet 7777 0
+  let bindAddr = anyAddr 7777
   Right netState <- initNetState bindAddr
 
   -- Create peer

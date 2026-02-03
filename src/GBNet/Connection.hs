@@ -35,7 +35,6 @@ module GBNet.Connection
     updateTick,
 
     -- * Packet handling
-    handlePacket,
     drainSendQueue,
     createHeader,
     processIncomingHeader,
@@ -59,8 +58,12 @@ where
 
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
+import Data.List (sortBy)
+import Data.Ord (Down (..), comparing)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import Data.Vector (Vector)
+import qualified Data.Vector as V
 import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Channel (Channel, ChannelError (..), ChannelMessage (..))
 import qualified GBNet.Channel as Channel
@@ -69,6 +72,7 @@ import GBNet.Congestion
   ( BandwidthTracker,
     CongestionController,
     CongestionWindow,
+    btBytesPerSecond,
     btRecord,
     ccCanSend,
     ccDeductBudget,
@@ -169,7 +173,7 @@ data Connection = Connection
     connRemoteSeq :: !Word16,
     -- Subsystems
     connReliability :: !ReliableEndpoint,
-    connChannels :: ![Channel],
+    connChannels :: !(Vector Channel),
     connChannelPriority :: ![Int],
     connCongestion :: !CongestionController,
     connCwnd :: !(Maybe CongestionWindow),
@@ -195,8 +199,10 @@ newConnection config clientSalt now =
       defaultCfg = ncDefaultChannelConfig config
       -- Pad custom configs with defaults, then take exactly numChannels
       configs = take numChannels $ ncChannelConfigs config ++ repeat defaultCfg
-      channels = zipWith Channel.newChannel [0 ..] configs
-      priorityOrder = [0 .. numChannels - 1] -- TODO: sort by priority
+      channels = V.fromList $ zipWith Channel.newChannel [0 ..] configs
+      -- Sort channel indices by priority (highest first)
+      priorityOrder =
+        sortBy (comparing (Down . Channel.ccPriority . (configs !!))) [0 .. numChannels - 1]
       congestion =
         newCongestionController
           (ncSendRate config)
@@ -249,7 +255,7 @@ connectionStats = connStats
 
 -- | Get number of channels.
 channelCount :: Connection -> Word8
-channelCount conn = fromIntegral $ length (connChannels conn)
+channelCount conn = fromIntegral $ V.length (connChannels conn)
 
 -- | Initiate connection.
 connect :: MonoTime -> Connection -> Either ConnectionError Connection
@@ -290,30 +296,32 @@ disconnect reason now conn
 sendMessage :: Word8 -> BS.ByteString -> MonoTime -> Connection -> Either ConnectionError Connection
 sendMessage channelId payload now conn
   | connState conn /= Connected = Left ErrNotConnected
-  | fromIntegral channelId >= length (connChannels conn) = Left (ErrInvalidChannel channelId)
+  | idx >= V.length channels = Left (ErrInvalidChannel channelId)
   | otherwise =
-      let channels = connChannels conn
-          idx = fromIntegral channelId
-          channel = channels !! idx
+      let channel = channels V.! idx
        in case Channel.channelSend payload now channel of
             Nothing -> Left (ErrChannelError ChannelBufferFull)
             Just (_msgSeq, channel') ->
-              let channels' = updateAt idx channel' channels
+              let channels' = channels V.// [(idx, channel')]
                in Right conn {connChannels = channels'}
+  where
+    channels = connChannels conn
+    idx = fromIntegral channelId
 
 -- | Receive a message from a channel.
 receiveMessage :: Word8 -> Connection -> (Maybe BS.ByteString, Connection)
 receiveMessage channelId conn
-  | fromIntegral channelId >= length (connChannels conn) = (Nothing, conn)
+  | idx >= V.length channels = (Nothing, conn)
   | otherwise =
-      let channels = connChannels conn
-          idx = fromIntegral channelId
-          channel = channels !! idx
+      let channel = channels V.! idx
           (msgs, channel') = Channel.channelReceive channel
-          channels' = updateAt idx channel' channels
+          channels' = channels V.// [(idx, channel')]
        in case msgs of
             [] -> (Nothing, conn {connChannels = channels'})
             (m : _) -> (Just m, conn {connChannels = channels'})
+  where
+    channels = connChannels conn
+    idx = fromIntegral channelId
 
 -- | Create a packet header (increments local sequence).
 createHeader :: Connection -> (PacketHeader, Connection)
@@ -352,85 +360,6 @@ sendConnectionRequest conn =
           }
    in conn {connSendQueue = connSendQueue conn Seq.|> pkt}
 
--- | Handle an incoming packet.
-handlePacket :: PacketHeader -> PacketType -> BS.ByteString -> MonoTime -> Connection -> Either ConnectionError Connection
-handlePacket header pktType payload now conn =
-  case (connState conn, pktType) of
-    (Connecting, ConnectionChallenge) ->
-      -- Parse server salt from payload (first 8 bytes)
-      let serverSalt = parseWord64BS payload
-          conn' =
-            conn
-              { connServerSalt = serverSalt,
-                connState = ChallengeResponse
-              }
-          respHeader = createHeaderInternal conn'
-          response =
-            OutgoingPacket
-              { opHeader = respHeader,
-                opType = ConnectionResponse,
-                opPayload = word64ToBS (connClientSalt conn')
-              }
-       in Right
-            conn'
-              { connSendQueue = connSendQueue conn' Seq.|> response,
-                connLocalSeq = connLocalSeq conn' + 1
-              }
-    (ChallengeResponse, ConnectionAccepted) ->
-      Right
-        conn
-          { connState = Connected,
-            connStartTime = Just now,
-            connLastRecvTime = now,
-            connLocalSeq = 0,
-            connRemoteSeq = 0
-          }
-    (Connecting, ConnectionDenied) ->
-      let reason = if BS.null payload then 0 else BS.head payload
-       in Left (ErrConnectionDenied reason)
-    (ChallengeResponse, ConnectionDenied) ->
-      let reason = if BS.null payload then 0 else BS.head payload
-       in Left (ErrConnectionDenied reason)
-    (Connected, _) ->
-      Right $ handleConnectedPacket header pktType payload now conn
-    (Disconnecting, Disconnect) ->
-      Right $ resetConnection conn {connState = Disconnected}
-    _ -> Right conn
-
--- | Handle packet while connected.
-handleConnectedPacket :: PacketHeader -> PacketType -> BS.ByteString -> MonoTime -> Connection -> Connection
-handleConnectedPacket header pktType payload now conn =
-  let conn' = processIncomingHeader header now conn
-   in case pktType of
-        Payload ->
-          -- Deliver to channel 0 for now (channel ID should be in payload)
-          let channelId = 0 :: Int
-              msgSeq = sequenceNum header
-           in if channelId < length (connChannels conn')
-                then
-                  let channels = connChannels conn'
-                      channel = channels !! channelId
-                      channel' = Channel.onMessageReceived msgSeq payload now channel
-                      channels' = updateAt channelId channel' channels
-                   in conn' {connChannels = channels'}
-                else conn'
-        Disconnect ->
-          let respHeader = createHeaderInternal conn'
-              ackPkt =
-                OutgoingPacket
-                  { opHeader = respHeader,
-                    opType = Disconnect,
-                    opPayload = BS.singleton (disconnectReasonCode ReasonRequested)
-                  }
-           in resetConnection
-                conn'
-                  { connState = Disconnected,
-                    connSendQueue = connSendQueue conn' Seq.|> ackPkt,
-                    connLocalSeq = connLocalSeq conn' + 1
-                  }
-        Keepalive -> conn'
-        _ -> conn'
-
 -- | Process incoming packet header for reliability.
 processIncomingHeader :: PacketHeader -> MonoTime -> Connection -> Connection
 processIncomingHeader header now conn =
@@ -460,11 +389,11 @@ processIncomingHeader header now conn =
   where
     ackChannelMessage c (chId, chSeq) =
       let idx = fromIntegral chId
-       in if idx < length (connChannels c)
+          channels = connChannels c
+       in if idx < V.length channels
             then
-              let channels = connChannels c
-                  channel = Channel.acknowledgeMessage chSeq (channels !! idx)
-                  channels' = updateAt idx channel channels
+              let channel = Channel.acknowledgeMessage chSeq (channels V.! idx)
+                  channels' = channels V.// [(idx, channel)]
                in c {connChannels = channels'}
             else c
 
@@ -534,7 +463,7 @@ updateConnected now conn = do
       let conn'''' = processChannelOutput now conn'''
 
       -- Update channels
-      let channels' = map (Channel.channelUpdate now) (connChannels conn'''')
+      let channels' = V.map (Channel.channelUpdate now) (connChannels conn'''')
           conn''''' = conn'''' {connChannels = channels'}
 
       -- Send AckOnly if needed
@@ -549,8 +478,8 @@ updateConnected now conn = do
             (connStats conn'''''')
               { nsRtt = realToFrac (Rel.srttMs rel),
                 nsPacketLoss = Rel.packetLossPercent rel,
-                nsBandwidthUp = 0, -- TODO: from bandwidth tracker
-                nsBandwidthDown = 0,
+                nsBandwidthUp = realToFrac (btBytesPerSecond (connBandwidthUp conn'''''')),
+                nsBandwidthDown = realToFrac (btBytesPerSecond (connBandwidthDown conn'''''')),
                 nsConnectionQuality = assessConnectionQuality (nsRtt stats) (nsPacketLoss stats * 100)
               }
       Right
@@ -567,7 +496,7 @@ processChannelOutput now conn =
 
 processChannelIdx :: MonoTime -> Connection -> Int -> Connection
 processChannelIdx now conn chIdx =
-  if chIdx >= length (connChannels conn)
+  if chIdx >= V.length (connChannels conn)
     then conn
     else processChannelMessages now conn chIdx
 
@@ -582,7 +511,7 @@ processChannelMessages now conn chIdx =
         then conn
         else
           let channels = connChannels conn
-              channel = channels !! chIdx
+              channel = channels V.! chIdx
            in case Channel.getOutgoingMessage channel of
                 Nothing -> conn
                 Just (msg, channel') ->
@@ -592,7 +521,7 @@ processChannelMessages now conn chIdx =
                       -- Format: [is_fragment:1][reserved:4][channel:3]
                       headerByte = fromIntegral chIdx .&. 0x07 -- Not a fragment
                       wireData = BS.cons headerByte msgData
-                      channels' = updateAt chIdx channel' channels
+                      channels' = channels V.// [(chIdx, channel')]
                       header = createHeaderInternal conn
                       pkt =
                         OutgoingPacket
@@ -702,7 +631,7 @@ resetConnection conn =
           connDisconnectRetries = 0,
           connPendingAck = False,
           connDataSentThisTick = False,
-          connChannels = map Channel.resetChannel (connChannels conn),
+          connChannels = V.map Channel.resetChannel (connChannels conn),
           connCongestion =
             newCongestionController
               (ncSendRate config)
@@ -768,27 +697,3 @@ recordBytesReceived bytes now conn =
         { connBandwidthDown = bw,
           connStats = stats'
         }
-
--- | Update element at index in list.
-updateAt :: Int -> a -> [a] -> [a]
-updateAt idx val xs = take idx xs ++ [val] ++ drop (idx + 1) xs
-
--- | Parse Word64 from ByteString (big-endian).
-parseWord64BS :: BS.ByteString -> Word64
-parseWord64BS bs =
-  let bytes = BS.unpack (BS.take 8 (bs <> BS.replicate 8 0))
-   in foldl (\acc b -> acc * 256 + fromIntegral b) 0 bytes
-
--- | Convert Word64 to ByteString (big-endian).
-word64ToBS :: Word64 -> BS.ByteString
-word64ToBS w =
-  BS.pack
-    [ fromIntegral (w `div` (256 ^ (7 :: Int)) `mod` 256),
-      fromIntegral (w `div` (256 ^ (6 :: Int)) `mod` 256),
-      fromIntegral (w `div` (256 ^ (5 :: Int)) `mod` 256),
-      fromIntegral (w `div` (256 ^ (4 :: Int)) `mod` 256),
-      fromIntegral (w `div` (256 ^ (3 :: Int)) `mod` 256),
-      fromIntegral (w `div` (256 ^ (2 :: Int)) `mod` 256),
-      fromIntegral (w `div` 256 `mod` 256),
-      fromIntegral (w `mod` 256)
-    ]

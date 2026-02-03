@@ -42,8 +42,11 @@ module GBNet.Channel
 where
 
 import qualified Data.ByteString as BS
+import Data.Foldable (toList)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Sequence (Seq, (|>))
+import qualified Data.Sequence as Seq
 import Data.Word (Word16, Word64, Word8)
 import GBNet.Reliability (MonoTime, elapsedMs)
 import GBNet.Util (sequenceGreaterThan)
@@ -147,7 +150,7 @@ data Channel = Channel
     chLocalSequence :: !Word16,
     chRemoteSequence :: !Word16,
     chSendBuffer :: !(Map Word16 ChannelMessage),
-    chReceiveBuffer :: ![BS.ByteString],
+    chReceiveBuffer :: !(Seq BS.ByteString), -- O(1) append via |>
     chPendingAck :: ![Word16],
     chOrderedReceiveBuffer :: !(Map Word16 (BS.ByteString, MonoTime)),
     chOrderedExpected :: !Word16,
@@ -167,7 +170,7 @@ newChannel channelId config =
       chLocalSequence = 0,
       chRemoteSequence = 0,
       chSendBuffer = Map.empty,
-      chReceiveBuffer = [],
+      chReceiveBuffer = Seq.empty,
       chPendingAck = [],
       chOrderedReceiveBuffer = Map.empty,
       chOrderedExpected = 0,
@@ -267,21 +270,21 @@ onMessageReceived seqNum payload now ch =
   case ccDeliveryMode (chConfig ch) of
     Unreliable ->
       ch
-        { chReceiveBuffer = chReceiveBuffer ch ++ [payload],
+        { chReceiveBuffer = chReceiveBuffer ch |> payload,
           chTotalReceived = chTotalReceived ch + 1
         }
     UnreliableSequenced ->
       if sequenceGreaterThan seqNum (chRemoteSequence ch)
         then
           ch
-            { chReceiveBuffer = chReceiveBuffer ch ++ [payload],
+            { chReceiveBuffer = chReceiveBuffer ch |> payload,
               chRemoteSequence = seqNum,
               chTotalReceived = chTotalReceived ch + 1
             }
         else ch {chTotalDropped = chTotalDropped ch + 1}
     ReliableUnordered ->
       ch
-        { chReceiveBuffer = chReceiveBuffer ch ++ [payload],
+        { chReceiveBuffer = chReceiveBuffer ch |> payload,
           chPendingAck = seqNum : chPendingAck ch,
           chTotalReceived = chTotalReceived ch + 1
         }
@@ -294,7 +297,7 @@ onMessageReceived seqNum payload now ch =
       if sequenceGreaterThan seqNum (chRemoteSequence ch) || seqNum == chRemoteSequence ch
         then
           ch
-            { chReceiveBuffer = chReceiveBuffer ch ++ [payload],
+            { chReceiveBuffer = chReceiveBuffer ch |> payload,
               chPendingAck = seqNum : chPendingAck ch,
               chRemoteSequence = max seqNum (chRemoteSequence ch),
               chTotalReceived = chTotalReceived ch + 1
@@ -310,7 +313,7 @@ deliverOrdered :: BS.ByteString -> Channel -> Channel
 deliverOrdered payload ch =
   let ch' =
         ch
-          { chReceiveBuffer = chReceiveBuffer ch ++ [payload],
+          { chReceiveBuffer = chReceiveBuffer ch |> payload,
             chOrderedExpected = chOrderedExpected ch + 1,
             chTotalReceived = chTotalReceived ch + 1
           }
@@ -333,7 +336,7 @@ flushOrderedBuffer ch =
       let ch' =
             ch
               { chOrderedReceiveBuffer = Map.delete (chOrderedExpected ch) (chOrderedReceiveBuffer ch),
-                chReceiveBuffer = chReceiveBuffer ch ++ [payload],
+                chReceiveBuffer = chReceiveBuffer ch |> payload,
                 chOrderedExpected = chOrderedExpected ch + 1,
                 chTotalReceived = chTotalReceived ch + 1
               }
@@ -350,7 +353,7 @@ acknowledgeMessage seqNum ch =
 
 -- | Take all received messages from the channel.
 channelReceive :: Channel -> ([BS.ByteString], Channel)
-channelReceive ch = (chReceiveBuffer ch, ch {chReceiveBuffer = []})
+channelReceive ch = (toList (chReceiveBuffer ch), ch {chReceiveBuffer = Seq.empty})
 
 -- | Take pending ack sequence numbers.
 takePendingAcks :: Channel -> ([Word16], Channel)
@@ -385,7 +388,7 @@ flushTimedOutOrdered now ch
                     Just (maxSeq, _) -> maxSeq + 1
                in ch
                     { chOrderedReceiveBuffer = toKeep,
-                      chReceiveBuffer = chReceiveBuffer ch ++ payloads,
+                      chReceiveBuffer = chReceiveBuffer ch <> Seq.fromList payloads,
                       chOrderedExpected = newExpected,
                       chTotalReceived = chTotalReceived ch + fromIntegral (length payloads)
                     }
@@ -399,7 +402,7 @@ resetChannel ch =
     { chLocalSequence = 0,
       chRemoteSequence = 0,
       chSendBuffer = Map.empty,
-      chReceiveBuffer = [],
+      chReceiveBuffer = Seq.empty,
       chPendingAck = [],
       chOrderedReceiveBuffer = Map.empty,
       chOrderedExpected = 0,
