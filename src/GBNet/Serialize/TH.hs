@@ -3,13 +3,8 @@
 -- Module      : GBNet.Serialize.TH
 -- Description : Template Haskell derive for BitSerialize/BitDeserialize
 --
--- Provides 'deriveNetworkSerialize' — a TH splice that generates
--- 'BitSerialize' and 'BitDeserialize' instances for user-defined types.
---
--- Supports:
---   * Records (named fields) — fields serialized in declaration order
---   * Simple enums (no payloads) — tag encoded with minimum bits
---   * Enums with payloads — tag followed by constructor fields
+-- Provides 'deriveNetworkSerialize' to auto-generate serialization instances.
+-- Supports records, simple enums, and enums with payloads.
 
 module GBNet.Serialize.TH
   ( deriveNetworkSerialize
@@ -19,14 +14,14 @@ import Language.Haskell.TH
 import GBNet.Serialize.BitBuffer (ReadResult(..), writeBits, readBits)
 import GBNet.Serialize.Class (BitSerialize(..), BitDeserialize(..), BitWidth(..))
 
--- | Number of bits needed to represent @n@ distinct values.
+-- | Number of bits needed to represent n distinct values.
 ceilLog2 :: Int -> Int
 ceilLog2 n
   | n <= 1    = 0
   | n <= 2    = 1
   | otherwise = 1 + ceilLog2 ((n + 1) `div` 2)
 
--- | Derive 'BitSerialize' and 'BitDeserialize' instances for a type.
+-- | Derive BitSerialize and BitDeserialize instances for a type.
 deriveNetworkSerialize :: Name -> Q [Dec]
 deriveNetworkSerialize typeName = do
   info <- reify typeName
@@ -36,10 +31,6 @@ deriveNetworkSerialize typeName = do
       deserInst <- mkDeserializeInstance typeName cons
       return [serInst, deserInst]
     _ -> fail $ "deriveNetworkSerialize: " ++ show typeName ++ " is not a data type"
-
--- ====================================================================
--- Serialization
--- ====================================================================
 
 mkSerializeInstance :: Name -> [Con] -> Q Dec
 mkSerializeInstance typeName cons = do
@@ -55,10 +46,7 @@ mkSerClause tagBits numCons (tagVal, con) = do
       fieldCount = length fieldTypes
   varNames <- mapM (\i -> newName ("f" ++ show i)) [0 .. fieldCount - 1]
   let pat = ConP conName [] (map VarP varNames)
-  -- Build the body as a composition of writes.
-  -- For BitWidth fields, generate writeBits directly instead of going
-  -- through the typeclass — this inlines the bit count at compile time.
-  let tagExpr = if numCons > 1
+      tagExpr = if numCons > 1
                 then Just [| writeBits $(litE (integerL (fromIntegral tagVal)))
                                        $(litE (integerL (fromIntegral tagBits))) |]
                 else Nothing
@@ -72,8 +60,6 @@ mkSerClause tagBits numCons (tagVal, con) = do
     es  -> foldr1 (\later earlier -> [| $later . $earlier |]) (reverse es)
   return $ Clause [pat] (NormalB body) []
 
--- | Generate the serialize expression for a single field.
--- Recognizes @BitWidth n a@ and emits a direct @writeBits@ call.
 mkFieldSerExpr :: Name -> Type -> Q Exp
 mkFieldSerExpr v ty
   | Just n <- extractBitWidth ty =
@@ -81,16 +67,10 @@ mkFieldSerExpr v ty
   | otherwise =
       [| bitSerialize $(varE v) |]
 
--- | Try to extract the bit count from a @BitWidth n a@ type.
--- Returns 'Just n' if the type matches, 'Nothing' otherwise.
 extractBitWidth :: Type -> Maybe Integer
 extractBitWidth (AppT (AppT (ConT name) (LitT (NumTyLit n))) _)
   | nameBase name == "BitWidth" = Just n
 extractBitWidth _ = Nothing
-
--- ====================================================================
--- Deserialization
--- ====================================================================
 
 mkDeserializeInstance :: Name -> [Con] -> Q Dec
 mkDeserializeInstance typeName cons = do
@@ -125,8 +105,6 @@ mkConMatch bufName (tagVal, con) = do
   body <- mkReadFields conName fieldTypes (varE bufName)
   return $ Match (LitP (IntegerL (fromIntegral tagVal))) (NormalB body) []
 
--- | Generate code that reads N fields and applies them to a constructor.
--- For @BitWidth n a@ fields, emits @readBits n@ directly.
 mkReadFields :: Name -> [Type] -> Q Exp -> Q Exp
 mkReadFields conName [] bufExpr =
   [| Right (ReadResult $(conE conName) $bufExpr) |]
@@ -145,7 +123,6 @@ mkReadFieldsLoop conName types current vars bufExpr
       rest   <- mkReadFieldsLoop conName types (current + 1) (vars ++ [vName]) (varE bName)
       case extractBitWidth ty of
         Just n ->
-          -- Read exactly n bits and wrap in BitWidth constructor
           [| case readBits $(litE (integerL (fromIntegral n))) $bufExpr of
                Left err -> Left err
                Right (ReadResult val $(varP bName)) ->
@@ -158,7 +135,6 @@ mkReadFieldsLoop conName types current vars bufExpr
                Right (ReadResult $(varP vName) $(varP bName)) -> $(return rest)
            |]
 
--- | Extract constructor name and field types.
 conFieldTypes :: Con -> (Name, [Type])
 conFieldTypes (NormalC name fields)      = (name, map snd fields)
 conFieldTypes (RecC name fields)         = (name, map (\(_, _, t) -> t) fields)
