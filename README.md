@@ -14,6 +14,10 @@
 
 ---
 
+> **Note:** This library is undergoing a major architecture overhaul to support idiomatic Haskell patterns (effect abstraction, MonadNetwork typeclass, layered design). See [docs/ARCHITECTURE_OVERHAUL.md](docs/ARCHITECTURE_OVERHAUL.md) for the roadmap.
+
+---
+
 ## What is GB-Net-HS?
 
 Complete Haskell port of [GB-Net](https://github.com/gondola-bros-entertainment/gbnet), a transport-level game networking library providing:

@@ -219,9 +219,16 @@ getOutgoingMessage ch =
           getOutgoingMessage (ch {chSendBuffer = Map.delete seqNum (chSendBuffer ch)})
       | cmRetryCount msg == 0 ->
           -- First send
-          let msg' = msg {cmRetryCount = 1}
-              ch' = ch {chSendBuffer = Map.insert seqNum msg' (chSendBuffer ch)}
-           in Just (msg, ch')
+          if cmReliable msg
+            then
+              -- Reliable: keep in buffer for retransmit
+              let msg' = msg {cmRetryCount = 1}
+                  ch' = ch {chSendBuffer = Map.insert seqNum msg' (chSendBuffer ch)}
+               in Just (msg, ch')
+            else
+              -- Unreliable: remove from buffer immediately (fire and forget)
+              let ch' = ch {chSendBuffer = Map.delete seqNum (chSendBuffer ch)}
+               in Just (msg, ch')
       | otherwise -> Nothing -- Already sent, waiting for ack or retransmit
 
 -- | Get messages that need retransmission based on RTO.

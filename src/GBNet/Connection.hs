@@ -46,6 +46,9 @@ module GBNet.Connection
     recordBytesSent,
     recordBytesReceived,
 
+    -- * State transitions
+    markConnected,
+
     -- * Reset
     resetConnection,
 
@@ -721,6 +724,17 @@ touchRecvTime now conn = conn {connLastRecvTime = now}
 -- | Update last send time.
 touchSendTime :: MonoTime -> Connection -> Connection
 touchSendTime now conn = conn {connLastSendTime = now}
+
+-- | Mark connection as established (Connected state).
+-- Used after handshake completes.
+markConnected :: MonoTime -> Connection -> Connection
+markConnected now conn =
+  conn
+    { connState = Connected,
+      connStartTime = Just now,
+      connLocalSeq = 0,
+      connRemoteSeq = 0
+    }
 
 -- | Record bytes sent for bandwidth tracking.
 recordBytesSent :: Int -> MonoTime -> Connection -> Connection

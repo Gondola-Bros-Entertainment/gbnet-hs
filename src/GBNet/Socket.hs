@@ -25,12 +25,12 @@ where
 
 import Control.Exception (IOException, catch)
 import qualified Data.ByteString as BS
-import Data.List (isInfixOf)
 import GBNet.Reliability (MonoTime)
 import GBNet.Stats (SocketStats (..), defaultSocketStats)
 import Network.Socket (SockAddr, Socket)
 import qualified Network.Socket as NS
 import qualified Network.Socket.ByteString as NSB
+import System.Timeout (timeout)
 
 -- | Maximum size of a single UDP datagram.
 maxUdpPacketSize :: Int
@@ -92,9 +92,7 @@ socketSendTo ::
 socketSendTo dat addr now sock = do
   result <- tryIO $ NSB.sendTo (usSocket sock) dat addr
   return $ case result of
-    Left err
-      | isWouldBlock err -> Left SocketWouldBlock
-      | otherwise -> Left (SocketIoError err)
+    Left err -> Left (SocketIoError err)
     Right sent ->
       let stats = usStats sock
           stats' =
@@ -105,18 +103,21 @@ socketSendTo dat addr now sock = do
               }
        in Right (sent, sock {usStats = stats'})
 
--- | Receive data from any address.
+-- | Receive timeout in microseconds (1ms).
+recvTimeoutUs :: Int
+recvTimeoutUs = 1000
+
+-- | Receive data from any address (non-blocking via timeout).
 socketRecvFrom ::
   MonoTime ->
   UdpSocket ->
   IO (Either SocketError (BS.ByteString, SockAddr, UdpSocket))
 socketRecvFrom now sock = do
-  result <- tryIO $ NSB.recvFrom (usSocket sock) maxUdpPacketSize
+  result <- timeout recvTimeoutUs $ tryIO $ NSB.recvFrom (usSocket sock) maxUdpPacketSize
   return $ case result of
-    Left err
-      | isWouldBlock err -> Left SocketWouldBlock
-      | otherwise -> Left (SocketIoError err)
-    Right (dat, addr) ->
+    Nothing -> Left SocketWouldBlock -- Timeout = no data available
+    Just (Left err) -> Left (SocketIoError err)
+    Just (Right (dat, addr)) ->
       let len = BS.length dat
           stats = usStats sock
           stats' =
@@ -142,11 +143,3 @@ tryIO action =
   where
     handler :: IOException -> IO (Either String a)
     handler e = return $ Left (show e)
-
--- | Check if error message indicates would-block.
-isWouldBlock :: String -> Bool
-isWouldBlock err =
-  "resource exhausted" `isInfixOf` err
-    || "would block" `isInfixOf` err
-    || "EAGAIN" `isInfixOf` err
-    || "EWOULDBLOCK" `isInfixOf` err

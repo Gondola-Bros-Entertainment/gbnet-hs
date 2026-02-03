@@ -6,10 +6,16 @@
 -- A peer can accept incoming connections (server-like), initiate
 -- outgoing connections (client-like), or do both (P2P/mesh).
 --
--- This module supports both pure and IO-based APIs:
+-- Pure/IO separation pattern for game loops:
 --
--- * Pure API: Use 'peerProcess' with manual IO via 'peerRecvAll' and 'peerSendAll'
--- * Convenience API: Use 'peerUpdate' which combines all three
+-- @
+-- gameLoop peer = do
+--   now <- getMonoTime
+--   (packets, sock') <- peerRecvAll (npSocket peer) now     -- IO: receive
+--   let result = peerProcess now packets peer {npSocket = sock'}  -- Pure: process
+--   sock'' <- peerSendAll (prOutgoing result) (npSocket peer') now  -- IO: send
+--   gameLoop (prPeer result) {npSocket = sock''}
+-- @
 module GBNet.Peer
   ( -- * Peer identifier
     PeerId (..),
@@ -41,9 +47,8 @@ module GBNet.Peer
     -- * IO helpers
     peerRecvAll,
     peerSendAll,
-
-    -- * Convenience (IO)
-    peerUpdate,
+    drainPeerSendQueue,
+    drainAllConnectionQueues,
 
     -- * Sending
     peerSend,
@@ -122,7 +127,7 @@ data ConnectionDirection
     Outbound
   deriving (Eq, Show)
 
--- | Events emitted by 'peerUpdate' or 'peerProcess'.
+-- | Events emitted by 'peerProcess'.
 data PeerEvent
   = -- | A peer connected
     PeerConnected !PeerId !ConnectionDirection
@@ -417,31 +422,6 @@ peerSendAll packets sock now = foldM sendOne sock packets
         Left _ -> return s
         Right (_, s') -> return s'
 
--- -----------------------------------------------------------------------------
--- Convenience wrapper (backwards compatible)
--- -----------------------------------------------------------------------------
-
--- | Process incoming packets and return events.
--- Call this once per game tick.
---
--- This is a convenience function that combines 'peerRecvAll', 'peerProcess',
--- and 'peerSendAll'. For more control in game loops, use those functions
--- directly.
-peerUpdate :: MonoTime -> NetPeer -> IO ([PeerEvent], NetPeer)
-peerUpdate now peer = do
-  -- Receive all pending packets
-  (packets, sock') <- peerRecvAll (npSocket peer) now
-  let peer1 = peer {npSocket = sock'}
-
-  -- Process packets (pure)
-  let result = peerProcess now packets peer1
-
-  -- Send all outgoing packets
-  sock'' <- peerSendAll (prOutgoing result) (npSocket (prPeer result)) now
-  let peer2 = (prPeer result) {npSocket = sock''}
-
-  return (prEvents result, peer2)
-
 -- | Process received packets (pure).
 processPacketsPure ::
   [(PeerId, BS.ByteString)] ->
@@ -594,7 +574,7 @@ handleConnectionResponse peerId pkt now peer =
               | otherwise ->
                   -- Accept the connection
                   let conn = newConnection (npConfig peer) clientSalt now
-                      conn' = Conn.touchRecvTime now conn
+                      conn' = Conn.markConnected now $ Conn.touchRecvTime now conn
                       peer' =
                         peer
                           { npConnections = Map.insert peerId conn' (npConnections peer),
@@ -615,7 +595,7 @@ handleConnectionAccepted peerId now peer =
       | otherwise ->
           -- Promote to connected
           let conn = newConnection (npConfig peer) (pcClientSalt pending) now
-              conn' = Conn.touchRecvTime now conn
+              conn' = Conn.markConnected now $ Conn.touchRecvTime now conn
               peer' =
                 peer
                   { npConnections = Map.insert peerId conn' (npConnections peer),
@@ -878,6 +858,7 @@ peerSend peerId channel dat now peer =
           Right peer {npConnections = Map.insert peerId conn' (npConnections peer)}
 
 -- | Broadcast a message to all connected peers.
+-- This queues the message and drains connection queues so packets are ready to send.
 peerBroadcast ::
   Word8 ->
   BS.ByteString ->
@@ -887,7 +868,10 @@ peerBroadcast ::
   NetPeer
 peerBroadcast channel dat except now peer =
   let peerIds = filter (\p -> Just p /= except) $ Map.keys (npConnections peer)
-   in foldr (\pid p -> fromRight p (peerSend pid channel dat now p)) peer peerIds
+      -- Queue message to each connection's channel
+      peer' = foldr (\pid p -> fromRight p (peerSend pid channel dat now p)) peer peerIds
+      -- Drain connection queues to npSendQueue so packets are ready
+   in drainAllConnectionQueues now peer'
 
 -- | Get number of connected peers.
 peerCount :: NetPeer -> Int
