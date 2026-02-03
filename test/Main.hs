@@ -14,7 +14,8 @@ import GBNet.Packet
 import Data.Word (Word8, Word16, Word32, Word64)
 import Data.Int (Int8, Int16, Int32, Int64)
 import qualified Data.Text as T
-import Control.Exception (evaluate, try, SomeException)
+
+
 
 -- TH-derived test types (must be before main due to TH staging restriction)
 data Vec3 = Vec3
@@ -76,7 +77,6 @@ main = do
   -- Collection types
   testMaybeRoundTrip
   testListRoundTrip
-  testStringRoundTrip
   testTextRoundTrip
   testTupleRoundTrip
 
@@ -95,7 +95,7 @@ main = do
   -- Phase 4: Serialization fixes
   testFastPathAfterNonAligned
   testDeserializeBoundsCheck
-  testCharUnicodeValidation
+  testTextUnicode
   testBitWidthRoundTrip
 
   putStrLn ""
@@ -346,15 +346,6 @@ testListRoundTrip = do
   let bufList = bitSerialize xs empty
   assertDeserialize "list [10,20,30]" xs deserializeM bufList
 
-testStringRoundTrip :: IO ()
-testStringRoundTrip = do
-  putStrLn "String round-trips:"
-  let bufEmpty = bitSerialize ("" :: String) empty
-  assertDeserialize "empty string" ("" :: String) deserializeM bufEmpty
-
-  let bufHello = bitSerialize ("hello" :: String) empty
-  assertDeserialize "string hello" "hello" (deserializeM :: BitReader String) bufHello
-
 testTextRoundTrip :: IO ()
 testTextRoundTrip = do
   putStrLn "Text round-trips:"
@@ -540,24 +531,19 @@ testDeserializeBoundsCheck = do
     Left _  -> putStrLn "  PASS: huge Text length rejected"
     Right _ -> error "  FAIL: should have rejected Text with length 65535 and no data"
 
--- | Fix 3: Serializing a Char with codepoint > 255 should error
--- instead of silently truncating.
-testCharUnicodeValidation :: IO ()
-testCharUnicodeValidation = do
-  putStrLn "Char Unicode validation:"
-  -- ASCII char should work fine
-  let buf = bitSerialize 'A' empty
-  assertDeserialize "Char A" 'A' deserializeM buf
+-- | Text handles full Unicode correctly.
+testTextUnicode :: IO ()
+testTextUnicode = do
+  putStrLn "Text Unicode handling:"
+  -- CJK characters (3-byte UTF-8)
+  let cjk = "\x4E16\x754C" :: T.Text  -- 世界
+  let bufCjk = bitSerialize cjk empty
+  assertDeserialize "Text CJK" cjk deserializeM bufCjk
 
-  -- Codepoint 255 (ÿ) should be the max allowed
-  let buf255 = bitSerialize '\255' empty
-  assertDeserialize "Char 255" '\255' deserializeM buf255
-
-  -- Codepoint 256+ should throw an error
-  result <- try (evaluate (bitSerialize '\x100' empty)) :: IO (Either SomeException BitBuffer)
-  case result of
-    Left _  -> putStrLn "  PASS: Char U+0100 rejected"
-    Right _ -> error "  FAIL: should have rejected Char with codepoint > 255"
+  -- Mixed ASCII and multi-byte
+  let mixed = "hello \x1F680 world" :: T.Text
+  let bufMixed = bitSerialize mixed empty
+  assertDeserialize "Text mixed Unicode" mixed deserializeM bufMixed
 
 -- | Fix 4: BitWidth newtype for custom bit-width fields.
 testBitWidthRoundTrip :: IO ()

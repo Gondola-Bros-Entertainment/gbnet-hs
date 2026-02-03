@@ -65,7 +65,7 @@ module GBNet.Serialize.Class
 
 import Data.Word (Word8, Word16, Word32, Word64)
 import Data.Int (Int8, Int16, Int32, Int64)
-import Data.Char (ord, chr)
+
 import GHC.TypeLits (Nat, KnownNat, natVal)
 import Data.Proxy (Proxy(..))
 import qualified Data.Text as T
@@ -414,48 +414,14 @@ instance (BitDeserialize a) => BitDeserialize [a] where
           Right (ReadResult val b') -> readNElements (n - 1) (val : acc) b'
 
 -- ====================================================================
--- Char instance
+-- Text instance
 -- ====================================================================
 
--- | Char is serialized as an 8-bit value (ASCII/Latin-1). This means
--- @String@ (which is @[Char]@) automatically gets serialization through
--- the list instance above — serialized as a 16-bit length prefix
--- followed by one byte per character.
---
--- For game networking, single-byte characters cover the common case:
--- player names, chat messages, server names are typically ASCII.
--- Characters beyond codepoint 255 cause a runtime error rather than
--- silently truncating. Use 'Text' for Unicode strings.
-
--- | Maximum codepoint that fits in 8 bits (Latin-1 range).
-maxCharCodepoint :: Int
-maxCharCodepoint = 255
-
-instance BitSerialize Char where
-  bitSerialize c
-    | ord c > maxCharCodepoint =
-        error $ "bitSerialize Char: codepoint " ++ show (ord c)
-             ++ " exceeds 8-bit range (max " ++ show maxCharCodepoint ++ ")"
-    | otherwise = writeBits (fromIntegral (ord c)) word8BitWidth
-
-instance BitDeserialize Char where
-  bitDeserialize buf =
-    case readBits word8BitWidth buf of
-      Left err -> Left err
-      Right (ReadResult val buf') ->
-        Right $ ReadResult
-          { readValue  = chr (fromIntegral val)
-          , readBuffer = buf'
-          }
-
--- ====================================================================
--- Text instance (production-grade strings)
--- ====================================================================
-
--- | @Text@ is the recommended string type for production use. Unlike
--- @[Char]@ (a linked list costing ~40 bytes per character), @Text@ is
--- a packed UTF-8 array — the same internal representation as Rust's
--- @String@.
+-- | @Text@ is the only supported string type. It's a packed UTF-8
+-- array — the same internal representation as Rust's @String@.
+-- Unlike @[Char]@ (a linked list costing ~40 bytes per character),
+-- @Text@ is compact, handles full Unicode, and is wire-compatible
+-- with the Rust library.
 --
 -- Wire format matches the Rust version exactly:
 --   * 16-bit length prefix (byte count, not character count)

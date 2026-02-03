@@ -285,6 +285,10 @@ writeBit bit buf =
 -- @[numBits-1, numBits-2, .. 0]@, accumulating the buffer state
 -- through each write. This matches a @for@ loop in Rust that iterates
 -- @(0..num_bits).rev()@.
+--
+-- The 'error' calls for negative or >64 bit counts are programmer-error
+-- assertions — these conditions cannot be triggered through the public
+-- serialization API, which always passes valid compile-time-known widths.
 writeBits :: Word64 -> Int -> BitBuffer -> BitBuffer
 writeBits _value 0 buf = buf
   -- ^ Base case: writing 0 bits is a no-op. The underscore prefix on

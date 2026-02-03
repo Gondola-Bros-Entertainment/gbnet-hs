@@ -152,7 +152,6 @@ toBitString buf  -- "10101011 00110011 101"
 | `Int64` | 64 | `bitSerialize (n :: Int64)` | `bit_serialize(&n)` |
 | `Float` | 32 | `bitSerialize (3.14 :: Float)` | `bit_serialize(&3.14f32)` |
 | `Double` | 64 | `bitSerialize (n :: Double)` | `bit_serialize(&n)` |
-| `Char` | 8 | `bitSerialize 'A'` | N/A (Latin-1 only, validates <= 255) |
 | `BitWidth n a` | N | `bitSerialize (BitWidth 42 :: BitWidth 7 Word8)` | N/A (type-level custom bit width) |
 | Custom N | N | `writeBits value n` | `write_bits(value, n)` |
 
@@ -162,8 +161,7 @@ toBitString buf  -- "10101011 00110011 101"
 |------|-------------|-------|
 | `Maybe a` | 1-bit flag + payload | `Nothing` = 0, `Just x` = 1 + serialize(x) |
 | `[a]` | 16-bit length + elements | Max 65535 elements, bounds-checked on deserialize |
-| `String` | 16-bit length + bytes | Via `[Char]`, 1 byte per char (Latin-1) |
-| `Text` | 16-bit byte-length + UTF-8 | Wire-compatible with Rust `String`, bounds-checked on deserialize |
+| `Text` | 16-bit byte-length + UTF-8 | The only string type. Wire-compatible with Rust `String`, full Unicode, bounds-checked |
 | `(a, b)` | serialize a, then b | Also 3-tuples and 4-tuples |
 
 ---
@@ -208,7 +206,7 @@ cabal haddock            # Generate docs
 **Serialization (complete):**
 - [x] Bitpacked serialization (BitBuffer)
 - [x] Typeclass-based serialize/deserialize
-- [x] Collections (Maybe, List, String, Text, tuples)
+- [x] Collections (Maybe, List, Text, tuples)
 - [x] Monadic reader (BitReader)
 - [x] Packet header / wire format
 - [x] Template Haskell derive (records, enums, enums with payloads)
@@ -217,7 +215,7 @@ cabal haddock            # Generate docs
 - [x] Byte-aligned fast paths (writeBits/readBits)
 - [x] Custom bit widths (`BitWidth n a` via type-level Nat)
 - [x] Deserialization bounds checking (List, Text)
-- [x] Char validation (Latin-1 only, rejects codepoints > 255)
+- [x] Text-only strings (full Unicode via Text, no Char/String instances)
 
 **Transport layer:**
 - [ ] Reliability layer (RTT, ACK, retransmit)
