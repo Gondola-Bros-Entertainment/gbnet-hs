@@ -100,6 +100,26 @@ data GameEvent
 deriveNetworkSerialize ''GameEvent
 ```
 
+### Custom Bit Widths
+
+```haskell
+{-# LANGUAGE DataKinds #-}
+import GBNet.Serialize.Class (BitWidth(..))
+
+-- Use exactly 7 bits for health, 4 bits for direction
+data CompactPlayer = CompactPlayer
+  { health    :: BitWidth 7 Word8
+  , direction :: BitWidth 4 Word8
+  } deriving (Eq, Show)
+
+deriveNetworkSerialize ''CompactPlayer
+
+-- Only 11 bits on the wire instead of 16
+let player = CompactPlayer (BitWidth 100) (BitWidth 12)
+let buf = bitSerialize player empty
+bitPosition buf  -- 11
+```
+
 ### Measurement & Debug
 
 ```haskell
@@ -132,6 +152,8 @@ toBitString buf  -- "10101011 00110011 101"
 | `Int64` | 64 | `bitSerialize (n :: Int64)` | `bit_serialize(&n)` |
 | `Float` | 32 | `bitSerialize (3.14 :: Float)` | `bit_serialize(&3.14f32)` |
 | `Double` | 64 | `bitSerialize (n :: Double)` | `bit_serialize(&n)` |
+| `Char` | 8 | `bitSerialize 'A'` | N/A (Latin-1 only, validates <= 255) |
+| `BitWidth n a` | N | `bitSerialize (BitWidth 42 :: BitWidth 7 Word8)` | N/A (type-level custom bit width) |
 | Custom N | N | `writeBits value n` | `write_bits(value, n)` |
 
 ### Collections & Composites
@@ -139,9 +161,9 @@ toBitString buf  -- "10101011 00110011 101"
 | Type | Wire Format | Notes |
 |------|-------------|-------|
 | `Maybe a` | 1-bit flag + payload | `Nothing` = 0, `Just x` = 1 + serialize(x) |
-| `[a]` | 16-bit length + elements | Max 65535 elements |
-| `String` | 16-bit length + bytes | Via `[Char]`, 1 byte per char |
-| `Text` | 16-bit byte-length + UTF-8 | Wire-compatible with Rust `String` |
+| `[a]` | 16-bit length + elements | Max 65535 elements, bounds-checked on deserialize |
+| `String` | 16-bit length + bytes | Via `[Char]`, 1 byte per char (Latin-1) |
+| `Text` | 16-bit byte-length + UTF-8 | Wire-compatible with Rust `String`, bounds-checked on deserialize |
 | `(a, b)` | serialize a, then b | Also 3-tuples and 4-tuples |
 
 ---
@@ -193,12 +215,9 @@ cabal haddock            # Generate docs
 - [x] Measurement utilities (serializedSizeBits/Bytes)
 - [x] Debug visualization (toBitString)
 - [x] Byte-aligned fast paths (writeBits/readBits)
-
-**Serialization (remaining):**
-- [ ] Custom bit widths (`BitWidth n a` via type-level Nat)
-- [ ] Deserialization bounds checking (prevent OOM from malicious packets)
-- [ ] Fix writeBits fast-path edge case (buffer truncation on mixed writes)
-- [ ] Fix Char instance for Unicode > 255 (or remove, Text works)
+- [x] Custom bit widths (`BitWidth n a` via type-level Nat)
+- [x] Deserialization bounds checking (List, Text)
+- [x] Char validation (Latin-1 only, rejects codepoints > 255)
 
 **Transport layer:**
 - [ ] Reliability layer (RTT, ACK, retransmit)
