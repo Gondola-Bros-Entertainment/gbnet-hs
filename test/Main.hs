@@ -10,7 +10,10 @@ import GBNet.Serialize.Class
 import GBNet.Serialize.Reader
 import GBNet.Serialize.TH
 import GBNet.Packet
+import GBNet.Util
+import GBNet.Reliability
 
+import Data.Bits ((.&.))
 import Data.Word (Word8, Word16, Word32, Word64)
 import Data.Int (Int8, Int16, Int32, Int64)
 import qualified Data.Text as T
@@ -97,6 +100,21 @@ main = do
   testDeserializeBoundsCheck
   testTextUnicode
   testBitWidthRoundTrip
+
+  -- Reliability module
+  testSequenceGreaterThan
+  testSequenceDiff
+  testSequenceAtBoundaries
+  testSequenceBufferOps
+  testSequenceBufferWraparound
+  testSequenceBufferCollision
+  testRttConvergence
+  testAdaptiveRto
+  testPacketLossTracking
+  testAckBitsNoFalseAck
+  testProcessAcksReturnsChannelInfo
+  testInFlightEviction
+  testFastRetransmit
 
   putStrLn ""
   putStrLn "All tests passed!"
@@ -566,3 +584,171 @@ testBitWidthRoundTrip = do
   -- 7 + 4 = 11 bits total
   assertEqual "CompactPlayer = 11 bits" 11 (bitPosition bufP)
   assertDeserialize "CompactPlayer" player deserializeM bufP
+
+-- --------------------------------------------------------------------
+-- Reliability module tests
+-- --------------------------------------------------------------------
+
+testSequenceGreaterThan :: IO ()
+testSequenceGreaterThan = do
+  putStrLn "sequenceGreaterThan:"
+  assertEqual "1 > 0" True (sequenceGreaterThan 1 0)
+  assertEqual "0 > 1" False (sequenceGreaterThan 0 1)
+  assertEqual "100 > 50" True (sequenceGreaterThan 100 50)
+  assertEqual "50 > 100" False (sequenceGreaterThan 50 100)
+  -- Wraparound
+  assertEqual "0 > 65535" True (sequenceGreaterThan 0 65535)
+  assertEqual "65535 > 0" False (sequenceGreaterThan 65535 0)
+  assertEqual "1 > 65534" True (sequenceGreaterThan 1 65534)
+  assertEqual "100 > 65500" True (sequenceGreaterThan 100 65500)
+
+testSequenceDiff :: IO ()
+testSequenceDiff = do
+  putStrLn "sequenceDiff:"
+  assertEqual "diff(5,3)" 2 (sequenceDiff 5 3)
+  assertEqual "diff(3,5)" (-2) (sequenceDiff 3 5)
+  assertEqual "diff(100,100)" 0 (sequenceDiff 100 100)
+  -- Wraparound
+  assertEqual "diff(0,65535)" 1 (sequenceDiff 0 65535)
+  assertEqual "diff(65535,0)" (-1) (sequenceDiff 65535 0)
+  assertEqual "diff(5,65530)" 11 (sequenceDiff 5 65530)
+
+testSequenceAtBoundaries :: IO ()
+testSequenceAtBoundaries = do
+  putStrLn "Sequence at Word16 boundaries:"
+  assertEqual "0 > maxBound" True (sequenceGreaterThan 0 maxBound)
+  assertEqual "maxBound > 0" False (sequenceGreaterThan maxBound 0)
+  assertEqual "diff(0,max)" 1 (sequenceDiff 0 maxBound)
+  assertEqual "diff(max,0)" (-1) (sequenceDiff maxBound 0)
+
+testSequenceBufferOps :: IO ()
+testSequenceBufferOps = do
+  putStrLn "SequenceBuffer operations:"
+  let buf0 = newSequenceBuffer 16 :: SequenceBuffer Word32
+  let buf1 = sbInsert 0 100 buf0
+  let buf2 = sbInsert 1 200 buf1
+  let buf3 = sbInsert 2 300 buf2
+  assertEqual "exists 0" True (sbExists 0 buf3)
+  assertEqual "exists 1" True (sbExists 1 buf3)
+  assertEqual "exists 2" True (sbExists 2 buf3)
+  assertEqual "exists 3" False (sbExists 3 buf3)
+  assertEqual "get 0" (Just 100) (sbGet 0 buf3)
+  assertEqual "get 1" (Just 200) (sbGet 1 buf3)
+  assertEqual "get 2" (Just 300) (sbGet 2 buf3)
+
+testSequenceBufferWraparound :: IO ()
+testSequenceBufferWraparound = do
+  putStrLn "SequenceBuffer wraparound:"
+  let buf0 = newSequenceBuffer 16 :: SequenceBuffer Word32
+  let buf1 = sbInsert 65534 100 buf0
+  let buf2 = sbInsert 65535 200 buf1
+  let buf3 = sbInsert 0 300 buf2
+  let buf4 = sbInsert 1 400 buf3
+  assertEqual "exists 65534" True (sbExists 65534 buf4)
+  assertEqual "exists 65535" True (sbExists 65535 buf4)
+  assertEqual "exists 0" True (sbExists 0 buf4)
+  assertEqual "exists 1" True (sbExists 1 buf4)
+
+testSequenceBufferCollision :: IO ()
+testSequenceBufferCollision = do
+  putStrLn "SequenceBuffer collision:"
+  let buf0 = newSequenceBuffer 16 :: SequenceBuffer Word32
+  let buf1 = sbInsert 0 100 buf0
+  assertEqual "exists 0 before" True (sbExists 0 buf1)
+  -- Sequence 16 maps to the same slot (16 % 16 == 0)
+  let buf2 = sbInsert 16 200 buf1
+  assertEqual "exists 16" True (sbExists 16 buf2)
+  assertEqual "exists 0 after" False (sbExists 0 buf2)
+  assertEqual "get 16" (Just 200) (sbGet 16 buf2)
+  assertEqual "get 0 after" Nothing (sbGet 0 buf2)
+
+testRttConvergence :: IO ()
+testRttConvergence = do
+  putStrLn "RTT convergence:"
+  let ep0 = newReliableEndpoint 256
+  let ep = foldl (\e _ -> updateRtt 50.0 e) ep0 [1..20 :: Int]
+  let srtt = srttMs ep
+  assertEqual "SRTT near 50ms" True (srtt > 40.0 && srtt < 60.0)
+
+testAdaptiveRto :: IO ()
+testAdaptiveRto = do
+  putStrLn "Adaptive RTO:"
+  let ep0 = newReliableEndpoint 256
+  -- First sample
+  let ep1 = updateRtt 50.0 ep0
+  assertEqual "RTO >= 50" True (rtoMs ep1 >= 50.0)
+  -- High jitter
+  let ep2 = updateRtt 200.0 ep1
+  assertEqual "RTO increases with jitter" True (rtoMs ep2 > 50.0)
+  -- RTO bounded
+  let ep3 = updateRtt 5000.0 ep2
+  assertEqual "RTO capped at 2000" True (rtoMs ep3 <= 2000.0)
+
+testPacketLossTracking :: IO ()
+testPacketLossTracking = do
+  putStrLn "Packet loss tracking:"
+  let ep0 = newReliableEndpoint 256
+  -- 8 successes, 2 losses
+  let ep1 = foldl (\e _ -> recordLossSample False e) ep0 [1..8 :: Int]
+  let ep2 = foldl (\e _ -> recordLossSample True e) ep1 [1..2 :: Int]
+  let loss = packetLossPercent ep2
+  assertEqual "~20% loss" True (abs (loss - 0.2) < 0.01)
+
+testAckBitsNoFalseAck :: IO ()
+testAckBitsNoFalseAck = do
+  putStrLn "ACK bits no false ack:"
+  let ep0 = newReliableEndpoint 256
+  -- Receive packet 0, then packet 2 (skip 1)
+  let ep1 = onPacketReceived 0 ep0
+  let ep2 = onPacketReceived 2 ep1
+  let (ackVal, ackBitsVal) = getAckInfo ep2
+  assertEqual "remote_sequence = 2" 2 ackVal
+  -- bit 0 = ack-1 = seq 1 (NOT received)
+  assertEqual "seq 1 not acked" 0 (ackBitsVal .&. 1)
+  -- bit 1 = ack-2 = seq 0 (received)
+  assertEqual "seq 0 acked" True ((ackBitsVal .&. 2) /= 0)
+
+testProcessAcksReturnsChannelInfo :: IO ()
+testProcessAcksReturnsChannelInfo = do
+  putStrLn "processAcks returns channel info:"
+  let ep0 = newReliableEndpoint 256
+  let now = 1000000000 :: MonoTime  -- 1 second in nanoseconds
+  let ep1 = onPacketSent 10 now 2 5 100 ep0
+  let ep2 = onPacketSent 11 now 3 7 200 ep1
+  -- ACK packet 11 directly, packet 10 via ack_bits (bit 0 = seq 10)
+  let ackTime = 1050000000 :: MonoTime  -- 1.05 seconds
+  let ((acked, _fastRetransmit), _ep3) = processAcks 11 1 ackTime ep2
+  assertEqual "2 acked" 2 (length acked)
+  assertEqual "contains (3,7)" True (elem (3, 7) acked)
+  assertEqual "contains (2,5)" True (elem (2, 5) acked)
+
+testInFlightEviction :: IO ()
+testInFlightEviction = do
+  putStrLn "In-flight eviction:"
+  let ep0 = withMaxInFlight 4 $ newReliableEndpoint 256
+  -- Send 4 packets
+  let ep1 = foldl (\e i -> onPacketSent i (fromIntegral i * 1000000) 0 i 100 e) ep0 [0..3]
+  assertEqual "4 in flight" 4 (packetsInFlight ep1)
+  -- Send 5th — should evict one
+  let ep2 = onPacketSent 4 4000000 0 4 100 ep1
+  assertEqual "still 4 in flight" 4 (packetsInFlight ep2)
+  assertEqual "1 evicted" 1 (rePacketsEvicted ep2)
+
+testFastRetransmit :: IO ()
+testFastRetransmit = do
+  putStrLn "Fast retransmit:"
+  let ep0 = newReliableEndpoint 256
+  let now = 1000000000 :: MonoTime
+  -- Send packets 0-4
+  let ep1 = foldl (\e i -> onPacketSent i now 0 i 100 e) ep0 [0..4]
+  -- ACK packets 1,2,3,4 but NOT 0 — seq 0 should accumulate nacks
+  -- Each ack where 0 is in range but not covered increments nack
+  let ackTime = 1050000000 :: MonoTime
+  -- ACK 1: ack=1, ack_bits=0 (no bits). seq 0 is older, diff=1, bit 0 not set -> nack 0 once
+  let (_, ep2) = processAcks 1 0 ackTime ep1
+  -- ACK 2: ack=2, ack_bits=0. seq 0 diff=2, bit 1 not set -> nack again
+  let (_, ep3) = processAcks 2 0 ackTime ep2
+  -- ACK 3: ack=3, ack_bits=0. seq 0 diff=3, bit 2 not set -> nack = 3, triggers fast retransmit
+  let ((_, fastRetransmit), _ep4) = processAcks 3 0 ackTime ep3
+  assertEqual "fast retransmit triggered" True (not (null fastRetransmit))
+  assertEqual "retransmit is (0,0)" True (elem (0, 0) fastRetransmit)
