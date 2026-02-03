@@ -290,10 +290,9 @@ onPacketReceived :: Word16 -> ReliableEndpoint -> ReliableEndpoint
 onPacketReceived seqNum ep =
   let distance = fromIntegral (abs (sequenceDiff seqNum (reRemoteSequence ep))) :: Word32
   in if distance > fromIntegral (reMaxSequenceDistance ep)
+        || sbExists seqNum (reReceivedPackets ep)
        then ep
-       else if sbExists seqNum (reReceivedPackets ep)
-              then ep
-              else
+       else
                 let recvBuf = sbInsert seqNum True (reReceivedPackets ep)
                     ep' = ep { reReceivedPackets = recvBuf }
                 in if sequenceGreaterThan seqNum (reRemoteSequence ep')
@@ -318,7 +317,7 @@ onPacketReceived seqNum ep =
 processAcks :: Word16 -> Word64 -> MonoTime -> ReliableEndpoint -> (AckResult, ReliableEndpoint)
 processAcks ackSeq ackBitsVal now ep =
   let -- Collect acked sequence numbers
-      directAck = if Map.member ackSeq (reSentPackets ep) then [ackSeq] else []
+      directAck = [ackSeq | Map.member ackSeq (reSentPackets ep)]
       bitsAcks = [ ackSeq - (i + 1)
                   | i <- [0 .. ackBitsWindow - 1]
                   , (ackBitsVal .&. (1 `shiftL` fromIntegral i)) /= 0

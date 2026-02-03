@@ -666,7 +666,7 @@ testRttConvergence :: IO ()
 testRttConvergence = do
   putStrLn "RTT convergence:"
   let ep0 = newReliableEndpoint 256
-  let ep = foldl (\e _ -> updateRtt 50.0 e) ep0 [1..20 :: Int]
+  let ep = iterate (updateRtt 50.0) ep0 !! (20 :: Int)
   let srtt = srttMs ep
   assertEqual "SRTT near 50ms" True (srtt > 40.0 && srtt < 60.0)
 
@@ -689,8 +689,8 @@ testPacketLossTracking = do
   putStrLn "Packet loss tracking:"
   let ep0 = newReliableEndpoint 256
   -- 8 successes, 2 losses
-  let ep1 = foldl (\e _ -> recordLossSample False e) ep0 [1..8 :: Int]
-  let ep2 = foldl (\e _ -> recordLossSample True e) ep1 [1..2 :: Int]
+  let ep1 = iterate (recordLossSample False) ep0 !! (8 :: Int)
+  let ep2 = iterate (recordLossSample True) ep1 !! (2 :: Int)
   let loss = packetLossPercent ep2
   assertEqual "~20% loss" True (abs (loss - 0.2) < 0.01)
 
@@ -719,8 +719,8 @@ testProcessAcksReturnsChannelInfo = do
   let ackTime = 1050000000 :: MonoTime  -- 1.05 seconds
   let ((acked, _fastRetransmit), _ep3) = processAcks 11 1 ackTime ep2
   assertEqual "2 acked" 2 (length acked)
-  assertEqual "contains (3,7)" True (elem (3, 7) acked)
-  assertEqual "contains (2,5)" True (elem (2, 5) acked)
+  assertEqual "contains (3,7)" True ((3, 7) `elem` acked)
+  assertEqual "contains (2,5)" True ((2, 5) `elem` acked)
 
 testInFlightEviction :: IO ()
 testInFlightEviction = do
@@ -751,4 +751,4 @@ testFastRetransmit = do
   -- ACK 3: ack=3, ack_bits=0. seq 0 diff=3, bit 2 not set -> nack = 3, triggers fast retransmit
   let ((_, fastRetransmit), _ep4) = processAcks 3 0 ackTime ep3
   assertEqual "fast retransmit triggered" True (not (null fastRetransmit))
-  assertEqual "retransmit is (0,0)" True (elem (0, 0) fastRetransmit)
+  assertEqual "retransmit is (0,0)" True ((0, 0) `elem` fastRetransmit)
