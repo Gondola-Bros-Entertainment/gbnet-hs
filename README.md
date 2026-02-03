@@ -173,6 +173,8 @@ gbnet-hs/
 ├── src/
 │   └── GBNet/
 │       ├── Packet.hs              # Packet types & header wire format
+│       ├── Reliability.hs         # RTT, ACK tracking, retransmit logic
+│       ├── Util.hs                # Sequence number arithmetic
 │       └── Serialize/
 │           ├── BitBuffer.hs       # Bit-level read/write buffer
 │           ├── Class.hs           # BitSerialize / BitDeserialize typeclasses
@@ -218,7 +220,7 @@ cabal haddock            # Generate docs
 - [x] Text-only strings (full Unicode via Text, no Char/String instances)
 
 **Transport layer:**
-- [ ] Reliability layer (RTT, ACK, retransmit)
+- [x] Reliability layer (RTT, ACK, retransmit)
 - [ ] Channel system (delivery modes)
 - [ ] Connection state machine
 - [ ] Fragmentation / reassembly
