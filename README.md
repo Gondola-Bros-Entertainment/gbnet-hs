@@ -174,18 +174,22 @@ gbnet-hs/
 │   └── GBNet/
 │       ├── Packet.hs              # Packet types & header wire format
 │       ├── Reliability.hs         # RTT, ACK tracking, retransmit logic
+│       ├── Channel.hs             # Delivery modes (unreliable, reliable, ordered)
+│       ├── Config.hs              # Network configuration & validation
+│       ├── Congestion.hs          # Congestion control & bandwidth tracking
+│       ├── Stats.hs               # Connection quality & statistics
 │       ├── Util.hs                # Sequence number arithmetic
 │       └── Serialize/
 │           ├── BitBuffer.hs       # Bit-level read/write buffer
 │           ├── Class.hs           # BitSerialize / BitDeserialize typeclasses
 │           ├── Reader.hs          # BitReader monad for clean deserialization
-│           └── TH.hs             # Template Haskell derive for custom types
+│           └── TH.hs              # Template Haskell derive for custom types
 ├── test/
-│   └── Main.hs                   # Serialization round-trip tests
+│   └── Main.hs                    # 126 round-trip tests
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                # GitHub Actions CI
-└── gbnet-hs.cabal               # Package manifest
+│       └── ci.yml                 # GitHub Actions CI (build, test, hlint, ormolu)
+└── gbnet-hs.cabal                 # Package manifest
 ```
 
 ---
@@ -221,11 +225,13 @@ cabal haddock            # Generate docs
 
 **Transport layer:**
 - [x] Reliability layer (RTT, ACK, retransmit)
-- [ ] Channel system (delivery modes)
+- [x] Channel system (delivery modes)
+- [x] Configuration (NetworkConfig, SimulationConfig)
+- [x] Congestion control (binary Good/Bad, TCP-like window)
+- [x] Statistics (NetworkStats, ChannelStats, ConnectionQuality)
 - [ ] Connection state machine
 - [ ] Fragmentation / reassembly
 - [ ] Security (CRC32C, connect tokens, rate limiting)
-- [ ] Congestion control
 - [ ] Network simulator (loss, latency, jitter)
 - [ ] UDP transport (NetServer / NetClient)
 

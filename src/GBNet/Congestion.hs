@@ -338,7 +338,7 @@ btBytesPerSecond :: BandwidthTracker -> Double
 btBytesPerSecond bt
   | Seq.null (btWindow bt) = 0.0
   | otherwise =
-      let totalBytes = sum $ fmap snd $ btWindow bt
+      let totalBytes = sum $ snd <$> btWindow bt
           elapsedSecs = btWindowDurationMs bt / 1000.0
        in if elapsedSecs > 0
             then fromIntegral totalBytes / elapsedSecs
@@ -361,7 +361,10 @@ batchMessages messages maxSize = go messages [] [] batchHeaderSize 0
       | otherwise = batches
     go (msg : rest) currentBatch batches currentSize msgCount =
       let msgWireSize = batchLengthSize + BS.length msg
-       in if currentSize + msgWireSize > maxSize && msgCount > 0
+          shouldFinalize =
+            (currentSize + msgWireSize > maxSize && msgCount > 0)
+              || msgCount >= fromIntegral maxBatchMessages
+       in if shouldFinalize
             then
               go
                 (msg : rest)
@@ -370,18 +373,9 @@ batchMessages messages maxSize = go messages [] [] batchHeaderSize 0
                 batchHeaderSize
                 0
             else
-              if msgCount >= fromIntegral maxBatchMessages
-                then
-                  go
-                    (msg : rest)
-                    []
-                    (batches ++ [finalizeBatch msgCount currentBatch])
-                    batchHeaderSize
-                    0
-                else
-                  go
-                    rest
-                    (currentBatch ++ [msg])
+              go
+                rest
+                (currentBatch ++ [msg])
                     batches
                     (currentSize + msgWireSize)
                     (msgCount + 1)
