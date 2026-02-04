@@ -1,11 +1,11 @@
 cabal-version:      3.0
 name:               gbnet-hs
 version:            0.1.0.0
-synopsis:           Game networking library with bitpacked serialization
+synopsis:           Transport-level networking library with bitpacked serialization
 description:
-  Haskell port of GB-Net — a transport-level game networking library
-  providing reliable UDP with bitpacked serialization.
-  Reference implementation: https://github.com/Gondola-Bros-Entertainment/gbnet
+  A transport-level networking library providing reliable UDP with
+  bitpacked serialization, dual-layer congestion control, and
+  effect-abstracted design for pure deterministic testing.
 
 license:            MIT
 license-file:       LICENSE
@@ -55,6 +55,8 @@ library
     , random              >= 1.2
     , time                >= 1.9
     , transformers        >= 0.5
+    , stm                 >= 2.5
+    , crc32c              >= 0.2
 
   hs-source-dirs:   src
   default-language:  Haskell2010
@@ -76,5 +78,6 @@ test-suite gbnet-test
     , gbnet-hs
     , bytestring
     , text
+    , network
   default-language: Haskell2010
   ghc-options:      -Wall

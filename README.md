@@ -1,6 +1,6 @@
 <div align="center">
 <h1>gbnet-hs</h1>
-<p><strong>Game Networking for Haskell</strong></p>
+<p><strong>Transport-Level Networking for Haskell</strong></p>
 <p>Bitpacked serialization. Reliable UDP transport. Effect-abstracted design for pure testing.</p>
 <p><a href="#quick-start">Quick Start</a> · <a href="#networking">Networking</a> · <a href="#serialization">Serialization</a> · <a href="#testing">Testing</a> · <a href="#architecture">Architecture</a></p>
 <p>
@@ -16,12 +16,14 @@
 
 ## What is gbnet-hs?
 
-Haskell port of [GB-Net](https://github.com/gondola-bros-entertainment/gbnet), a transport-level game networking library providing:
+A transport-level networking library providing:
 
 - **Bitpacked serialization** — Sub-byte encoding for bandwidth efficiency
 - **Reliable UDP** — Connection-oriented with ACKs, retransmits, and ordering
 - **Unified Peer API** — Same code for client, server, or P2P mesh
 - **Effect abstraction** — `MonadNetwork` typeclass enables pure deterministic testing
+- **Congestion control** — Dual-layer: Gaffer-style binary mode + TCP New Reno window, with application-level backpressure
+- **Zero-poll receive** — Dedicated receive thread via GHC IO manager (epoll/kqueue), STM TQueue delivery
 - **Connection migration** — Seamless IP address change handling
 
 ---
@@ -43,7 +45,7 @@ import Control.Monad.IO.Class (liftIO)
 
 main :: IO ()
 main = do
-  -- Initialize network
+  -- Initialize network (starts dedicated receive thread)
   let bindAddr = anyAddr 7777
   Right netState <- initNetState bindAddr
 
@@ -255,7 +257,8 @@ simulateLoss 0.1
 │  Carries socket state for IO            │
 ├──────────────┬──────────────────────────┤
 │  NetT IO     │  TestNet                 │
-│  (real UDP)  │  (pure, deterministic)   │
+│  TQueue +    │  (pure, deterministic)   │
+│  recv thread │                          │
 ├──────────────┴──────────────────────────┤
 │  GBNet.Class                            │
 │  MonadTime, MonadNetwork typeclasses    │
@@ -268,9 +271,10 @@ simulateLoss 0.1
 |--------|---------|
 | `GBNet` | Top-level facade — import this for convenience |
 | `GBNet.Class` | `MonadTime`, `MonadNetwork` typeclasses |
-| `GBNet.Net` | `NetT` monad transformer, `MonadNetwork (NetT IO)` |
-| `GBNet.Net.IO` | `initNetState` — create real UDP socket |
+| `GBNet.Net` | `NetT` monad transformer with receive thread + TQueue |
+| `GBNet.Net.IO` | `initNetState` — create real UDP socket and start receive thread |
 | `GBNet.Peer` | `NetPeer`, `peerTick`, connection management |
+| `GBNet.Congestion` | Dual-layer congestion control and backpressure |
 | `GBNet.TestNet` | Pure test network, `TestWorld` for multi-peer |
 | `GBNet.Serialize.*` | Bit-level serialization, TH derivation |
 
@@ -343,6 +347,42 @@ case sampleSnapshot renderTime buffer' of
 
 ---
 
+## Congestion Control
+
+gbnet-hs uses a dual-layer congestion control strategy:
+
+### Binary Mode (Gaffer-style)
+
+A send-rate controller that tracks Good/Bad network conditions:
+
+- **Good mode** — additive increase (AIMD): ramps send rate up to 4x base rate
+- **Bad mode** — multiplicative decrease: halves current send rate on loss/high RTT
+- Adaptive recovery timer with quick re-entry detection (doubles on rapid Good→Bad transitions)
+
+### Window-Based (TCP New Reno)
+
+A cwnd-based controller layered alongside binary mode:
+
+- **Slow Start** — exponential growth until ssthresh
+- **Congestion Avoidance** — additive increase per RTT
+- **Recovery** — halves cwnd on packet loss (triggered by fast retransmit)
+- **Slow Start Restart** — resets stale cwnd after idle periods (RFC 2861)
+
+### Backpressure API
+
+Applications can query congestion pressure and adapt:
+
+```haskell
+stats <- peerStats peerId peer
+case nsCongestionLevel stats of
+  CongestionNone     -> sendFreely
+  CongestionElevated -> reduceNonEssential
+  CongestionHigh     -> dropLowPriority
+  CongestionCritical -> onlySendEssential
+```
+
+---
+
 ## Build & Test
 
 Requires [GHCup](https://www.haskell.org/ghcup/) with GHC >= 9.6.
@@ -364,6 +404,8 @@ Optimized for game networking:
 - **GHC flags**: `-O2 -fspecialise-aggressively -fexpose-all-unfoldings`
 - **INLINE pragmas** on hot paths
 - **Byte-aligned fast paths** when bit position allows
+- **Hardware-accelerated CRC32C** via Google's C++ library (runtime dispatch: SSE4.2, ARMv8 CRC, software fallback)
+- **Zero-poll receive** — dedicated thread blocks on epoll/kqueue, delivers via STM TQueue
 
 ---
 
@@ -377,12 +419,20 @@ Optimized for game networking:
 - [x] RTT estimation and adaptive retransmit
 - [x] Large message fragmentation
 - [x] Connection migration
-- [x] CRC32 packet validation
-- [x] Rate limiting
+- [x] Hardware-accelerated CRC32C validation (SSE4.2/ARMv8/software fallback)
+- [x] Self-cleaning rate limiter
+
+### Congestion Control
+- [x] Gaffer-style binary mode (Good/Bad with AIMD recovery)
+- [x] TCP New Reno window-based control (slow start, avoidance, recovery)
+- [x] Slow Start Restart for idle connections (RFC 2861)
+- [x] Application-level backpressure via `CongestionLevel`
+- [x] CWND loss signal from fast retransmit
+- [x] Adaptive recovery timer with quick re-entry detection
 
 ### Effect Abstraction
 - [x] `MonadNetwork` typeclass
-- [x] `NetT` monad transformer for IO
+- [x] `NetT` monad transformer with dedicated receive thread + STM TQueue
 - [x] `TestNet` pure deterministic network
 - [x] `TestWorld` multi-peer simulation
 

@@ -17,7 +17,6 @@ module GBNet.Socket
     closeSocket,
     socketLocalAddr,
     socketSendTo,
-    socketRecvFrom,
     socketStats,
     socketResetStats,
   )
@@ -30,7 +29,6 @@ import GBNet.Stats (SocketStats (..), defaultSocketStats)
 import Network.Socket (SockAddr, Socket)
 import qualified Network.Socket as NS
 import qualified Network.Socket.ByteString as NSB
-import System.Timeout (timeout)
 
 -- | Maximum size of a single UDP datagram.
 maxUdpPacketSize :: Int
@@ -41,7 +39,6 @@ data SocketError
   = SocketIoError !String
   | SocketInvalidAddress
   | SocketClosed
-  | SocketWouldBlock
   | SocketOther !String
   deriving (Eq, Show)
 
@@ -102,31 +99,6 @@ socketSendTo dat addr now sock = do
                 ssLastSendTime = Just now
               }
        in Right (sent, sock {usStats = stats'})
-
--- | Receive timeout in microseconds (1ms).
-recvTimeoutUs :: Int
-recvTimeoutUs = 1000
-
--- | Receive data from any address (non-blocking via timeout).
-socketRecvFrom ::
-  MonoTime ->
-  UdpSocket ->
-  IO (Either SocketError (BS.ByteString, SockAddr, UdpSocket))
-socketRecvFrom now sock = do
-  result <- timeout recvTimeoutUs $ tryIO $ NSB.recvFrom (usSocket sock) maxUdpPacketSize
-  return $ case result of
-    Nothing -> Left SocketWouldBlock -- Timeout = no data available
-    Just (Left err) -> Left (SocketIoError err)
-    Just (Right (dat, addr)) ->
-      let len = BS.length dat
-          stats = usStats sock
-          stats' =
-            stats
-              { ssBytesReceived = ssBytesReceived stats + fromIntegral len,
-                ssPacketsReceived = ssPacketsReceived stats + 1,
-                ssLastReceiveTime = Just now
-              }
-       in Right (dat, addr, sock {usStats = stats'})
 
 -- | Get socket statistics.
 socketStats :: UdpSocket -> SocketStats

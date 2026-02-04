@@ -10,6 +10,7 @@ These examples use the Peer API with the MTL-based network monad.
 
 ```haskell
 import GBNet
+import GBNet.Net (newNetState)
 import Control.Monad (foldM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent (threadDelay)
@@ -29,7 +30,9 @@ runServer = do
   result <- newPeer addr config now
   case result of
     Left err -> putStrLn $ "Failed to bind: " ++ show err
-    Right (peer, sock) -> evalNetT (serverLoop peer) (newNetState sock addr)
+    Right (peer, sock) -> do
+      netState <- newNetState sock addr
+      evalNetT (serverLoop peer) netState
 
 serverLoop :: NetPeer -> NetT IO ()
 serverLoop peer = do
@@ -85,7 +88,8 @@ runClient = do
     Right (peer, sock) -> do
       -- Initiate connection
       let peer' = peerConnect (peerIdFromAddr serverAddr) now peer
-      evalNetT (clientLoop peer' False) (newNetState sock localAddr)
+      netState <- newNetState sock localAddr
+      evalNetT (clientLoop peer' False) netState
 
 clientLoop :: NetPeer -> Bool -> NetT IO ()
 clientLoop peer connected = do
@@ -142,7 +146,8 @@ runP2PPeer port remotes = do
     Right (peer, sock) -> do
       -- Connect to all known peers
       let peer' = foldl (\p remote -> peerConnect (peerIdFromAddr remote) now p) peer remotes
-      evalNetT (p2pLoop peer') (newNetState sock addr)
+      netState <- newNetState sock addr
+      evalNetT (p2pLoop peer') netState
 
 p2pLoop :: NetPeer -> NetT IO ()
 p2pLoop peer = do

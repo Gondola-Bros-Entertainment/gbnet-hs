@@ -30,6 +30,10 @@ module GBNet.Congestion
     ccUpdate,
     ccCanSend,
 
+    -- * Congestion level query
+    ccCongestionLevel,
+    cwCongestionLevel,
+
     -- * Window-based congestion controller
     CongestionWindow (..),
     newCongestionWindow,
@@ -40,6 +44,7 @@ module GBNet.Congestion
     cwCanSend,
     cwUpdatePacing,
     cwCanSendPaced,
+    cwSlowStartRestart,
 
     -- * Bandwidth tracking
     BandwidthTracker (..),
@@ -60,6 +65,7 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word64, Word8)
 import GBNet.Reliability (MonoTime, elapsedMs)
+import GBNet.Stats (CongestionLevel (..))
 
 -- Constants
 
@@ -95,6 +101,14 @@ recoveryHalveIntervalSecs = 10.0
 
 quickDropThresholdSecs :: Double
 quickDropThresholdSecs = 10.0
+
+-- | Additive increase per update tick when in Good mode (packets/sec).
+sendRateIncrease :: Float
+sendRateIncrease = 1.0
+
+-- | Maximum send rate multiplier relative to base rate.
+maxSendRateMultiplier :: Float
+maxSendRateMultiplier = 4.0
 
 -- | Binary congestion state.
 data CongestionMode
@@ -171,7 +185,7 @@ ccUpdate packetLoss rttMs now cc =
                         else 1.0
                     Nothing -> 1.0
                   newRecovery = min maxRecoverySecs (ccAdaptiveRecoverySecs cc * recoveryMult)
-                  newRate = max minSendRate (ccBaseSendRate cc * congestionRateReduction)
+                  newRate = max minSendRate (ccCurrentSendRate cc * congestionRateReduction)
                in cc
                     { ccMode = CongestionBad,
                       ccLastBadEntry = Just now,
@@ -180,23 +194,27 @@ ccUpdate packetLoss rttMs now cc =
                       ccAdaptiveRecoverySecs = newRecovery
                     }
           | otherwise ->
-              -- Halve recovery time after sustained good conditions
-              case ccLastGoodEntry cc of
-                Just goodEntry ->
-                  let elapsed = elapsedMs goodEntry now / 1000.0
-                      intervals = floor (elapsed / recoveryHalveIntervalSecs) :: Int
-                   in if intervals > 0
-                        then
-                          let newRecovery =
-                                max
-                                  minRecoverySecs
-                                  (ccAdaptiveRecoverySecs cc / (2.0 ^ intervals))
-                           in cc
-                                { ccAdaptiveRecoverySecs = newRecovery,
-                                  ccLastGoodEntry = Just now
-                                }
-                        else cc
-                Nothing -> cc
+              -- Additive increase: ramp rate up toward max capacity
+              let maxRate = ccBaseSendRate cc * maxSendRateMultiplier
+                  newRate = min maxRate (ccCurrentSendRate cc + sendRateIncrease)
+                  -- Halve recovery time after sustained good conditions
+                  cc' = cc {ccCurrentSendRate = newRate}
+               in case ccLastGoodEntry cc' of
+                    Just goodEntry ->
+                      let elapsed = elapsedMs goodEntry now / 1000.0
+                          intervals = floor (elapsed / recoveryHalveIntervalSecs) :: Int
+                       in if intervals > 0
+                            then
+                              let newRecovery =
+                                    max
+                                      minRecoverySecs
+                                      (ccAdaptiveRecoverySecs cc' / (2.0 ^ intervals))
+                               in cc'
+                                    { ccAdaptiveRecoverySecs = newRecovery,
+                                      ccLastGoodEntry = Just now
+                                    }
+                            else cc'
+                    Nothing -> cc'
         CongestionBad
           | not isBad ->
               case ccGoodConditionsStart cc of
@@ -221,6 +239,34 @@ ccCanSend :: Int -> Int -> CongestionController -> Bool
 ccCanSend packetsSentThisCycle packetBytes cc =
   fromIntegral packetsSentThisCycle < ccCurrentSendRate cc
     && ccBudgetBytesRemaining cc >= packetBytes
+
+-- | Query congestion level from the binary controller.
+ccCongestionLevel :: CongestionController -> CongestionLevel
+ccCongestionLevel cc = case ccMode cc of
+  CongestionBad -> CongestionCritical
+  CongestionGood
+    | budgetRatio < budgetElevatedThreshold -> CongestionElevated
+    | otherwise -> CongestionNone
+  where
+    budgetRatio
+      | ccBytesPerTick cc <= 0 = 1.0
+      | otherwise = fromIntegral (ccBudgetBytesRemaining cc) / fromIntegral (ccBytesPerTick cc) :: Float
+    budgetElevatedThreshold = 0.25
+
+-- | Query congestion level from the window-based controller.
+cwCongestionLevel :: CongestionWindow -> CongestionLevel
+cwCongestionLevel cw
+  | utilization > windowCriticalThreshold = CongestionCritical
+  | utilization > windowHighThreshold = CongestionHigh
+  | utilization > windowElevatedThreshold = CongestionElevated
+  | otherwise = CongestionNone
+  where
+    utilization
+      | cwCwnd cw <= 0 = 1.0
+      | otherwise = fromIntegral (cwBytesInFlight cw) / cwCwnd cw
+    windowElevatedThreshold = 0.7
+    windowHighThreshold = 0.85
+    windowCriticalThreshold = 0.95
 
 -- | Window-based congestion controller (TCP-like).
 data CongestionWindow = CongestionWindow
@@ -311,6 +357,25 @@ cwCanSendPaced now cw =
   case cwLastSendTime cw of
     Nothing -> True
     Just lastSend -> elapsedMs lastSend now >= cwMinInterPacketDelay cw
+
+-- | Reset to slow start if idle too long (RFC 2861).
+-- Prevents bursting a stale window after an idle period.
+cwSlowStartRestart :: Double -> MonoTime -> CongestionWindow -> CongestionWindow
+cwSlowStartRestart rtoMs now cw =
+  case cwLastSendTime cw of
+    Nothing -> cw
+    Just lastSend
+      | elapsedMs lastSend now > ssrIdleThreshold * rtoMs ->
+          let initialCwnd = fromIntegral (initialCwndPackets * cwMtu cw)
+           in cw
+                { cwPhase = SlowStart,
+                  cwCwnd = initialCwnd,
+                  cwSsthresh = cwCwnd cw
+                }
+      | otherwise -> cw
+  where
+    -- Idle for more than 2 RTOs triggers restart
+    ssrIdleThreshold = 2.0
 
 -- | Bandwidth tracker using a sliding window.
 data BandwidthTracker = BandwidthTracker

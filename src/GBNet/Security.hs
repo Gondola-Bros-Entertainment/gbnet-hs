@@ -9,14 +9,12 @@ module GBNet.Security
     crc32c,
     appendCrc32,
     validateAndStripCrc32,
-    crc32cPolynomial,
     crc32Size,
 
     -- * Rate limiting
     RateLimiter (..),
     newRateLimiter,
     rateLimiterAllow,
-    rateLimiterCleanup,
 
     -- * Connect tokens
     ConnectToken (..),
@@ -29,44 +27,22 @@ module GBNet.Security
   )
 where
 
-import Data.Bits (shiftR, xor, (.&.))
+import Data.Bits (shiftR, (.&.))
 import qualified Data.ByteString as BS
+import qualified Data.Digest.CRC32C as CRC
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Word (Word32, Word64, Word8)
+import Data.Word (Word32, Word64)
 import GBNet.Reliability (MonoTime, elapsedMs)
-
--- CRC32C Constants
-
--- | CRC-32C (Castagnoli) polynomial (iSCSI standard).
-crc32cPolynomial :: Word32
-crc32cPolynomial = 0x82F63B78
 
 -- | CRC32 checksum size in bytes.
 crc32Size :: Int
 crc32Size = 4
 
--- | Compute CRC32C checksum.
+-- | Compute CRC32C checksum (hardware-accelerated via SSE4.2\/ARMv8 CRC).
 crc32c :: BS.ByteString -> Word32
-crc32c dat = complement $ BS.foldl' processByte 0xFFFFFFFF dat
-  where
-    processByte :: Word32 -> Word8 -> Word32
-    processByte crc byte =
-      let crc' = crc `xor` fromIntegral byte
-       in foldl' processBit crc' [0 .. 7 :: Int]
-
-    processBit :: Word32 -> Int -> Word32
-    processBit crc _ =
-      if crc .&. 1 /= 0
-        then (crc `shiftR` 1) `xor` crc32cPolynomial
-        else crc `shiftR` 1
-
-    foldl' :: (a -> b -> a) -> a -> [b] -> a
-    foldl' _ z [] = z
-    foldl' f z (x : xs) = let z' = f z x in z' `seq` foldl' f z' xs
-
-    complement :: Word32 -> Word32
-    complement x = x `xor` 0xFFFFFFFF
+crc32c = CRC.crc32c
+{-# INLINE crc32c #-}
 
 -- | Append CRC32C checksum to data (little-endian).
 appendCrc32 :: BS.ByteString -> BS.ByteString
@@ -109,46 +85,56 @@ word32FromLEBytes bs
           b3 = fromIntegral (BS.index bs 3) :: Word32
        in b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
 
+-- | Cleanup interval — sweep stale entries every 5 seconds.
+cleanupIntervalMs :: Double
+cleanupIntervalMs = 5000.0
+
 -- | Rate limiter for connection requests per source.
+-- Self-cleaning: stale entries are pruned automatically during 'rateLimiterAllow'.
 data RateLimiter = RateLimiter
-  { rlRequests :: !(Map Word64 [MonoTime]), -- Key is hashed address
+  { rlRequests :: !(Map Word64 [MonoTime]),
     rlMaxRequestsPerSecond :: !Int,
-    rlWindowMs :: !Double
+    rlWindowMs :: !Double,
+    rlLastCleanup :: !MonoTime
   }
   deriving (Show)
 
 -- | Create a new rate limiter.
-newRateLimiter :: Int -> RateLimiter
-newRateLimiter maxReqs =
+newRateLimiter :: Int -> MonoTime -> RateLimiter
+newRateLimiter maxReqs now =
   RateLimiter
     { rlRequests = Map.empty,
       rlMaxRequestsPerSecond = maxReqs,
-      rlWindowMs = 1000.0
+      rlWindowMs = 1000.0,
+      rlLastCleanup = now
     }
 
 -- | Check if a request should be allowed. Returns (allowed, updatedLimiter).
+-- Automatically prunes stale entries when the cleanup interval has elapsed.
 rateLimiterAllow :: Word64 -> MonoTime -> RateLimiter -> (Bool, RateLimiter)
 rateLimiterAllow addrKey now rl =
-  let window = rlWindowMs rl
-      timestamps = Map.findWithDefault [] addrKey (rlRequests rl)
-      -- Filter to recent timestamps
+  let -- Periodic sweep of all entries
+      rl' = maybeCleanup now rl
+      window = rlWindowMs rl'
+      timestamps = Map.findWithDefault [] addrKey (rlRequests rl')
       recent = filter (\t -> elapsedMs t now < window) timestamps
-   in if length recent >= rlMaxRequestsPerSecond rl
-        then (False, rl {rlRequests = Map.insert addrKey recent (rlRequests rl)})
+   in if length recent >= rlMaxRequestsPerSecond rl'
+        then (False, rl' {rlRequests = Map.insert addrKey recent (rlRequests rl')})
         else
           ( True,
-            rl {rlRequests = Map.insert addrKey (now : recent) (rlRequests rl)}
+            rl' {rlRequests = Map.insert addrKey (now : recent) (rlRequests rl')}
           )
 
--- | Clean up old entries.
-rateLimiterCleanup :: MonoTime -> RateLimiter -> RateLimiter
-rateLimiterCleanup now rl =
-  let window = rlWindowMs rl
-      cleanup = filter (\t -> elapsedMs t now < window)
-      cleaned = Map.map cleanup (rlRequests rl)
-      -- Remove empty entries
-      nonEmpty = Map.filter (not . null) cleaned
-   in rl {rlRequests = nonEmpty}
+-- | Sweep stale entries if enough time has passed since last cleanup.
+maybeCleanup :: MonoTime -> RateLimiter -> RateLimiter
+maybeCleanup now rl
+  | elapsedMs (rlLastCleanup rl) now < cleanupIntervalMs = rl
+  | otherwise =
+      let window = rlWindowMs rl
+          cleanup = filter (\t -> elapsedMs t now < window)
+          cleaned = Map.map cleanup (rlRequests rl)
+          nonEmpty = Map.filter (not . null) cleaned
+       in rl {rlRequests = nonEmpty, rlLastCleanup = now}
 
 -- | Connect token for authentication.
 data ConnectToken = ConnectToken

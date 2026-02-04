@@ -8,6 +8,9 @@ module GBNet.Stats
     ConnectionQuality (..),
     assessConnectionQuality,
 
+    -- * Congestion level
+    CongestionLevel (..),
+
     -- * Network statistics
     NetworkStats (..),
     defaultNetworkStats,
@@ -47,6 +50,21 @@ assessConnectionQuality rttMs lossPercent
   | lossPercent > 0.5 || rttMs > 80.0 = QualityGood
   | otherwise = QualityExcellent
 
+-- | Congestion pressure level reported to the application.
+--
+-- Applications can use this to adapt their behavior:
+--
+-- * 'CongestionNone' — send freely
+-- * 'CongestionElevated' — consider reducing non-essential traffic
+-- * 'CongestionHigh' — drop low-priority data, reduce send rate
+-- * 'CongestionCritical' — sends are being suppressed, only send essential data
+data CongestionLevel
+  = CongestionNone
+  | CongestionElevated
+  | CongestionHigh
+  | CongestionCritical
+  deriving (Eq, Show, Ord)
+
 -- | Network statistics for a connection.
 data NetworkStats = NetworkStats
   { nsPacketsSent :: !Word64,
@@ -57,7 +75,8 @@ data NetworkStats = NetworkStats
     nsPacketLoss :: !Float,
     nsBandwidthUp :: !Float,
     nsBandwidthDown :: !Float,
-    nsConnectionQuality :: !ConnectionQuality
+    nsConnectionQuality :: !ConnectionQuality,
+    nsCongestionLevel :: !CongestionLevel
   }
   deriving (Show)
 
@@ -73,7 +92,8 @@ defaultNetworkStats =
       nsPacketLoss = 0.0,
       nsBandwidthUp = 0.0,
       nsBandwidthDown = 0.0,
-      nsConnectionQuality = QualityExcellent
+      nsConnectionQuality = QualityExcellent,
+      nsCongestionLevel = CongestionNone
     }
 
 -- | Per-channel statistics.

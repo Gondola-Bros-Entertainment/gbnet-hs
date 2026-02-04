@@ -75,13 +75,17 @@ import GBNet.Congestion
     btBytesPerSecond,
     btRecord,
     ccCanSend,
+    ccCongestionLevel,
     ccDeductBudget,
     ccRefillBudget,
     ccUpdate,
     cwCanSend,
     cwCanSendPaced,
     cwOnAck,
+    cwCongestionLevel,
+    cwOnLoss,
     cwOnSend,
+    cwSlowStartRestart,
     cwUpdatePacing,
     newBandwidthTracker,
     newCongestionController,
@@ -91,7 +95,8 @@ import GBNet.Packet (PacketHeader (..), PacketType (..))
 import GBNet.Reliability (MonoTime, ReliableEndpoint, elapsedMs)
 import qualified GBNet.Reliability as Rel
 import GBNet.Stats
-  ( NetworkStats (..),
+  ( CongestionLevel (..),
+    NetworkStats (..),
     assessConnectionQuality,
     defaultNetworkStats,
   )
@@ -374,15 +379,18 @@ processIncomingHeader header now conn =
       -- Process ACKs (extend 32-bit wire format to 64-bit)
       ackBits64 = fromIntegral (ackBitfield header) :: Word64
       (ackResult, rel') = Rel.processAcks (ack header) ackBits64 now (connReliability conn'')
-      ackedPairs = fst ackResult
+      (ackedPairs, fastRetransmits) = ackResult
       conn''' = conn'' {connReliability = rel'}
-      -- Feed ack info to cwnd
+      -- Feed ack/loss info to cwnd
       conn'''' = case connCwnd conn''' of
         Just cw ->
-          let ackedBytes = length ackedPairs * ncMtu (connConfig conn''')
-           in if ackedBytes > 0
-                then conn''' {connCwnd = Just (cwOnAck ackedBytes cw)}
-                else conn'''
+          let hasLoss = not (null fastRetransmits)
+              ackedBytes = length ackedPairs * ncMtu (connConfig conn''')
+              cw'
+                | hasLoss = cwOnLoss cw
+                | ackedBytes > 0 = cwOnAck ackedBytes cw
+                | otherwise = cw
+           in conn''' {connCwnd = Just cw'}
         Nothing -> conn'''
       -- Acknowledge messages on channels
       conn''''' = foldl ackChannelMessage conn'''' ackedPairs
@@ -442,49 +450,57 @@ updateConnected now conn = do
       -- Update congestion
       let stats = connStats conn
           cong = ccUpdate (nsPacketLoss stats) (nsRtt stats) now (connCongestion conn)
-          cong' = ccRefillBudget (ncMtu (connConfig conn)) cong
-          conn' = conn {connCongestion = cong'}
+          congRefilled = ccRefillBudget (ncMtu (connConfig conn)) cong
+          connCong = conn {connCongestion = congRefilled}
 
-      -- Update cwnd pacing
-      let conn'' = case connCwnd conn' of
+      -- Update cwnd pacing and check for slow start restart
+      let connPaced = case connCwnd connCong of
             Just cw ->
-              let rto = Rel.rtoMs (connReliability conn')
-               in conn' {connCwnd = Just (cwUpdatePacing rto cw)}
-            Nothing -> conn'
+              let rto = Rel.rtoMs (connReliability connCong)
+                  cwRestarted = cwSlowStartRestart rto now cw
+                  cwPaced = cwUpdatePacing rto cwRestarted
+               in connCong {connCwnd = Just cwPaced}
+            Nothing -> connCong
 
       -- Send keepalive if needed
-      let timeSinceSend = elapsedMs (connLastSendTime conn'') now
-          keepaliveMs = ncKeepaliveIntervalMs (connConfig conn'')
-          conn''' =
+      let timeSinceSend = elapsedMs (connLastSendTime connPaced) now
+          keepaliveMs = ncKeepaliveIntervalMs (connConfig connPaced)
+          connKeepalive =
             if timeSinceSend > keepaliveMs
-              then sendKeepalive conn''
-              else conn''
+              then sendKeepalive connPaced
+              else connPaced
 
       -- Process channel outgoing messages
-      let conn'''' = processChannelOutput now conn'''
+      let connOutput = processChannelOutput now connKeepalive
 
       -- Update channels
-      let channels' = V.map (Channel.channelUpdate now) (connChannels conn'''')
-          conn''''' = conn'''' {connChannels = channels'}
+      let updatedChannels = V.map (Channel.channelUpdate now) (connChannels connOutput)
+          connChannelsUpdated = connOutput {connChannels = updatedChannels}
 
       -- Send AckOnly if needed
-      let conn'''''' =
-            if connPendingAck conn''''' && not (connDataSentThisTick conn''''')
-              then sendAckOnly conn'''''
-              else conn'''''
+      let connAcked =
+            if connPendingAck connChannelsUpdated && not (connDataSentThisTick connChannelsUpdated)
+              then sendAckOnly connChannelsUpdated
+              else connChannelsUpdated
+
+      -- Compute congestion level (worst of binary and window-based)
+      let binaryLevel = ccCongestionLevel (connCongestion connAcked)
+          windowLevel = maybe CongestionNone cwCongestionLevel (connCwnd connAcked)
+          congLevel = max binaryLevel windowLevel
 
       -- Update stats
-      let rel = connReliability conn''''''
+      let rel = connReliability connAcked
           stats' =
-            (connStats conn'''''')
+            (connStats connAcked)
               { nsRtt = realToFrac (Rel.srttMs rel),
                 nsPacketLoss = Rel.packetLossPercent rel,
-                nsBandwidthUp = realToFrac (btBytesPerSecond (connBandwidthUp conn'''''')),
-                nsBandwidthDown = realToFrac (btBytesPerSecond (connBandwidthDown conn'''''')),
-                nsConnectionQuality = assessConnectionQuality (nsRtt stats) (nsPacketLoss stats * 100)
+                nsBandwidthUp = realToFrac (btBytesPerSecond (connBandwidthUp connAcked)),
+                nsBandwidthDown = realToFrac (btBytesPerSecond (connBandwidthDown connAcked)),
+                nsConnectionQuality = assessConnectionQuality (nsRtt stats) (nsPacketLoss stats * 100),
+                nsCongestionLevel = congLevel
               }
       Right
-        conn''''''
+        connAcked
           { connStats = stats',
             connPendingAck = False
           }

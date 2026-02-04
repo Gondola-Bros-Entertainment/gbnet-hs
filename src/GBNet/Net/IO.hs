@@ -31,4 +31,4 @@ initNetState bindAddr = do
         Left err -> do
           closeSocket sock
           pure $ Left err
-        Right localAddr -> pure $ Right $ newNetState sock localAddr
+        Right localAddr -> Right <$> newNetState sock localAddr

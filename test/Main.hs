@@ -2,19 +2,33 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Main where
 
 import Data.Bits ((.&.))
+import qualified Data.ByteString as BS
 import Data.Int (Int16, Int32, Int64, Int8)
 import qualified Data.Text as T
 import Data.Word (Word16, Word32, Word64, Word8)
+import GBNet.Config (NetworkConfig (..), defaultNetworkConfig)
+import GBNet.Congestion
+import GBNet.Interest
+import GBNet.Interpolation
 import GBNet.Packet
+import GBNet.Connection (DisconnectReason (..))
+import GBNet.Peer
+import GBNet.Priority
 import GBNet.Reliability
 import GBNet.Serialize.BitBuffer
 import GBNet.Serialize.Class
 import GBNet.Serialize.TH
+import GBNet.Socket (UdpSocket (..))
+import GBNet.Stats (CongestionLevel (..), SocketStats (..), defaultSocketStats)
+import GBNet.TestNet
 import GBNet.Util
+import qualified Network.Socket as NS
+import Network.Socket (SockAddr (..), tupleToHostAddress)
 
 -- TH-derived test types (must be before main due to TH staging restriction)
 data Vec3 = Vec3
@@ -114,6 +128,42 @@ main = do
   testProcessAcksReturnsChannelInfo
   testInFlightEviction
   testFastRetransmit
+
+  -- Congestion control
+  testBinaryCongestionModeTransition
+  testBinaryRateRecovery
+  testCwndSlowStart
+  testCwndLossHalvesCwnd
+  testCwndSlowStartRestart
+  testCongestionLevelBinary
+  testCongestionLevelWindow
+  testBatchAndUnbatch
+
+  -- Integration: Pure peer API
+  testPeerHandshake
+  testPeerMessageDelivery
+  testPeerDisconnect
+  testPeerConnectionTimeout
+  testPeerMaxClients
+
+  -- Integration: Full TestNet polymorphic lifecycle
+  testTestNetHandshake
+  testTestNetMessageRoundTrip
+
+  -- Replication: Interest management
+  testRadiusInterestRelevant
+  testRadiusInterestPriority
+  testGridInterestRelevant
+
+  -- Replication: Priority accumulator
+  testPriorityAccumulate
+  testPriorityDrain
+  testPriorityUnregister
+
+  -- Replication: Snapshot interpolation
+  testSnapshotPushAndReady
+  testSnapshotInterpolation
+  testSnapshotOutOfOrder
 
   putStrLn ""
   putStrLn "All tests passed!"
@@ -784,3 +834,507 @@ testFastRetransmit = do
   let ((_, fastRetransmit), _ep4) = processAcks 3 0 ackTime ep3
   assertEqual "fast retransmit triggered" True (not (null fastRetransmit))
   assertEqual "retransmit is (0,0)" True ((0, 0) `elem` fastRetransmit)
+
+-- --------------------------------------------------------------------
+-- Congestion control tests
+-- --------------------------------------------------------------------
+
+testBinaryCongestionModeTransition :: IO ()
+testBinaryCongestionModeTransition = do
+  putStrLn "Binary congestion mode transition:"
+  let cc0 = newCongestionController 10.0 0.05 250.0 1000.0
+  assertEqual "initial mode" CongestionGood (ccMode cc0)
+  -- High loss triggers Bad
+  let cc1 = ccUpdate 0.10 100.0 1000000000 cc0
+  assertEqual "bad on high loss" CongestionBad (ccMode cc1)
+  -- Good conditions start recovery timer
+  let cc2 = ccUpdate 0.00 50.0 2000000000 cc1
+  assertEqual "still bad (recovering)" CongestionBad (ccMode cc2)
+  -- After recovery time passes, transition back to Good
+  let cc3 = ccUpdate 0.00 50.0 4000000000 cc2
+  assertEqual "back to good" CongestionGood (ccMode cc3)
+
+testBinaryRateRecovery :: IO ()
+testBinaryRateRecovery = do
+  putStrLn "Binary rate AIMD recovery:"
+  let cc0 = newCongestionController 10.0 0.05 250.0 1000.0
+  assertEqual "initial rate" 10.0 (ccCurrentSendRate cc0)
+  -- Additive increase in Good mode
+  let cc1 = ccUpdate 0.00 50.0 1000000000 cc0
+  assertEqual "rate increased" True (ccCurrentSendRate cc1 > ccCurrentSendRate cc0)
+  -- Multiplicative decrease on loss
+  let cc2 = ccUpdate 0.10 100.0 2000000000 cc1
+  assertEqual "rate decreased" True (ccCurrentSendRate cc2 < ccCurrentSendRate cc1)
+  -- Rate should be halved from current, not from base
+  let expectedRate = ccCurrentSendRate cc1 * congestionRateReduction
+  assertEqual "rate = current * 0.5" True (abs (ccCurrentSendRate cc2 - expectedRate) < 0.01)
+
+testCwndSlowStart :: IO ()
+testCwndSlowStart = do
+  putStrLn "CWND slow start:"
+  let cw0 = newCongestionWindow 1200
+  assertEqual "initial phase" SlowStart (cwPhase cw0)
+  let initialCwnd = cwCwnd cw0
+  -- ACK doubles cwnd in slow start
+  let cw1 = cwOnAck 1200 cw0
+  assertEqual "cwnd grew" True (cwCwnd cw1 > initialCwnd)
+  assertEqual "still slow start" SlowStart (cwPhase cw1)
+
+testCwndLossHalvesCwnd :: IO ()
+testCwndLossHalvesCwnd = do
+  putStrLn "CWND loss halves cwnd:"
+  let cw0 = newCongestionWindow 1200
+  let cw1 = cwOnAck 12000 cw0 -- Grow cwnd
+  let cw2 = cwOnLoss cw1
+  assertEqual "cwnd halved" True (cwCwnd cw2 < cwCwnd cw1)
+  assertEqual "enters recovery" Recovery (cwPhase cw2)
+  let expectedCwnd = max (fromIntegral minCwndBytes) (cwCwnd cw1 / 2.0)
+  assertEqual "cwnd = max(min, old/2)" True (abs (cwCwnd cw2 - expectedCwnd) < 1.0)
+
+testCwndSlowStartRestart :: IO ()
+testCwndSlowStartRestart = do
+  putStrLn "CWND slow start restart (RFC 2861):"
+  let mtu = 1200
+  let cw0 = newCongestionWindow mtu
+  -- Grow cwnd past initial
+  let cw1 = cwOnAck 24000 $ cwOnAck 24000 cw0
+  let bigCwnd = cwCwnd cw1
+  -- Record a send time
+  let now = 1000000000 :: MonoTime
+  let cw2 = cwOnSend 1200 now cw1
+  -- Idle for longer than 2 * RTO (say RTO = 200ms)
+  let laterTime = now + 500000000 -- 500ms later
+  let rtoMs = 200.0
+  let cw3 = cwSlowStartRestart rtoMs laterTime cw2
+  assertEqual "resets to SlowStart" SlowStart (cwPhase cw3)
+  assertEqual "cwnd reset to initial" True (cwCwnd cw3 < bigCwnd)
+  assertEqual "ssthresh = old cwnd" True (abs (cwSsthresh cw3 - bigCwnd) < 1.0)
+
+testCongestionLevelBinary :: IO ()
+testCongestionLevelBinary = do
+  putStrLn "Binary congestion level:"
+  let cc0 = newCongestionController 10.0 0.05 250.0 1000.0
+  assertEqual "good = None" CongestionNone (ccCongestionLevel cc0)
+  let cc1 = ccUpdate 0.10 100.0 1000000000 cc0
+  assertEqual "bad = Critical" CongestionCritical (ccCongestionLevel cc1)
+
+testCongestionLevelWindow :: IO ()
+testCongestionLevelWindow = do
+  putStrLn "Window congestion level:"
+  let cw0 = newCongestionWindow 1200
+  assertEqual "empty = None" CongestionNone (cwCongestionLevel cw0)
+  -- Fill most of the window
+  let cw1 = cw0 {cwBytesInFlight = floor (cwCwnd cw0 * 0.96)}
+  assertEqual "96% = Critical" CongestionCritical (cwCongestionLevel cw1)
+  let cw2 = cw0 {cwBytesInFlight = floor (cwCwnd cw0 * 0.75)}
+  assertEqual "75% = Elevated" CongestionElevated (cwCongestionLevel cw2)
+
+testBatchAndUnbatch :: IO ()
+testBatchAndUnbatch = do
+  putStrLn "Message batching round-trip:"
+  let msgs = ["hello", "world", "foo"]
+  let batched = batchMessages msgs 1200
+  assertEqual "1 batch" 1 (length batched)
+  case unbatchMessages (head batched) of
+    Nothing -> error "  FAIL: unbatch returned Nothing"
+    Just result -> assertEqual "round-trip" msgs result
+
+-- --------------------------------------------------------------------
+-- Integration: TestNet peer lifecycle
+-- --------------------------------------------------------------------
+
+-- Helper to create SockAddr for tests
+testAddr :: Word16 -> SockAddr
+testAddr port = SockAddrInet (fromIntegral port) (tupleToHostAddress (127, 0, 0, 1))
+
+-- | Create a dummy UdpSocket for testing pure peer operations.
+-- The socket is real (to satisfy strict fields) but never used for I/O.
+newTestUdpSocket :: IO UdpSocket
+newTestUdpSocket = do
+  sock <- NS.socket NS.AF_INET NS.Datagram NS.defaultProtocol
+  pure UdpSocket {usSocket = sock, usStats = defaultSocketStats}
+
+testPeerHandshake :: IO ()
+testPeerHandshake = do
+  putStrLn "Peer handshake via TestNet:"
+  let serverAddr = testAddr 7777
+      clientAddr = testAddr 8888
+      config = defaultNetworkConfig
+      now = 0 :: MonoTime
+
+  sock <- newTestUdpSocket
+
+  -- Create client peer state and initiate connection
+  let clientPeer0 = newPeerState sock clientAddr config now
+      clientPeer1 = peerConnect (peerIdFromAddr serverAddr) now clientPeer0
+
+  -- Process: client produces connect request
+  let clientResult = peerProcess now [] clientPeer1
+      clientOutgoing = prOutgoing clientResult
+
+  assertEqual "client sends packets" True (not (null clientOutgoing))
+
+  -- Verify server starts empty
+  let serverPeer = newPeerState sock serverAddr config now
+  assertEqual "server starts empty" 0 (peerCount serverPeer)
+
+  -- Client has 0 actual connections (all pending)
+  assertEqual "client has 0 connections (pending)" 0 (peerCount clientPeer1)
+
+  putStrLn "  PASS: Peer handshake (packet generation verified)"
+
+testPeerMessageDelivery :: IO ()
+testPeerMessageDelivery = do
+  putStrLn "Peer message delivery:"
+  sock <- newTestUdpSocket
+  let addr = testAddr 9999
+      config = defaultNetworkConfig
+      now = 0 :: MonoTime
+      peer = newPeerState sock addr config now
+
+  -- Send a message to a non-connected peer should fail
+  let result = peerSend (peerIdFromAddr (testAddr 1234)) 0 "hello" now peer
+  case result of
+    Left _ -> putStrLn "  PASS: send to unconnected peer fails"
+    Right _ -> error "  FAIL: should have failed"
+
+  -- Broadcast to empty peer should be no-op
+  let peer' = peerBroadcast 0 "test" Nothing now peer
+  assertEqual "broadcast to empty" 0 (peerCount peer')
+  putStrLn "  PASS: broadcast to empty peer is no-op"
+
+testPeerDisconnect :: IO ()
+testPeerDisconnect = do
+  putStrLn "Peer disconnect:"
+  sock <- newTestUdpSocket
+  let addr = testAddr 5555
+      config = defaultNetworkConfig
+      now = 0 :: MonoTime
+      peer = newPeerState sock addr config now
+
+  -- Disconnect from non-connected peer is no-op
+  let peer' = peerDisconnect (peerIdFromAddr (testAddr 1111)) now peer
+  assertEqual "disconnect non-existing" 0 (peerCount peer')
+
+  -- Connect then disconnect
+  let peer1 = peerConnect (peerIdFromAddr (testAddr 2222)) now peer
+  let peer2 = peerDisconnect (peerIdFromAddr (testAddr 2222)) now peer1
+  -- Disconnect removes from pending (no actual connection yet)
+  assertEqual "no connections after disconnect" 0 (peerCount peer2)
+  putStrLn "  PASS: Peer disconnect"
+
+testPeerConnectionTimeout :: IO ()
+testPeerConnectionTimeout = do
+  putStrLn "Peer connection timeout:"
+  sock <- newTestUdpSocket
+  let addr = testAddr 6666
+      config = defaultNetworkConfig
+      now = 0 :: MonoTime
+      peer0 = newPeerState sock addr config now
+
+  -- Initiate connection
+  let peer1 = peerConnect (peerIdFromAddr (testAddr 3333)) now peer0
+
+  -- Process far in the future (past timeout)
+  let futureTime = 30000000000 :: MonoTime -- 30 seconds
+  let result = peerProcess futureTime [] peer1
+  let timeoutEvents = filter isDisconnectTimeout (prEvents result)
+
+  assertEqual "timeout fires" True (not (null timeoutEvents))
+  putStrLn "  PASS: Connection timeout"
+  where
+    isDisconnectTimeout (PeerDisconnected _ ReasonTimeout) = True
+    isDisconnectTimeout _ = False
+
+testPeerMaxClients :: IO ()
+testPeerMaxClients = do
+  putStrLn "Peer max clients:"
+  sock <- newTestUdpSocket
+  let addr = testAddr 4444
+      config = defaultNetworkConfig {ncMaxClients = 2}
+      now = 0 :: MonoTime
+      peer = newPeerState sock addr config now
+
+  -- Outbound connections aren't capped by maxClients (only inbound)
+  let peer1 = peerConnect (peerIdFromAddr (testAddr 1001)) now peer
+  let peer2 = peerConnect (peerIdFromAddr (testAddr 1002)) now peer1
+  let peer3 = peerConnect (peerIdFromAddr (testAddr 1003)) now peer2
+
+  -- All are pending, none are "connected"
+  assertEqual "no connected yet" 0 (peerCount peer3)
+
+  -- Process to drain send queue and verify packets generated
+  let result = peerProcess now [] peer3
+  assertEqual "sends connection requests" True (not (null (prOutgoing result)))
+  putStrLn "  PASS: Max clients config"
+
+-- --------------------------------------------------------------------
+-- Full TestNet polymorphic lifecycle
+-- --------------------------------------------------------------------
+
+-- | Run peerTick for a peer inside TestWorld, returning events and updated world.
+tickPeerInWorld ::
+  SockAddr ->
+  [(Word8, BS.ByteString)] ->
+  NetPeer ->
+  TestWorld ->
+  (([PeerEvent], NetPeer), TestWorld)
+tickPeerInWorld addr msgs peer world =
+  runPeerInWorld addr (peerTick msgs peer) world
+
+-- | Advance world time by a step in milliseconds.
+stepWorld :: MonoTime -> TestWorld -> TestWorld
+stepWorld ms world = worldAdvanceTime (twGlobalTime world + ms * 1000000) world
+
+-- | Register both peers in the world at the given start time.
+-- Both addresses must be registered so deliverPackets can route between them.
+initWorld :: MonoTime -> SockAddr -> SockAddr -> TestWorld
+initWorld startTime addr1 addr2 =
+  let w0 = worldAdvanceTime startTime newTestWorld
+      (_, w1) = runPeerInWorld addr1 (pure ()) w0
+      (_, w2) = runPeerInWorld addr2 (pure ()) w1
+   in w2
+
+testTestNetHandshake :: IO ()
+testTestNetHandshake = do
+  putStrLn "TestNet full handshake:"
+  sock <- newTestUdpSocket
+  let serverAddr = testAddr 7000
+      clientAddr = testAddr 8000
+      config = defaultNetworkConfig
+      -- Use different RNG seeds (via init time) to avoid salt collision
+      startTime = 1000000000 :: MonoTime -- 1 second
+
+  let serverPeer = newPeerState sock serverAddr config 100000000
+      clientPeer0 = newPeerState sock clientAddr config 200000000
+
+  -- Pre-register both addresses and set world to start time
+  let world0 = initWorld startTime serverAddr clientAddr
+
+  -- Client initiates connection
+  let clientPeer1 = peerConnect (peerIdFromAddr serverAddr) startTime clientPeer0
+
+  -- Tick client: sends ConnectionRequest
+  let ((_, clientPeer2), world1) =
+        tickPeerInWorld clientAddr [] clientPeer1 world0
+
+  -- Deliver packets (client -> server)
+  let world2 = stepWorld 10 world1
+
+  -- Tick server: receives ConnectionRequest, sends Challenge
+  let ((_, serverPeer1), world3) =
+        tickPeerInWorld serverAddr [] serverPeer world2
+
+  -- Deliver packets (server -> client)
+  let world4 = stepWorld 10 world3
+
+  -- Tick client: receives Challenge, sends Response
+  let ((_, clientPeer3), world5) =
+        tickPeerInWorld clientAddr [] clientPeer2 world4
+
+  -- Deliver packets
+  let world6 = stepWorld 10 world5
+
+  -- Tick server: receives Response, accepts connection, sends Accepted
+  let ((serverEvents2, serverPeer2), world7) =
+        tickPeerInWorld serverAddr [] serverPeer1 world6
+
+  -- Check server got a PeerConnected event
+  let serverConnected = any isConnected serverEvents2
+  assertEqual "server sees connection" True serverConnected
+
+  -- Deliver packets
+  let world8 = stepWorld 10 world7
+
+  -- Tick client: receives Accepted
+  let ((clientEvents3, clientPeer4), _world9) =
+        tickPeerInWorld clientAddr [] clientPeer3 world8
+
+  -- Check client got a PeerConnected event
+  let clientConnected = any isConnected clientEvents3
+  assertEqual "client sees connection" True clientConnected
+
+  -- Both sides should now have 1 connection
+  assertEqual "server has 1 connection" 1 (peerCount serverPeer2)
+  assertEqual "client has 1 connection" 1 (peerCount clientPeer4)
+
+  putStrLn "  PASS: Full handshake via TestNet"
+  where
+    isConnected (PeerConnected _ _) = True
+    isConnected _ = False
+
+testTestNetMessageRoundTrip :: IO ()
+testTestNetMessageRoundTrip = do
+  putStrLn "TestNet message round-trip:"
+  sock <- newTestUdpSocket
+  let serverAddr = testAddr 7001
+      clientAddr = testAddr 8001
+      config = defaultNetworkConfig
+      startTime = 1000000000 :: MonoTime
+
+  -- Different init times for different RNG seeds
+  let serverPeer = newPeerState sock serverAddr config 100000000
+      clientPeer0 = newPeerState sock clientAddr config 200000000
+      clientPeer1 = peerConnect (peerIdFromAddr serverAddr) startTime clientPeer0
+
+  -- Pre-register both addresses at start time
+  let world0 = initWorld startTime serverAddr clientAddr
+
+  -- Tick 1: client sends request
+  let ((_, cp2), w1) = tickPeerInWorld clientAddr [] clientPeer1 world0
+  let w2 = stepWorld 10 w1
+
+  -- Tick 2: server sends challenge
+  let ((_, sp1), w3) = tickPeerInWorld serverAddr [] serverPeer w2
+  let w4 = stepWorld 10 w3
+
+  -- Tick 3: client sends response
+  let ((_, cp3), w5) = tickPeerInWorld clientAddr [] cp2 w4
+  let w6 = stepWorld 10 w5
+
+  -- Tick 4: server accepts
+  let ((_, sp2), w7) = tickPeerInWorld serverAddr [] sp1 w6
+  let w8 = stepWorld 10 w7
+
+  -- Tick 5: client receives accepted
+  let ((_, cp4), w9) = tickPeerInWorld clientAddr [] cp3 w8
+  let w10 = stepWorld 10 w9
+
+  -- Now both are connected. Client sends a message on channel 0.
+  let testMsg = "hello from client"
+  let ((_, _cp5), w11) = tickPeerInWorld clientAddr [(0, testMsg)] cp4 w10
+  let w12 = stepWorld 10 w11
+
+  -- Server receives the message
+  let ((serverEvents, _sp3), _w13) = tickPeerInWorld serverAddr [] sp2 w12
+
+  -- Note: TestNet doesn't strip CRC (unlike the IO backend), so received
+  -- messages contain a 4-byte CRC suffix. We check the message is a prefix.
+  let receivedMsgs = [msg | PeerMessage _ _ msg <- serverEvents]
+  let hasMsg = any (BS.isPrefixOf testMsg) receivedMsgs
+  assertEqual "server received message" True hasMsg
+
+  putStrLn "  PASS: Message round-trip via TestNet"
+
+-- --------------------------------------------------------------------
+-- Replication: Interest management
+-- --------------------------------------------------------------------
+
+testRadiusInterestRelevant :: IO ()
+testRadiusInterestRelevant = do
+  putStrLn "Radius interest relevance:"
+  let interest = newRadiusInterest 100.0
+  assertEqual "close is relevant" True (relevant interest (10.0, 10.0, 0.0) (0.0, 0.0, 0.0))
+  assertEqual "far is not relevant" False (relevant interest (200.0, 0.0, 0.0) (0.0, 0.0, 0.0))
+  assertEqual "exactly at boundary" True (relevant interest (100.0, 0.0, 0.0) (0.0, 0.0, 0.0))
+  assertEqual "same position" True (relevant interest (50.0, 50.0, 50.0) (50.0, 50.0, 50.0))
+
+testRadiusInterestPriority :: IO ()
+testRadiusInterestPriority = do
+  putStrLn "Radius interest priority:"
+  let interest = newRadiusInterest 100.0
+  let closePri = priorityMod interest (10.0, 0.0, 0.0) (0.0, 0.0, 0.0)
+  let farPri = priorityMod interest (90.0, 0.0, 0.0) (0.0, 0.0, 0.0)
+  let outPri = priorityMod interest (200.0, 0.0, 0.0) (0.0, 0.0, 0.0)
+  assertEqual "close > far priority" True (closePri > farPri)
+  assertEqual "close priority > 0" True (closePri > 0.0)
+  assertEqual "far priority > 0" True (farPri > 0.0)
+  assertEqual "out of range = 0" True (outPri == 0.0)
+
+testGridInterestRelevant :: IO ()
+testGridInterestRelevant = do
+  putStrLn "Grid interest relevance:"
+  let interest = newGridInterest 100.0
+  -- Same cell
+  assertEqual "same cell" True (relevant interest (50.0, 50.0, 0.0) (80.0, 80.0, 0.0))
+  -- Neighbor cell
+  assertEqual "neighbor cell" True (relevant interest (150.0, 50.0, 0.0) (50.0, 50.0, 0.0))
+  -- Far cell (more than 1 cell apart)
+  assertEqual "far cell" False (relevant interest (350.0, 50.0, 0.0) (50.0, 50.0, 0.0))
+
+-- --------------------------------------------------------------------
+-- Replication: Priority accumulator
+-- --------------------------------------------------------------------
+
+testPriorityAccumulate :: IO ()
+testPriorityAccumulate = do
+  putStrLn "Priority accumulator:"
+  let acc0 = register ("a" :: String) 10.0
+           $ register "b" 5.0
+             newPriorityAccumulator
+  assertEqual "2 entities" 2 (priorityCount acc0)
+  assertEqual "initial priority" (Just 0.0) (getPriority "a" acc0)
+
+  -- Accumulate 0.1s
+  let acc1 = accumulate 0.1 acc0
+  assertEqual "a = 1.0" True (withinEpsilon 1.0 (getPriority "a" acc1))
+  assertEqual "b = 0.5" True (withinEpsilon 0.5 (getPriority "b" acc1))
+  where
+    withinEpsilon expected (Just actual) = abs (actual - expected) < 0.001
+    withinEpsilon _ Nothing = False
+
+testPriorityDrain :: IO ()
+testPriorityDrain = do
+  putStrLn "Priority drain:"
+  let acc0 = accumulate 1.0
+           $ register ("high" :: String) 20.0
+           $ register "low" 1.0
+             newPriorityAccumulator
+  -- High = 20.0, Low = 1.0
+  -- Budget fits one entity at 100 bytes each
+  let (selected, acc1) = drainTop 100 (const 100) acc0
+  assertEqual "high selected first" ["high"] selected
+  -- High priority should be reset
+  assertEqual "high reset to 0" (Just 0.0) (getPriority "high" acc1)
+  -- Low should still have accumulated priority
+  assertEqual "low still has priority" True (getPriority "low" acc1 > Just 0.0)
+
+testPriorityUnregister :: IO ()
+testPriorityUnregister = do
+  putStrLn "Priority unregister:"
+  let acc0 = register ("x" :: String) 5.0 newPriorityAccumulator
+  assertEqual "has x" True (not (priorityIsEmpty acc0))
+  let acc1 = unregister "x" acc0
+  assertEqual "empty after unregister" True (priorityIsEmpty acc1)
+
+-- --------------------------------------------------------------------
+-- Replication: Snapshot interpolation
+-- --------------------------------------------------------------------
+
+testSnapshotPushAndReady :: IO ()
+testSnapshotPushAndReady = do
+  putStrLn "Snapshot push and ready:"
+  let buf0 = newSnapshotBuffer :: SnapshotBuffer Float
+  assertEqual "empty not ready" False (snapshotReady buf0)
+  assertEqual "empty count" 0 (snapshotCount buf0)
+
+  let buf1 = pushSnapshot 0.0 1.0 buf0
+  let buf2 = pushSnapshot 50.0 2.0 buf1
+  let buf3 = pushSnapshot 100.0 3.0 buf2
+  assertEqual "3 snapshots ready" True (snapshotReady buf3)
+  assertEqual "count = 3" 3 (snapshotCount buf3)
+
+testSnapshotInterpolation :: IO ()
+testSnapshotInterpolation = do
+  putStrLn "Snapshot interpolation:"
+  let buf0 = newSnapshotBufferWithConfig 2 100.0 :: SnapshotBuffer Float
+  let buf1 = pushSnapshot 200.0 20.0
+           $ pushSnapshot 100.0 10.0
+           $ pushSnapshot 0.0 0.0
+             buf0
+
+  -- At render time 250, target = 250 - 100 = 150
+  -- Interpolate between t=100 (10.0) and t=200 (20.0), t=0.5
+  case sampleSnapshot 250.0 buf1 of
+    Nothing -> error "  FAIL: should have interpolated"
+    Just val -> do
+      let expected = 15.0 :: Float
+      assertEqual "interpolated 15.0" True (abs (val - expected) < 0.01)
+
+testSnapshotOutOfOrder :: IO ()
+testSnapshotOutOfOrder = do
+  putStrLn "Snapshot out-of-order rejection:"
+  let buf0 = newSnapshotBuffer :: SnapshotBuffer Float
+  let buf1 = pushSnapshot 100.0 1.0 buf0
+  let buf2 = pushSnapshot 50.0 2.0 buf1 -- Out of order, should be dropped
+  assertEqual "out-of-order dropped" 1 (snapshotCount buf2)

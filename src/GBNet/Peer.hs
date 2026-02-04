@@ -6,15 +6,13 @@
 -- A peer can accept incoming connections (server-like), initiate
 -- outgoing connections (client-like), or do both (P2P/mesh).
 --
--- Pure/IO separation pattern for game loops:
+-- Polymorphic game loop pattern:
 --
 -- @
 -- gameLoop peer = do
---   now <- getMonoTime
---   (packets, sock') <- peerRecvAll (npSocket peer) now     -- IO: receive
---   let result = peerProcess now packets peer {npSocket = sock'}  -- Pure: process
---   sock'' <- peerSendAll (prOutgoing result) (npSocket peer') now  -- IO: send
---   gameLoop (prPeer result) {npSocket = sock''}
+--   (events, peer') <- peerTick [(channel, msg)] peer
+--   -- handle events
+--   gameLoop peer'
 -- @
 module GBNet.Peer
   ( -- * Peer identifier
@@ -40,7 +38,6 @@ module GBNet.Peer
     -- * Connection management
     peerConnect,
     peerDisconnect,
-    peerShutdown,
 
     -- * Pure processing
     peerProcess,
@@ -51,9 +48,7 @@ module GBNet.Peer
     peerShutdownM,
     peerTick,
 
-    -- * Legacy IO helpers (for backward compatibility)
-    peerRecvAll,
-    peerSendAll,
+    -- * Internal (used by pure processing)
     drainPeerSendQueue,
     drainAllConnectionQueues,
 
@@ -70,7 +65,6 @@ module GBNet.Peer
   )
 where
 
-import Control.Monad (foldM)
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import Data.Either (fromRight)
@@ -104,17 +98,14 @@ import GBNet.Packet
     serializePacket,
   )
 import GBNet.Reliability (elapsedMs)
-import GBNet.Security (RateLimiter, appendCrc32, newRateLimiter, rateLimiterAllow, rateLimiterCleanup, validateAndStripCrc32)
+import GBNet.Security (RateLimiter, appendCrc32, newRateLimiter, rateLimiterAllow)
 import GBNet.Serialize.BitBuffer (ReadResult (..), empty, fromBytes, toBytes)
 import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..))
 import GBNet.Socket
   ( SocketError (..),
     UdpSocket,
-    closeSocket,
     newUdpSocket,
     socketLocalAddr,
-    socketRecvFrom,
-    socketSendTo,
   )
 import GBNet.Stats (NetworkStats)
 import Network.Socket (SockAddr)
@@ -169,7 +160,7 @@ data PeerResult = PeerResult
     prPeer :: !NetPeer,
     -- | Events that occurred during processing
     prEvents :: ![PeerEvent],
-    -- | Packets to send (call 'peerSendAll' with these)
+    -- | Packets to send (call 'peerSendAllM' with these)
     prOutgoing :: ![RawPacket]
   }
 
@@ -254,7 +245,7 @@ newPeerState sock localAddr config now =
           npConnections = Map.empty,
           npPending = Map.empty,
           npConfig = config,
-          npRateLimiter = newRateLimiter (ncRateLimitPerSecond config),
+          npRateLimiter = newRateLimiter (ncRateLimitPerSecond config) now,
           npCookieSecret = secret,
           npRngState = rng1,
           npFragmentAssemblers = Map.empty,
@@ -344,19 +335,6 @@ peerDisconnect peerId _now peer =
       let peer' = queueControlPacket Disconnect BS.empty peerId peer
        in peer' {npConnections = Map.delete peerId (npConnections peer')}
 
--- | Shutdown the peer, disconnecting all connections.
--- Returns the final peer state with queued disconnect packets and closes the socket.
--- Caller should send the queued packets before the socket is closed, or use peerShutdownIO.
-peerShutdown :: MonoTime -> NetPeer -> IO ()
-peerShutdown now peer = do
-  -- Queue disconnects for all peers and send them
-  let peerIds = Map.keys (npConnections peer)
-      peer' = foldr (queueControlPacket Disconnect BS.empty) peer peerIds
-      (outgoing, _) = drainPeerSendQueue peer'
-  -- Send all queued packets
-  _ <- peerSendAll outgoing (npSocket peer) now
-  closeSocket (npSocket peer)
-
 -- -----------------------------------------------------------------------------
 -- Pure processing
 -- -----------------------------------------------------------------------------
@@ -366,7 +344,7 @@ peerShutdown now peer = do
 -- peer state, events that occurred, and packets to send.
 --
 -- This is the core of the game loop - it's completely pure and deterministic.
--- Use 'peerRecvAll' to get incoming packets and 'peerSendAll' to send outgoing.
+-- Use 'peerRecvAllM' to get incoming packets and 'peerSendAllM' to send outgoing.
 peerProcess :: MonoTime -> [IncomingPacket] -> NetPeer -> PeerResult
 peerProcess now packets peer =
   let -- Convert IncomingPackets to internal format
@@ -387,12 +365,9 @@ peerProcess now packets peer =
       -- Cleanup expired pending connections
       (events3, peer5) = cleanupPending now peer4
 
-      -- Cleanup rate limiter
-      peer6 = peer5 {npRateLimiter = rateLimiterCleanup now (npRateLimiter peer5)}
-
       -- Drain the peer send queue to get outgoing packets
-      (outgoing, peer7) = drainPeerSendQueue peer6
-   in PeerResult peer7 (events1 ++ events2 ++ events3) outgoing
+      (outgoing, peer6) = drainPeerSendQueue peer5
+   in PeerResult peer6 (events1 ++ events2 ++ events3) outgoing
 
 -- | Drain send queues from all connections into the peer's send queue.
 drainAllConnectionQueues :: MonoTime -> NetPeer -> NetPeer
@@ -481,41 +456,6 @@ peerTick messages peer = do
   pure (events, peer2)
   where
     queueMessage now p (ch, msg) = peerBroadcast ch msg Nothing now p
-
--- -----------------------------------------------------------------------------
--- Legacy IO helpers (for backward compatibility)
--- -----------------------------------------------------------------------------
-
--- | Receive all available packets from the socket (non-blocking).
--- Returns immediately if no data is available.
---
--- Note: For new code, prefer 'peerRecvAllM' with the polymorphic API.
-peerRecvAll :: UdpSocket -> MonoTime -> IO ([IncomingPacket], UdpSocket)
-peerRecvAll sock now = go sock []
-  where
-    go s acc = do
-      result <- socketRecvFrom now s
-      case result of
-        Left SocketWouldBlock -> return (reverse acc, s)
-        Left _ -> return (reverse acc, s)
-        Right (dat, addr, s') ->
-          case validateAndStripCrc32 dat of
-            Nothing -> go s' acc -- Invalid CRC, skip
-            Just validated ->
-              let pkt = IncomingPacket (PeerId addr) validated
-               in go s' (pkt : acc)
-
--- | Send all outgoing packets.
---
--- Note: For new code, prefer 'peerSendAllM' with the polymorphic API.
-peerSendAll :: [RawPacket] -> UdpSocket -> MonoTime -> IO UdpSocket
-peerSendAll packets sock now = foldM sendOne sock packets
-  where
-    sendOne s (RawPacket pid dat) = do
-      result <- socketSendTo dat (unPeerId pid) now s
-      case result of
-        Left _ -> return s
-        Right (_, s') -> return s'
 
 -- | Process received packets (pure).
 processPacketsPure ::

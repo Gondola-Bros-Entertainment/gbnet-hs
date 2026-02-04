@@ -11,7 +11,8 @@
 -- main = do
 --   let addr = localhost 7777
 --   Right (peer, sock) <- newPeer addr defaultNetworkConfig =<< getMonoTimeIO
---   evalNetT (gameLoop peer) (newNetState sock addr)
+--   netState <- newNetState sock addr
+--   evalNetT (gameLoop peer) netState
 -- @
 --
 -- For explicit imports, use the individual modules:
@@ -106,6 +107,7 @@ module GBNet
 
     -- * Statistics
     NetworkStats (..),
+    CongestionLevel (..),
 
     -- * Replication: Delta Compression
     NetworkDelta (..),
@@ -159,7 +161,7 @@ import GBNet.Peer
 import GBNet.Priority (PriorityAccumulator, accumulate, drainTop, newPriorityAccumulator, register, unregister)
 import GBNet.Serialize.BitBuffer (BitBuffer, empty, fromBytes, toBytes)
 import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..))
-import GBNet.Stats (NetworkStats (..))
+import GBNet.Stats (CongestionLevel (..), NetworkStats (..))
 import GBNet.TestNet
 import Network.Socket (SockAddr (..))
 import qualified Network.Socket as NS

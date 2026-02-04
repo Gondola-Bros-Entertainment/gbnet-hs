@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- |
@@ -9,6 +10,10 @@
 -- Provides a monad transformer that carries network state (socket, local address)
 -- and implements MonadNetwork. This allows polymorphic network code that can
 -- run against real IO or pure test backends.
+--
+-- The IO backend uses a dedicated receive thread that blocks efficiently on
+-- the socket via GHC's IO manager (epoll\/kqueue), delivering packets through
+-- an STM 'TQueue' with zero polling overhead.
 module GBNet.Net
   ( -- * Network state
     NetState (..),
@@ -27,34 +32,68 @@ module GBNet.Net
   )
 where
 
+import Control.Concurrent (ThreadId, forkIO, killThread)
+import Control.Concurrent.STM (TQueue, atomically, newTQueueIO, tryReadTQueue, writeTQueue)
+import Control.Exception (SomeException, handle)
+import Control.Monad (forever)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.State.Strict (StateT (..), evalStateT, execStateT, get, gets, modify')
+import qualified Data.ByteString as BS
 import GBNet.Class (MonadNetwork (..), MonadTime (..), NetError (..), getMonoTimeIO)
 import GBNet.Security (validateAndStripCrc32)
 import GBNet.Socket
-  ( SocketError (..),
-    UdpSocket,
+  ( UdpSocket (..),
     closeSocket,
-    socketRecvFrom,
+    maxUdpPacketSize,
     socketSendTo,
   )
-import Network.Socket (SockAddr)
+import GBNet.Stats (SocketStats (..))
+import Network.Socket (SockAddr, Socket)
+import qualified Network.Socket.ByteString as NSB
 
 -- | Network state carried by NetT.
+--
+-- Contains a 'TQueue' fed by a dedicated receive thread, eliminating
+-- the need for polling timeouts on the socket.
 data NetState = NetState
-  { -- | The UDP socket
+  { -- | The UDP socket (used for sending)
     nsSocket :: !UdpSocket,
     -- | Local address this peer is bound to
-    nsLocalAddr :: !SockAddr
+    nsLocalAddr :: !SockAddr,
+    -- | Queue of received packets from the receive thread
+    nsRecvQueue :: !(TQueue (BS.ByteString, SockAddr)),
+    -- | Receive thread handle (for cleanup)
+    nsRecvThread :: !ThreadId
   }
 
--- | Create initial network state from a socket.
-newNetState :: UdpSocket -> SockAddr -> NetState
-newNetState sock addr =
-  NetState
-    { nsSocket = sock,
-      nsLocalAddr = addr
-    }
+-- | Create network state and start the dedicated receive thread.
+--
+-- The receive thread blocks on the socket via GHC's IO manager
+-- (epoll on Linux, kqueue on macOS), consuming zero CPU when idle.
+-- Received packets are delivered through an STM 'TQueue'.
+newNetState :: UdpSocket -> SockAddr -> IO NetState
+newNetState sock addr = do
+  queue <- newTQueueIO
+  tid <- forkIO $ recvLoop (usSocket sock) queue
+  pure
+    NetState
+      { nsSocket = sock,
+        nsLocalAddr = addr,
+        nsRecvQueue = queue,
+        nsRecvThread = tid
+      }
+
+-- | Dedicated receive thread.
+--
+-- Blocks on 'recvFrom' which GHC's runtime handles efficiently via the
+-- IO manager — the green thread is parked with no CPU cost until data
+-- arrives. Exits cleanly when the socket is closed.
+recvLoop :: Socket -> TQueue (BS.ByteString, SockAddr) -> IO ()
+recvLoop sock queue =
+  handle (\(_ :: SomeException) -> pure ()) $
+    forever $ do
+      (dat, addr) <- NSB.recvFrom sock maxUdpPacketSize
+      atomically $ writeTQueue queue (dat, addr)
 
 -- | Network monad transformer.
 --
@@ -98,7 +137,8 @@ instance MonadTime (NetT IO) where
 
 -- | MonadNetwork instance for NetT IO.
 --
--- Provides real UDP networking through the socket in NetState.
+-- Receives are non-blocking reads from the TQueue (fed by the dedicated
+-- receive thread). Sends go directly through the socket.
 instance MonadNetwork (NetT IO) where
   netSend toAddr bytes = do
     st <- getNetState
@@ -112,13 +152,22 @@ instance MonadNetwork (NetT IO) where
 
   netRecv = do
     st <- getNetState
-    now <- liftIO getMonoTimeIO
-    result <- liftIO $ socketRecvFrom now (nsSocket st)
+    result <- liftIO $ atomically $ tryReadTQueue (nsRecvQueue st)
     case result of
-      Left SocketWouldBlock -> pure Nothing
-      Left _ -> pure Nothing
-      Right (dat, addr, sock') -> do
-        modifyNetState $ \s -> s {nsSocket = sock'}
+      Nothing -> pure Nothing
+      Just (dat, addr) -> do
+        -- Update receive stats on the socket
+        now <- liftIO getMonoTimeIO
+        let len = BS.length dat
+            sock = nsSocket st
+            stats = usStats sock
+            stats' =
+              stats
+                { ssBytesReceived = ssBytesReceived stats + fromIntegral len,
+                  ssPacketsReceived = ssPacketsReceived stats + 1,
+                  ssLastReceiveTime = Just now
+                }
+        modifyNetState $ \s -> s {nsSocket = (nsSocket s) {usStats = stats'}}
         -- Validate CRC before returning
         case validateAndStripCrc32 dat of
           Nothing -> pure Nothing -- Invalid CRC, skip
@@ -126,4 +175,5 @@ instance MonadNetwork (NetT IO) where
 
   netClose = do
     st <- getNetState
+    liftIO $ killThread (nsRecvThread st)
     liftIO $ closeSocket (nsSocket st)
