@@ -110,7 +110,7 @@ handleClientEvent (peer, connected) event = do
       liftIO $ putStrLn "Connected to server!"
       -- Send a message on channel 0
       let msg = BS.pack [72, 101, 108, 108, 111]  -- "Hello"
-      case peerSend pid 0 msg now peer of
+      case peerSend pid (ChannelId 0) msg now peer of
         Left err -> do
           liftIO $ putStrLn ("Send error: " ++ show err)
           pure (peer, True)
@@ -459,7 +459,7 @@ Build a complete packet: `PacketHeader` followed by a payload type, then
 convert to bytes for the wire and back.
 
 ```haskell
-data Payload = MovePayload
+data MovePayload = MovePayload
   { moveX :: Word16
   , moveY :: Word16
   } deriving (Eq, Show)
@@ -515,7 +515,7 @@ conversion overhead.
 Send only changed fields to minimize bandwidth:
 
 ```haskell
-import GBNet.Delta
+import GBNet.Replication.Delta
 import Data.Maybe (fromMaybe)
 
 -- Your game state
@@ -569,7 +569,7 @@ clientReceive encoded baselines = deltaDecode encoded baselines
 Only replicate entities within area-of-interest:
 
 ```haskell
-import GBNet.Interest
+import GBNet.Replication.Interest
 
 -- Radius-based AOI (sphere)
 radiusExample :: IO ()
@@ -610,18 +610,18 @@ gridExample = do
 Fair bandwidth allocation when you can't send everything:
 
 ```haskell
-import GBNet.Priority
+import GBNet.Replication.Priority
 
 replicationExample :: IO ()
 replicationExample = do
   -- Register entities with base priorities (units per second)
-  let acc = newPriorityAccumulator
-          & register "player1" 20.0   -- players: high priority
-          & register "player2" 20.0
-          & register "npc1" 5.0       -- NPCs: medium priority
-          & register "npc2" 5.0
-          & register "tree1" 1.0      -- scenery: low priority
-          & register "tree2" 1.0
+  let acc = register "tree2" 1.0      -- scenery: low priority
+          $ register "tree1" 1.0
+          $ register "npc2" 5.0       -- NPCs: medium priority
+          $ register "npc1" 5.0
+          $ register "player2" 20.0   -- players: high priority
+          $ register "player1" 20.0
+            newPriorityAccumulator
 
   -- Simulate 100ms tick - priorities accumulate
   let acc' = accumulate 0.1 acc
@@ -651,7 +651,7 @@ replicationExample = do
 Smooth rendering despite network jitter:
 
 ```haskell
-import GBNet.Interpolation
+import GBNet.Replication.Interpolation
 
 -- Your state must implement Interpolatable
 data Transform = Transform

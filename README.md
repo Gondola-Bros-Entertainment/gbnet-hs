@@ -45,13 +45,13 @@ import Control.Monad.IO.Class (liftIO)
 
 main :: IO ()
 main = do
-  -- Initialize network (starts dedicated receive thread)
-  let bindAddr = anyAddr 7777
-  Right netState <- initNetState bindAddr
-
-  -- Create peer
+  -- Create peer (binds UDP socket)
+  let addr = anyAddr 7777
   now <- getMonoTimeIO
-  Right (peer, _) <- newPeer bindAddr defaultNetworkConfig now
+  Right (peer, sock) <- newPeer addr defaultNetworkConfig now
+
+  -- Wrap socket in NetState (starts dedicated receive thread)
+  netState <- newNetState sock addr
 
   -- Run game loop inside NetT IO
   evalNetT (gameLoop peer) netState
@@ -59,7 +59,7 @@ main = do
 gameLoop :: NetPeer -> NetT IO ()
 gameLoop peer = do
   -- Single call: receive, process, broadcast, send
-  let outgoing = [(0, encodeMyState myState)]
+  let outgoing = [(ChannelId 0, encodeMyState myState)]
   (events, peer') <- peerTick outgoing peer
 
   -- Handle events
@@ -95,7 +95,7 @@ The recommended API for game loops — handles receive, process, and send in one
 ```haskell
 peerTick
   :: MonadNetwork m
-  => [(Word8, ByteString)]    -- Messages to broadcast (channel, data)
+  => [(ChannelId, ByteString)] -- Messages to broadcast (channel, data)
   -> NetPeer                   -- Current peer state
   -> m ([PeerEvent], NetPeer)  -- Events and updated state
 ```
@@ -106,7 +106,7 @@ peerTick
 data PeerEvent
   = PeerConnected !PeerId !ConnectionDirection  -- Inbound or Outbound
   | PeerDisconnected !PeerId !DisconnectReason
-  | PeerMessage !PeerId !Word8 !ByteString      -- channel, data
+  | PeerMessage !PeerId !ChannelId !ByteString  -- channel, data
   | PeerMigrated !PeerId !PeerId                -- old address, new address
 ```
 
@@ -147,8 +147,8 @@ let config = defaultNetworkConfig
 ```haskell
 import GBNet
 
--- Write 28 bits: 1-bit flag, 7-bit health, two 10-bit coords
-let buf = bitSerialize (1 :: Word8)     -- 1 bit (flag)
+-- Serialize Word8 + Word8 + Word16 = 32 bits (4 bytes)
+let buf = bitSerialize (1 :: Word8)     -- 8 bits
         $ bitSerialize (100 :: Word8)   -- 8 bits
         $ bitSerialize (512 :: Word16)  -- 16 bits
         $ empty
@@ -206,8 +206,8 @@ testHandshake = runTestNet action (initialTestNetState myAddr)
     action = do
       -- Simulate sending
       netSend remoteAddr someData
-      -- Advance simulated time
-      advanceTime 100
+      -- Advance simulated time (absolute MonoTime in nanoseconds)
+      advanceTime (100 * 1000000)  -- 100ms
       -- Check what would be received
       result <- netRecv
       pure ()
@@ -219,14 +219,14 @@ testHandshake = runTestNet action (initialTestNetState myAddr)
 import GBNet.TestNet
 
 -- Create a world with multiple peers
-let world = newTestWorld
+let world0 = newTestWorld
 
 -- Run actions for each peer
-let (result1, world') = runPeerInWorld addr1 action1 world
-let (result2, world'') = runPeerInWorld addr2 action2 world'
+let (result1, world1) = runPeerInWorld addr1 action1 world0
+let (result2, world2) = runPeerInWorld addr2 action2 world1
 
--- Deliver packets between peers
-let world''' = worldAdvanceTime 100 world''  -- Advances time and delivers
+-- Advance to absolute time and deliver ready packets
+let world3 = worldAdvanceTime (100 * 1000000) world2  -- 100ms
 ```
 
 ### Simulating Network Conditions
@@ -282,7 +282,8 @@ simulateLoss 0.1
 
 ```haskell
 -- Instead of `import GBNet`, be explicit:
-import GBNet.Class (MonadNetwork, MonadTime, MonoTime)
+import GBNet.Class (MonadNetwork, MonadTime, MonoTime(..))
+import GBNet.Types (ChannelId(..), SequenceNum(..), MessageId(..))
 import GBNet.Net (NetT, runNetT, evalNetT)
 import GBNet.Net.IO (initNetState)
 import GBNet.Peer (NetPeer, peerTick, PeerEvent(..))
@@ -326,9 +327,9 @@ Fair bandwidth allocation:
 ```haskell
 import GBNet.Replication.Priority
 
-let acc = newPriorityAccumulator
-        & register playerId 10.0
-        & register npcId 2.0
+let acc = register npcId 2.0
+        $ register playerId 10.0
+          newPriorityAccumulator
 let (selected, acc') = drainTop 1200 entitySize acc
 ```
 
@@ -416,6 +417,7 @@ Optimized for game networking:
 - [x] Bitpacked serialization with sub-byte encoding
 - [x] Template Haskell derive for records and enums
 - [x] Custom bit widths via `BitWidth n a`
+- [x] Type-safe newtypes (`ChannelId`, `SequenceNum`, `MonoTime`, `MessageId`)
 - [x] Reliable/unreliable/sequenced delivery modes
 - [x] RTT estimation and adaptive retransmit
 - [x] Large message fragmentation

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0.0
+
+- Type-safe domain newtypes: `ChannelId`, `SequenceNum`, `MonoTime`, `MessageId`
+- `GBNet.Types` module as shared home for domain newtypes
+- Idiomatic cleanup: Either do-notation, function composition, `fmap`/`toList`
+- Extracted focused helpers from monolithic functions (Simulator, Connection)
+
 ## 0.1.0.0
 
 Initial release.

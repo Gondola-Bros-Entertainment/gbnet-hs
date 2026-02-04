@@ -11,7 +11,7 @@ import qualified Data.ByteString as BS
 import Data.Int (Int16, Int32, Int64, Int8)
 import qualified Data.Text as T
 import Data.Word (Word16, Word32, Word64, Word8)
-import GBNet.Class (MonoTime (..))
+import GBNet.Class ()
 import GBNet.Config (NetworkConfig (..), defaultNetworkConfig)
 import GBNet.Congestion
 import GBNet.Connection (DisconnectReason (..))

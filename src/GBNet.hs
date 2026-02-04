@@ -147,6 +147,7 @@ module GBNet
 
     -- * Replication: Delta Compression
     NetworkDelta (..),
+    BaselineSeq,
     DeltaTracker,
     newDeltaTracker,
     deltaEncode,
@@ -172,13 +173,16 @@ module GBNet
     unregister,
     accumulate,
     drainTop,
+    getPriority,
 
     -- * Replication: Snapshot Interpolation
     Interpolatable (..),
     SnapshotBuffer,
     newSnapshotBuffer,
+    newSnapshotBufferWithConfig,
     pushSnapshot,
     sampleSnapshot,
+    snapshotReady,
   )
 where
 
@@ -191,11 +195,11 @@ import GBNet.Connection (ConnectionError (..), ConnectionState (..), DisconnectR
 import GBNet.Net
 import GBNet.Net.IO (initNetState)
 import GBNet.Peer
-import GBNet.Replication.Delta (BaselineManager, DeltaTracker, NetworkDelta (..), deltaDecode, deltaEncode, deltaOnAck, getBaseline, newBaselineManager, newDeltaTracker, pushBaseline)
+import GBNet.Replication.Delta (BaselineManager, BaselineSeq, DeltaTracker, NetworkDelta (..), deltaDecode, deltaEncode, deltaOnAck, getBaseline, newBaselineManager, newDeltaTracker, pushBaseline)
 import GBNet.Replication.Interest (GridInterest, InterestManager (..), RadiusInterest, newGridInterest, newRadiusInterest)
 import qualified GBNet.Replication.Interest as Interest
-import GBNet.Replication.Interpolation (Interpolatable (..), SnapshotBuffer, newSnapshotBuffer, pushSnapshot, sampleSnapshot)
-import GBNet.Replication.Priority (PriorityAccumulator, accumulate, drainTop, newPriorityAccumulator, register, unregister)
+import GBNet.Replication.Interpolation (Interpolatable (..), SnapshotBuffer, newSnapshotBuffer, newSnapshotBufferWithConfig, pushSnapshot, sampleSnapshot, snapshotReady)
+import GBNet.Replication.Priority (PriorityAccumulator, accumulate, drainTop, getPriority, newPriorityAccumulator, register, unregister)
 import GBNet.Serialize.BitBuffer (BitBuffer, empty, fromBytes, toBytes)
 import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..))
 import GBNet.Simulator (NetworkSimulator (..), newNetworkSimulator, simulatorPendingCount, simulatorProcessSend, simulatorReceiveReady)
