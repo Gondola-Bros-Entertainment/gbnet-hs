@@ -206,7 +206,9 @@ data NetPeer = NetPeer
     -- | Tracks last migration time per connection to rate-limit migrations
     npMigrationCooldowns :: !(Map Word64 MonoTime),
     -- | Queued outgoing control packets (for pure API)
-    npSendQueue :: !(Seq RawPacket)
+    npSendQueue :: !(Seq RawPacket),
+    -- | Number of packets dropped by rate limiting
+    npRateLimitDrops :: !Word64
   }
 
 -- | Create a new peer bound to the given address.
@@ -250,7 +252,8 @@ newPeerState sock localAddr config now =
           npRngState = rng1,
           npFragmentAssemblers = Map.empty,
           npMigrationCooldowns = Map.empty,
-          npSendQueue = Seq.empty
+          npSendQueue = Seq.empty,
+          npRateLimitDrops = 0
         }
 
 -- | Generate a pseudo-random cookie secret.
@@ -542,7 +545,7 @@ handleConnectionRequest peerId now peer
           (allowed, rl') = rateLimiterAllow addrKey now (npRateLimiter peer)
           peer' = peer {npRateLimiter = rl'}
        in if not allowed
-            then ([], peer')
+            then ([], peer' {npRateLimitDrops = npRateLimitDrops peer' + 1})
             else -- Check max connections
               if Map.size (npConnections peer') >= ncMaxClients (npConfig peer')
                 then

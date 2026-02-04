@@ -1,7 +1,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- |
 -- Module      : GBNet.Serialize.Class
@@ -19,6 +21,7 @@ module GBNet.Serialize.Class
 
     -- * Custom bit widths
     BitWidth (..),
+    BitSize,
 
     -- * Bit width constants
     word8BitWidth,
@@ -46,7 +49,7 @@ import GHC.Float
     castWord32ToFloat,
     castWord64ToDouble,
   )
-import GHC.TypeLits (KnownNat, Nat, natVal)
+import GHC.TypeLits (KnownNat, Nat, natVal, type (<=))
 
 -- Bit width constants
 
@@ -288,16 +291,38 @@ instance
 
 -- BitWidth: custom bit-width serialization
 
+-- | Maps a type to its maximum bit width. Used with 'BitWidth' to enforce
+-- at compile time that the requested bit count fits the underlying type.
+type family BitSize a :: Nat where
+  BitSize Bool = 1
+  BitSize Word8 = 8
+  BitSize Word16 = 16
+  BitSize Word32 = 32
+  BitSize Word64 = 64
+  BitSize Int8 = 8
+  BitSize Int16 = 16
+  BitSize Int32 = 32
+  BitSize Int64 = 64
+
 -- | Newtype tagging a value with a type-level bit width.
+--
+-- The @n <= BitSize a@ constraint ensures at compile time that the
+-- requested bit count does not exceed the underlying type's capacity.
+--
+-- @
+-- BitWidth 7 Word8   -- OK: 7 <= 8
+-- BitWidth 4 Word8   -- OK: 4 <= 8
+-- BitWidth 100 Word8 -- Type error: 100 <= 8 is not satisfiable
+-- @
 newtype BitWidth (n :: Nat) a = BitWidth {unBitWidth :: a}
   deriving (Eq, Show)
 
-instance (KnownNat n, Integral a) => BitSerialize (BitWidth n a) where
+instance (KnownNat n, n <= BitSize a, Integral a) => BitSerialize (BitWidth n a) where
   bitSerialize (BitWidth val) =
     let n = fromIntegral (natVal (Proxy :: Proxy n))
      in writeBits (fromIntegral val) n
 
-instance (KnownNat n, Integral a) => BitDeserialize (BitWidth n a) where
+instance (KnownNat n, n <= BitSize a, Integral a) => BitDeserialize (BitWidth n a) where
   bitDeserialize buf =
     let n = fromIntegral (natVal (Proxy :: Proxy n))
      in runDeserialize (BitWidth . fromIntegral <$> readBitsM n) buf

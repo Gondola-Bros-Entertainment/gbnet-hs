@@ -99,6 +99,7 @@ type MonoTime = Word64
 -- | Elapsed time in milliseconds.
 elapsedMs :: MonoTime -> MonoTime -> Double
 elapsedMs start now = fromIntegral (now - start) / 1e6
+{-# INLINE elapsedMs #-}
 
 -- SequenceBuffer
 

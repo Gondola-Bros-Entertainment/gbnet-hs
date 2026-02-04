@@ -144,6 +144,7 @@ data SocketStats = SocketStats
     ssPacketsReceived :: !Word64,
     ssBytesSent :: !Word64,
     ssBytesReceived :: !Word64,
+    ssCrcDrops :: !Word64,
     ssLastSendTime :: !(Maybe MonoTime),
     ssLastReceiveTime :: !(Maybe MonoTime)
   }
@@ -157,6 +158,7 @@ defaultSocketStats =
       ssPacketsReceived = 0,
       ssBytesSent = 0,
       ssBytesReceived = 0,
+      ssCrcDrops = 0,
       ssLastSendTime = Nothing,
       ssLastReceiveTime = Nothing
     }

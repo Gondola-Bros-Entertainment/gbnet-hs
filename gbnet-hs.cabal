@@ -79,6 +79,8 @@ test-suite gbnet-test
     , bytestring
     , text
     , network
+    , QuickCheck          >= 2.14 && < 2.16
+    , containers
   default-language: Haskell2010
   ghc-options:      -Wall
 

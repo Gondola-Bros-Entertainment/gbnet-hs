@@ -12,7 +12,7 @@ module GBNet.Serialize.TH
 where
 
 import GBNet.Serialize.BitBuffer (ReadResult (..), readBits, writeBits)
-import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..), BitWidth (..))
+import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..))
 import Language.Haskell.TH
 
 -- | Number of bits needed to represent n distinct values.
@@ -71,16 +71,8 @@ mkSerClause tagBits numCons (tagVal, con) = do
   return $ Clause [pat] (NormalB body) []
 
 mkFieldSerExpr :: Name -> Type -> Q Exp
-mkFieldSerExpr v ty
-  | Just n <- extractBitWidth ty =
-      [|writeBits (fromIntegral (unBitWidth $(varE v))) $(litE (integerL (fromIntegral n)))|]
-  | otherwise =
-      [|bitSerialize $(varE v)|]
-
-extractBitWidth :: Type -> Maybe Integer
-extractBitWidth (AppT (AppT (ConT name) (LitT (NumTyLit n))) _)
-  | nameBase name == "BitWidth" = Just n
-extractBitWidth _ = Nothing
+mkFieldSerExpr v _ty =
+  [|bitSerialize $(varE v)|]
 
 mkDeserializeInstance :: Name -> [Con] -> Q Dec
 mkDeserializeInstance typeName cons = do
@@ -132,25 +124,14 @@ mkReadFieldsLoop conName types current vars bufExpr
       let conApp = foldl (\e v -> AppE e (VarE v)) (ConE conName) vars
       [|Right (ReadResult $(return conApp) $bufExpr)|]
   | otherwise = do
-      let ty = types !! current
       vName <- newName ("v" ++ show current)
       bName <- newName ("b" ++ show current)
       rest <- mkReadFieldsLoop conName types (current + 1) (vars ++ [vName]) (varE bName)
-      case extractBitWidth ty of
-        Just n ->
-          [|
-            case readBits $(litE (integerL (fromIntegral n))) $bufExpr of
-              Left err -> Left err
-              Right (ReadResult val $(varP bName)) ->
-                let $(varP vName) = BitWidth (fromIntegral val)
-                 in $(return rest)
-            |]
-        Nothing ->
-          [|
-            case bitDeserialize $bufExpr of
-              Left err -> Left err
-              Right (ReadResult $(varP vName) $(varP bName)) -> $(return rest)
-            |]
+      [|
+        case bitDeserialize $bufExpr of
+          Left err -> Left err
+          Right (ReadResult $(varP vName) $(varP bName)) -> $(return rest)
+        |]
 
 conFieldTypes :: Con -> (Name, [Type])
 conFieldTypes (NormalC name fields) = (name, map snd fields)

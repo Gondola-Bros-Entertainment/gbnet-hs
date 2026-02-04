@@ -19,6 +19,7 @@ sequenceGreaterThan :: Word16 -> Word16 -> Bool
 sequenceGreaterThan s1 s2 =
   ((s1 > s2) && (s1 - s2 <= sequenceHalfRange))
     || ((s1 < s2) && (s2 - s1 > sequenceHalfRange))
+{-# INLINE sequenceGreaterThan #-}
 
 -- | Computes the signed difference between two sequence numbers,
 -- accounting for Word16 wraparound.
@@ -33,3 +34,4 @@ sequenceDiff s1 s2 =
           if diff < negate half
             then diff + full
             else diff
+{-# INLINE sequenceDiff #-}

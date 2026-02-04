@@ -170,7 +170,13 @@ instance MonadNetwork (NetT IO) where
         modifyNetState $ \s -> s {nsSocket = (nsSocket s) {usStats = stats'}}
         -- Validate CRC before returning
         case validateAndStripCrc32 dat of
-          Nothing -> pure Nothing -- Invalid CRC, skip
+          Nothing -> do
+            -- Increment CRC drop counter
+            modifyNetState $ \s ->
+              let sock' = nsSocket s
+                  st' = (usStats sock') {ssCrcDrops = ssCrcDrops (usStats sock') + 1}
+               in s {nsSocket = sock' {usStats = st'}}
+            pure Nothing
           Just validated -> pure $ Just (validated, addr)
 
   netClose = do

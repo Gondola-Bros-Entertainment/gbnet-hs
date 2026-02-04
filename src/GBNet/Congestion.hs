@@ -169,6 +169,7 @@ ccRefillBudget mtu cc =
 ccDeductBudget :: Int -> CongestionController -> CongestionController
 ccDeductBudget bytes cc =
   cc {ccBudgetBytesRemaining = ccBudgetBytesRemaining cc - bytes}
+{-# INLINE ccDeductBudget #-}
 
 -- | Update congestion state based on current network conditions.
 ccUpdate :: Float -> Float -> MonoTime -> CongestionController -> CongestionController
@@ -239,6 +240,7 @@ ccCanSend :: Int -> Int -> CongestionController -> Bool
 ccCanSend packetsSentThisCycle packetBytes cc =
   fromIntegral packetsSentThisCycle < ccCurrentSendRate cc
     && ccBudgetBytesRemaining cc >= packetBytes
+{-# INLINE ccCanSend #-}
 
 -- | Query congestion level from the binary controller.
 ccCongestionLevel :: CongestionController -> CongestionLevel
@@ -338,6 +340,7 @@ cwOnSend bytes now cw =
 cwCanSend :: Int -> CongestionWindow -> Bool
 cwCanSend packetBytes cw =
   cwBytesInFlight cw + fromIntegral packetBytes <= floor (cwCwnd cw)
+{-# INLINE cwCanSend #-}
 
 -- | Update pacing delay from cwnd and RTT.
 cwUpdatePacing :: Double -> CongestionWindow -> CongestionWindow
@@ -357,6 +360,7 @@ cwCanSendPaced now cw =
   case cwLastSendTime cw of
     Nothing -> True
     Just lastSend -> elapsedMs lastSend now >= cwMinInterPacketDelay cw
+{-# INLINE cwCanSendPaced #-}
 
 -- | Reset to slow start if idle too long (RFC 2861).
 -- Prevents bursting a stale window after an idle period.
