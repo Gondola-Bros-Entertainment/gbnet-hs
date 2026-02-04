@@ -61,6 +61,7 @@ import Control.Monad (when)
 import Control.Monad.State.Strict (State, execState, gets, modify')
 import Data.Bits (shiftR, (.&.))
 import qualified Data.ByteString as BS
+import Data.Foldable (toList)
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import Data.List (foldl', sortBy)
@@ -500,10 +501,10 @@ updateConnectedS now = do
     modify' sendAckOnly
 
   -- Compute congestion level (worst of binary and window-based)
-  cong'' <- gets connCongestion
-  cw' <- gets connCwnd
-  let binaryLevel = ccCongestionLevel cong''
-      windowLevel = maybe CongestionNone cwCongestionLevel cw'
+  congFinal <- gets connCongestion
+  cwFinal <- gets connCwnd
+  let binaryLevel = ccCongestionLevel congFinal
+      windowLevel = maybe CongestionNone cwCongestionLevel cwFinal
       congLevel = max binaryLevel windowLevel
 
   -- Update stats
@@ -567,9 +568,7 @@ processChannelMessages now conn chIdx =
                           opPayload = wireData
                         }
                     cong' = ccDeductBudget (BS.length wireData) (connCongestion conn)
-                    cwnd' = case connCwnd conn of
-                      Just cw -> Just (cwOnSend (BS.length wireData) now cw)
-                      Nothing -> Nothing
+                    cwnd' = fmap (cwOnSend (BS.length wireData) now) (connCwnd conn)
                     rel' =
                       if Channel.channelIsReliable channel
                         then
@@ -682,8 +681,7 @@ resetConnection conn =
 -- | Drain send queue.
 drainSendQueue :: Connection -> ([OutgoingPacket], Connection)
 drainSendQueue conn =
-  let packets = foldr (:) [] (connSendQueue conn)
-   in (packets, conn {connSendQueue = Seq.empty})
+  (toList (connSendQueue conn), conn {connSendQueue = Seq.empty})
 
 -- | Update last receive time.
 touchRecvTime :: MonoTime -> Connection -> Connection

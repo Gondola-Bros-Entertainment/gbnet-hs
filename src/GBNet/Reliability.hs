@@ -329,15 +329,14 @@ ackOneWithTime now (pairs, ep) seqNum =
     Just record ->
       let rttSample = elapsedMs (sprSendTime record) now
           ep' =
-            updateRtt rttSample $
+            recordLossSample False . updateRtt rttSample $
               ep
                 { reSentPackets = Map.delete seqNum (reSentPackets ep),
                   reTotalAcked = reTotalAcked ep + 1,
                   reBytesAcked = reBytesAcked ep + fromIntegral (sprSize record)
                 }
-          ep'' = recordLossSample False ep'
           pair = (sprChannelId record, sprChannelSequence record)
-       in (pair : pairs, ep'')
+       in (pair : pairs, ep')
 
 nackOne ::
   SequenceNum ->

@@ -361,10 +361,7 @@ takePendingAcks ch = (chPendingAck ch, ch {chPendingAck = []})
 
 -- | Update channel state (flush old ordered messages, clean up acked).
 channelUpdate :: MonoTime -> Channel -> Channel
-channelUpdate now ch =
-  let !ch' = cleanupAcked ch
-      !ch'' = flushTimedOutOrdered now ch'
-   in ch''
+channelUpdate now = flushTimedOutOrdered now . cleanupAcked
 
 -- | Remove acked messages from send buffer.
 cleanupAcked :: Channel -> Channel
