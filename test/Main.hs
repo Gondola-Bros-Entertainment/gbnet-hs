@@ -24,7 +24,7 @@ import GBNet.Serialize.BitBuffer
 import GBNet.Serialize.Class
 import GBNet.Serialize.TH
 import GBNet.Socket (UdpSocket (..))
-import GBNet.Stats (CongestionLevel (..), SocketStats (..), defaultSocketStats)
+import GBNet.Stats (CongestionLevel (..), defaultSocketStats)
 import GBNet.TestNet
 import GBNet.Util
 import qualified Network.Socket as NS
@@ -904,8 +904,8 @@ testCwndSlowStartRestart = do
   let cw2 = cwOnSend 1200 now cw1
   -- Idle for longer than 2 * RTO (say RTO = 200ms)
   let laterTime = now + 500000000 -- 500ms later
-  let rtoMs = 200.0
-  let cw3 = cwSlowStartRestart rtoMs laterTime cw2
+  let testRtoMs = 200.0
+  let cw3 = cwSlowStartRestart testRtoMs laterTime cw2
   assertEqual "resets to SlowStart" SlowStart (cwPhase cw3)
   assertEqual "cwnd reset to initial" True (cwCwnd cw3 < bigCwnd)
   assertEqual "ssthresh = old cwnd" True (abs (cwSsthresh cw3 - bigCwnd) < 1.0)
@@ -1079,8 +1079,8 @@ tickPeerInWorld ::
   NetPeer ->
   TestWorld ->
   (([PeerEvent], NetPeer), TestWorld)
-tickPeerInWorld addr msgs peer world =
-  runPeerInWorld addr (peerTick msgs peer) world
+tickPeerInWorld addr msgs peer =
+  runPeerInWorld addr (peerTick msgs peer)
 
 -- | Advance world time by a step in milliseconds.
 stepWorld :: MonoTime -> TestWorld -> TestWorld
