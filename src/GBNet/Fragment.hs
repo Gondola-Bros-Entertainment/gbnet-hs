@@ -42,6 +42,7 @@ module GBNet.Fragment
   )
 where
 
+import Control.Monad.State.Strict (gets, modify', runState)
 import Data.Bits (shiftL, shiftR, (.&.))
 import qualified Data.ByteString as BS
 import Data.List (minimumBy)
@@ -211,46 +212,49 @@ newFragmentAssembler timeoutMs maxSize =
 
 -- | Process an incoming fragment. Returns reassembled message if complete.
 processFragment :: BS.ByteString -> MonoTime -> FragmentAssembler -> (Maybe BS.ByteString, FragmentAssembler)
-processFragment dat now asm =
-  let asm' = cleanupFragments now asm
-   in case deserializeFragmentHeader dat of
-        Nothing -> (Nothing, asm')
-        Just header ->
-          let fragData = BS.drop fragmentHeaderSize dat
-              fragSize = BS.length fragData
-              msgId = fhMessageId header
-           in -- Check if existing buffer has mismatched count
-              case Map.lookup msgId (faBuffers asm') of
-                Just existing
-                  | fbFragmentCount existing /= fhFragmentCount header ->
-                      (Nothing, asm')
-                _ ->
-                  -- Enforce memory limit
-                  let asm'' =
-                        if faCurrentBufferSize asm' + fragSize > faMaxBufferSize asm'
-                          then expireOldest asm'
-                          else asm'
-                      -- Get or create buffer
-                      buf = case Map.lookup msgId (faBuffers asm'') of
-                        Just b -> b
-                        Nothing -> newFragmentBuffer (fhFragmentCount header) now
-                      -- Insert fragment
-                      (complete, buf') = insertFragment (fhFragmentIndex header) fragData buf
-                      asm''' =
-                        asm''
-                          { faBuffers = Map.insert msgId buf' (faBuffers asm''),
-                            faCurrentBufferSize = faCurrentBufferSize asm'' + fragSize
-                          }
-                   in if complete
-                        then
-                          let result = assembleFragments buf'
-                              asm'''' =
-                                asm'''
-                                  { faBuffers = Map.delete msgId (faBuffers asm'''),
-                                    faCurrentBufferSize = faCurrentBufferSize asm''' - fbTotalSize buf'
-                                  }
-                           in (result, asm'''')
-                        else (Nothing, asm''')
+processFragment dat now = runState $ do
+  modify' (cleanupFragments now)
+  case deserializeFragmentHeader dat of
+    Nothing -> pure Nothing
+    Just header -> do
+      let fragData = BS.drop fragmentHeaderSize dat
+          fragSize = BS.length fragData
+          msgId = fhMessageId header
+      -- Check if existing buffer has mismatched count
+      buffers <- gets faBuffers
+      case Map.lookup msgId buffers of
+        Just existing
+          | fbFragmentCount existing /= fhFragmentCount header ->
+              pure Nothing
+        _ -> do
+          -- Enforce memory limit
+          currentSize <- gets faCurrentBufferSize
+          maxSize <- gets faMaxBufferSize
+          if currentSize + fragSize > maxSize
+            then modify' expireOldest
+            else pure ()
+          -- Get or create buffer
+          buf <- gets $ \s ->
+            case Map.lookup msgId (faBuffers s) of
+              Just b -> b
+              Nothing -> newFragmentBuffer (fhFragmentCount header) now
+          -- Insert fragment
+          let (complete, buf') = insertFragment (fhFragmentIndex header) fragData buf
+          modify' $ \s ->
+            s
+              { faBuffers = Map.insert msgId buf' (faBuffers s),
+                faCurrentBufferSize = faCurrentBufferSize s + fragSize
+              }
+          if complete
+            then do
+              let result = assembleFragments buf'
+              modify' $ \s ->
+                s
+                  { faBuffers = Map.delete msgId (faBuffers s),
+                    faCurrentBufferSize = faCurrentBufferSize s - fbTotalSize buf'
+                  }
+              pure result
+            else pure Nothing
 
 -- | Remove expired incomplete fragment buffers.
 cleanupFragments :: MonoTime -> FragmentAssembler -> FragmentAssembler

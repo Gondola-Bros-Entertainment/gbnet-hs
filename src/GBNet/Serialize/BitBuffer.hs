@@ -44,6 +44,7 @@ where
 
 import Data.Bits (clearBit, setBit, shiftL, shiftR, testBit, (.&.), (.|.))
 import qualified Data.ByteString as BS
+import Data.List (foldl')
 import Data.Word (Word64, Word8)
 
 bitsPerByte :: Int
@@ -138,7 +139,7 @@ writeBits value numBits buf
             { bufferBytes = before `BS.append` padding `BS.append` newBytes `BS.append` after,
               bitPos = bitPos buf + numBits
             }
-  | otherwise = foldl writeSingleBit buf [numBits - 1, numBits - 2 .. 0]
+  | otherwise = foldl' writeSingleBit buf [numBits - 1, numBits - 2 .. 0]
   where
     writeSingleBit :: BitBuffer -> Int -> BitBuffer
     writeSingleBit b i = writeBit (testBit value i) b

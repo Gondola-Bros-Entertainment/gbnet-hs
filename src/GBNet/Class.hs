@@ -21,7 +21,7 @@ where
 import Control.Monad.State.Strict (StateT (..))
 import Control.Monad.Trans.Class (lift)
 import Data.ByteString (ByteString)
-import Data.Time.Clock.POSIX (getPOSIXTime)
+import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word64)
 import Network.Socket (SockAddr)
 
@@ -70,9 +70,7 @@ instance (MonadNetwork m) => MonadNetwork (StateT s m) where
 
 -- | Get current monotonic time in nanoseconds (IO helper).
 getMonoTimeIO :: IO MonoTime
-getMonoTimeIO = do
-  t <- getPOSIXTime
-  pure $ round (t * 1e9)
+getMonoTimeIO = getMonotonicTimeNSec
 
 -- | MonadTime instance for IO.
 instance MonadTime IO where

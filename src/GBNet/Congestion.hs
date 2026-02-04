@@ -17,6 +17,7 @@ module GBNet.Congestion
     maxRecoverySecs,
     recoveryHalveIntervalSecs,
     quickDropThresholdSecs,
+    initialSsthresh,
 
     -- * Congestion mode
     CongestionMode (..),
@@ -101,6 +102,10 @@ recoveryHalveIntervalSecs = 10.0
 
 quickDropThresholdSecs :: Double
 quickDropThresholdSecs = 10.0
+
+-- | Initial slow-start threshold (IEEE 754 positive infinity).
+initialSsthresh :: Double
+initialSsthresh = 1 / 0
 
 -- | Additive increase per update tick when in Good mode (packets/sec).
 sendRateIncrease :: Float
@@ -288,7 +293,7 @@ newCongestionWindow mtu =
   CongestionWindow
     { cwPhase = SlowStart,
       cwCwnd = fromIntegral (initialCwndPackets * mtu),
-      cwSsthresh = 1e308, -- effectively infinity
+      cwSsthresh = initialSsthresh,
       cwBytesInFlight = 0,
       cwMtu = mtu,
       cwLastSendTime = Nothing,

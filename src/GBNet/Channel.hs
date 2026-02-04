@@ -182,13 +182,14 @@ newChannel channelId config =
       chTotalRetransmits = 0
     }
 
--- | Queue a message for sending. Returns Nothing if buffer is full and blocking.
-channelSend :: BS.ByteString -> MonoTime -> Channel -> Maybe (Word16, Channel)
+-- | Queue a message for sending.
+-- Returns 'Left ChannelBufferFull' if the buffer is full and blocking is enabled.
+-- Returns 'Left ChannelMessageTooLarge' if the message exceeds the max size.
+channelSend :: BS.ByteString -> MonoTime -> Channel -> Either ChannelError (Word16, Channel)
 channelSend payload now ch
-  | BS.length payload > ccMaxMessageSize (chConfig ch) = Nothing
-  | bufferFull && ccBlockOnFull (chConfig ch) = Nothing
-  | bufferFull = Just (seqNum, ch') -- Drop oldest if not blocking
-  | otherwise = Just (seqNum, ch')
+  | BS.length payload > ccMaxMessageSize (chConfig ch) = Left ChannelMessageTooLarge
+  | bufferFull && ccBlockOnFull (chConfig ch) = Left ChannelBufferFull
+  | otherwise = Right (seqNum, ch')
   where
     bufferFull = Map.size (chSendBuffer ch) >= ccMessageBufferSize (chConfig ch)
     seqNum = chLocalSequence ch
@@ -296,7 +297,7 @@ onMessageReceived seqNum payload now ch =
             then deliverOrdered payload ch'
             else bufferOrdered seqNum payload now ch'
     ReliableSequenced ->
-      if sequenceGreaterThan seqNum (chRemoteSequence ch) || seqNum == chRemoteSequence ch
+      if sequenceGreaterThan seqNum (chRemoteSequence ch)
         then
           ch
             { chReceiveBuffer = chReceiveBuffer ch |> payload,
@@ -347,11 +348,7 @@ flushOrderedBuffer ch =
 -- | Acknowledge a message by sequence number.
 acknowledgeMessage :: Word16 -> Channel -> Channel
 acknowledgeMessage seqNum ch =
-  case Map.lookup seqNum (chSendBuffer ch) of
-    Nothing -> ch
-    Just msg ->
-      let msg' = msg {cmAcked = True}
-       in ch {chSendBuffer = Map.insert seqNum msg' (chSendBuffer ch)}
+  ch {chSendBuffer = Map.adjust (\msg -> msg {cmAcked = True}) seqNum (chSendBuffer ch)}
 
 -- | Take all received messages from the channel.
 channelReceive :: Channel -> ([BS.ByteString], Channel)
@@ -417,6 +414,7 @@ resetChannel ch =
 -- | Check if channel uses reliable delivery.
 channelIsReliable :: Channel -> Bool
 channelIsReliable ch = isReliable (ccDeliveryMode (chConfig ch))
+{-# INLINE channelIsReliable #-}
 
 -- | Channel errors.
 data ChannelError

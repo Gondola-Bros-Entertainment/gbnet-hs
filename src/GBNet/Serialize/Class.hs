@@ -38,6 +38,7 @@ where
 
 import qualified Data.ByteString as BS
 import Data.Int (Int16, Int32, Int64, Int8)
+import Data.List (foldl')
 import Data.Proxy (Proxy (..))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -203,7 +204,7 @@ instance (BitSerialize a) => BitSerialize [a] where
     let truncated = take defaultMaxLength xs
         len = length truncated
         buf' = writeBits (fromIntegral len) lengthPrefixBitWidth buf
-     in foldl (flip bitSerialize) buf' truncated
+     in foldl' (flip bitSerialize) buf' truncated
 
 instance (BitDeserialize a) => BitDeserialize [a] where
   bitDeserialize = runDeserialize $ do

@@ -34,8 +34,7 @@ where
 
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.STM (TQueue, atomically, newTQueueIO, tryReadTQueue, writeTQueue)
-import Control.Exception (SomeException, handle)
-import Control.Monad (forever)
+import Control.Exception (IOException, handle)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.State.Strict (StateT (..), evalStateT, execStateT, get, gets, modify')
 import qualified Data.ByteString as BS
@@ -89,11 +88,13 @@ newNetState sock addr = do
 -- IO manager — the green thread is parked with no CPU cost until data
 -- arrives. Exits cleanly when the socket is closed.
 recvLoop :: Socket -> TQueue (BS.ByteString, SockAddr) -> IO ()
-recvLoop sock queue =
-  handle (\(_ :: SomeException) -> pure ()) $
-    forever $ do
-      (dat, addr) <- NSB.recvFrom sock maxUdpPacketSize
-      atomically $ writeTQueue queue (dat, addr)
+recvLoop sock queue = go
+  where
+    go =
+      handle (\(_ :: IOException) -> pure ()) $ do
+        (dat, addr) <- NSB.recvFrom sock maxUdpPacketSize
+        atomically $ writeTQueue queue (dat, addr)
+        go
 
 -- | Network monad transformer.
 --

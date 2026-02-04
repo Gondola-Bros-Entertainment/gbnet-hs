@@ -17,7 +17,10 @@ module GBNet.Simulator
   )
 where
 
+import Control.Monad.State.Strict (State, gets, modify', runState)
+import Data.Bits (shiftR, xor, (.&.))
 import qualified Data.ByteString as BS
+import Data.Foldable (toList)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word64)
@@ -31,6 +34,10 @@ outOfOrderMaxDelayMs = 50.0
 -- | Packets with total delay below this threshold (ms) are delivered immediately.
 immediateDeliveryThresholdMs :: Double
 immediateDeliveryThresholdMs = 1.0
+
+-- | Maximum extra delay (ms) applied to duplicate packets.
+duplicateJitterMs :: Double
+duplicateJitterMs = 20.0
 
 -- | A packet delayed for later delivery.
 data DelayedPacket = DelayedPacket
@@ -69,102 +76,102 @@ simulatorProcessSend ::
   MonoTime ->
   NetworkSimulator ->
   ([(BS.ByteString, Word64)], NetworkSimulator)
-simulatorProcessSend dat addr now sim =
-  let -- Generate random values
-      (r1, sim1) = nextRandom sim
-      (r2, sim2) = nextRandom sim1
-      (r3, sim3) = nextRandom sim2
-      (r4, sim4) = nextRandom sim3
+simulatorProcessSend dat addr now =
+  runState $ do
+    -- Generate random values
+    r1 <- nextRandomS
+    r2 <- nextRandomS
+    r3 <- nextRandomS
+    r4 <- nextRandomS
 
-      config = nsConfig sim4
+    config <- gets nsConfig
 
-      -- Check packet loss
-      lossThreshold = realToFrac (simPacketLoss config) :: Double
-      isLost = lossThreshold > 0.0 && randomDouble r1 < lossThreshold
-   in if isLost
-        then ([], sim4)
-        else
-          let -- Check bandwidth limit
-              (sim5, overBandwidth) =
-                if simBandwidthLimitBytesPerSec config > 0
-                  then
-                    let sim' = refillTokens now sim4
-                        needed = fromIntegral (BS.length dat)
-                     in if nsTokenBucketTokens sim' < needed
-                          then (sim', True)
-                          else (sim' {nsTokenBucketTokens = nsTokenBucketTokens sim' - needed}, False)
-                  else (sim4, False)
-           in if overBandwidth
-                then ([], sim5)
-                else
-                  let -- Calculate delay
-                      baseLatency = fromIntegral (simLatencyMs config) :: Double
-                      jitter =
-                        if simJitterMs config > 0
-                          then randomDouble r2 * fromIntegral (simJitterMs config)
-                          else 0.0
-                      delayMs = baseLatency + jitter
+    -- Check packet loss
+    let lossThreshold = realToFrac (simPacketLoss config) :: Double
+        isLost = lossThreshold > 0.0 && randomDouble r1 < lossThreshold
+    if isLost
+      then pure []
+      else do
+        -- Check bandwidth limit
+        overBandwidth <-
+          if simBandwidthLimitBytesPerSec config > 0
+            then do
+              refillTokensS now
+              tokens <- gets nsTokenBucketTokens
+              let needed = fromIntegral (BS.length dat)
+              if tokens < needed
+                then pure True
+                else do
+                  modify' $ \s -> s {nsTokenBucketTokens = tokens - needed}
+                  pure False
+            else pure False
+        if overBandwidth
+          then pure []
+          else do
+            -- Calculate delay
+            let baseLatency = fromIntegral (simLatencyMs config) :: Double
+                jitter =
+                  if simJitterMs config > 0
+                    then randomDouble r2 * fromIntegral (simJitterMs config)
+                    else 0.0
+                delayMs = baseLatency + jitter
 
-                      -- Out of order extra delay
-                      outOfOrderChance = realToFrac (simOutOfOrderChance config) :: Double
-                      extraDelay =
-                        if outOfOrderChance > 0.0 && randomDouble r3 < outOfOrderChance
-                          then randomDouble r4 * outOfOrderMaxDelayMs
-                          else 0.0
+                -- Out of order extra delay
+                outOfOrderChance = realToFrac (simOutOfOrderChance config) :: Double
+                extraDelay =
+                  if outOfOrderChance > 0.0 && randomDouble r3 < outOfOrderChance
+                    then randomDouble r4 * outOfOrderMaxDelayMs
+                    else 0.0
 
-                      totalDelayMs = delayMs + extraDelay
-                      deliverAt = now + round totalDelayMs
+                totalDelayMs = delayMs + extraDelay
+                deliverAt = now + round (totalDelayMs * 1e6)
 
-                      -- Create delayed packet
-                      delayed =
+            -- Deliver immediately or delay
+            immediate <-
+              if totalDelayMs < immediateDeliveryThresholdMs
+                then pure [(dat, addr)]
+                else do
+                  let delayed =
                         DelayedPacket
                           { dpData = dat,
                             dpAddr = addr,
                             dpDeliverAt = deliverAt
                           }
+                  modify' $ \s -> s {nsDelayedPackets = nsDelayedPackets s Seq.|> delayed}
+                  pure []
 
-                      (immediate, sim6) =
-                        if totalDelayMs < immediateDeliveryThresholdMs
-                          then ([(dat, addr)], sim5)
-                          else ([], sim5 {nsDelayedPackets = nsDelayedPackets sim5 Seq.|> delayed})
-
-                      -- Handle duplicates
-                      (r5, sim7) = nextRandom sim6
-                      dupChance = realToFrac (simDuplicateChance config) :: Double
-                      sim8 =
-                        if dupChance > 0.0 && randomDouble r5 < dupChance
-                          then
-                            let dupDelayMs = delayMs + randomDouble r5 * 20.0
-                                dupDeliverAt = now + round dupDelayMs
-                                dupPacket =
-                                  DelayedPacket
-                                    { dpData = dat,
-                                      dpAddr = addr,
-                                      dpDeliverAt = dupDeliverAt
-                                    }
-                             in sim7 {nsDelayedPackets = nsDelayedPackets sim7 Seq.|> dupPacket}
-                          else sim7
-                   in (immediate, sim8)
+            -- Handle duplicates
+            r5 <- nextRandomS
+            let dupChance = realToFrac (simDuplicateChance config) :: Double
+            if dupChance > 0.0 && randomDouble r5 < dupChance
+              then do
+                let dupDelayMs = delayMs + randomDouble r5 * duplicateJitterMs
+                    dupDeliverAt = now + round (dupDelayMs * 1e6)
+                    dupPacket =
+                      DelayedPacket
+                        { dpData = dat,
+                          dpAddr = addr,
+                          dpDeliverAt = dupDeliverAt
+                        }
+                modify' $ \s -> s {nsDelayedPackets = nsDelayedPackets s Seq.|> dupPacket}
+              else pure ()
+            pure immediate
 
 -- | Retrieve packets ready for delivery.
+-- Scans all delayed packets since they may not be sorted by delivery time.
 simulatorReceiveReady :: MonoTime -> NetworkSimulator -> ([(BS.ByteString, Word64)], NetworkSimulator)
-simulatorReceiveReady now = go []
-  where
-    go acc s =
-      case Seq.viewl (nsDelayedPackets s) of
-        Seq.EmptyL -> (reverse acc, s)
-        pkt Seq.:< rest ->
-          if dpDeliverAt pkt <= now
-            then go ((dpData pkt, dpAddr pkt) : acc) (s {nsDelayedPackets = rest})
-            else (reverse acc, s)
+simulatorReceiveReady now sim =
+  let (ready, notReady) = Seq.partition (\pkt -> dpDeliverAt pkt <= now) (nsDelayedPackets sim)
+      results = map (\pkt -> (dpData pkt, dpAddr pkt)) (toList ready)
+   in (results, sim {nsDelayedPackets = notReady})
 
 -- | Get count of pending delayed packets.
 simulatorPendingCount :: NetworkSimulator -> Int
 simulatorPendingCount = Seq.length . nsDelayedPackets
 
--- | Refill token bucket based on elapsed time.
-refillTokens :: MonoTime -> NetworkSimulator -> NetworkSimulator
-refillTokens now sim =
+-- | Refill token bucket based on elapsed time (State version).
+refillTokensS :: MonoTime -> State NetworkSimulator ()
+refillTokensS now = modify' $ \sim ->
   let elapsedSecs = elapsedMs (nsLastTokenRefill sim) now / 1000.0
       refillRate = fromIntegral (simBandwidthLimitBytesPerSec (nsConfig sim))
       newTokens = nsTokenBucketTokens sim + elapsedSecs * refillRate
@@ -175,14 +182,25 @@ refillTokens now sim =
           nsLastTokenRefill = now
         }
 
--- | Simple LCG random number generator (returns next state).
-nextRandom :: NetworkSimulator -> (Word64, NetworkSimulator)
-nextRandom sim =
-  let a = 6364136223846793005
+-- | SplitMix-style random number generator (State version).
+-- Uses a different output function from the state update to avoid leaking state.
+nextRandomS :: State NetworkSimulator Word64
+nextRandomS = do
+  s <- gets nsRngState
+  let -- LCG state update
+      a = 6364136223846793005
       c = 1442695040888963407
-      next = a * nsRngState sim + c
-   in (next, sim {nsRngState = next})
+      next = a * s + c
+      -- SplitMix-style output mixing (state is not exposed)
+      z0 = next `xor` (next `shiftR` 30)
+      z1 = z0 * 0xBF58476D1CE4E5B9
+      z2 = z1 `xor` (z1 `shiftR` 27)
+      z3 = z2 * 0x94D049BB133111EB
+      output = z3 `xor` (z3 `shiftR` 31)
+  modify' $ \sim -> sim {nsRngState = next}
+  pure output
 
 -- | Convert random Word64 to double in [0, 1).
+-- Uses upper 32 bits for better uniformity with SplitMix output.
 randomDouble :: Word64 -> Double
-randomDouble w = fromIntegral (w `mod` 1000000) / 1000000.0
+randomDouble w = fromIntegral (w .&. 0xFFFFFFFF) / 4294967296.0

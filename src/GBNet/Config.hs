@@ -150,8 +150,9 @@ minMtu = 576
 maxMtu :: Int
 maxMtu = 65535
 
+-- | Maximum channel count, constrained by 3-bit wire format (payload header).
 maxChannelCount :: Int
-maxChannelCount = 256
+maxChannelCount = 8
 
 -- | Default delta baseline timeout in milliseconds.
 defaultDeltaBaselineTimeoutMs :: Double

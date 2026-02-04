@@ -30,6 +30,7 @@ module GBNet.Connection
     disconnect,
     sendMessage,
     receiveMessage,
+    receiveIncomingPayload,
 
     -- * Tick update
     updateTick,
@@ -56,14 +57,15 @@ module GBNet.Connection
   )
 where
 
-import Data.Bits ((.&.))
+import Control.Monad.State.Strict (State, execState, gets, modify')
+import Data.Bits (shiftR, (.&.))
 import qualified Data.ByteString as BS
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IntMap
 import Data.List (foldl', sortBy)
 import Data.Ord (Down (..), comparing)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import Data.Vector (Vector)
-import qualified Data.Vector as V
 import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Channel (Channel, ChannelError (..), ChannelMessage (..))
 import qualified GBNet.Channel as Channel
@@ -178,7 +180,7 @@ data Connection = Connection
     connRemoteSeq :: !Word16,
     -- Subsystems
     connReliability :: !ReliableEndpoint,
-    connChannels :: !(Vector Channel),
+    connChannels :: !(IntMap Channel),
     connChannelPriority :: ![Int],
     connCongestion :: !CongestionController,
     connCwnd :: !(Maybe CongestionWindow),
@@ -197,6 +199,11 @@ data Connection = Connection
   }
   deriving (Show)
 
+-- | Modify a single channel by index, leaving others unchanged.
+modifyChannel :: Int -> (Channel -> Channel) -> Connection -> Connection
+modifyChannel idx f conn = conn {connChannels = IntMap.adjust f idx (connChannels conn)}
+{-# INLINE modifyChannel #-}
+
 -- | Create a new connection.
 newConnection :: NetworkConfig -> Word64 -> MonoTime -> Connection
 newConnection config clientSalt now =
@@ -204,7 +211,7 @@ newConnection config clientSalt now =
       defaultCfg = ncDefaultChannelConfig config
       -- Pad custom configs with defaults, then take exactly numChannels
       configs = take numChannels $ ncChannelConfigs config ++ repeat defaultCfg
-      channels = V.fromList $ zipWith Channel.newChannel [0 ..] configs
+      channels = IntMap.fromList $ zip [0 ..] $ zipWith Channel.newChannel [0 ..] configs
       -- Sort channel indices by priority (highest first)
       -- Zip indices with configs, sort by priority, extract indices
       priorityOrder =
@@ -250,10 +257,12 @@ newConnection config clientSalt now =
 -- | Get connection state.
 connectionState :: Connection -> ConnectionState
 connectionState = connState
+{-# INLINE connectionState #-}
 
 -- | Check if connected.
 isConnected :: Connection -> Bool
 isConnected conn = connState conn == Connected
+{-# INLINE isConnected #-}
 
 -- | Get connection stats.
 connectionStats :: Connection -> NetworkStats
@@ -261,20 +270,20 @@ connectionStats = connStats
 
 -- | Get number of channels.
 channelCount :: Connection -> Word8
-channelCount = fromIntegral . V.length . connChannels
+channelCount = fromIntegral . IntMap.size . connChannels
 
 -- | Initiate connection.
 connect :: MonoTime -> Connection -> Either ConnectionError Connection
 connect now conn
   | connState conn /= Disconnected = Left ErrAlreadyConnected
   | otherwise =
-      let conn' =
-            conn
-              { connState = Connecting,
-                connRequestTime = Just now,
-                connRetryCount = 0
-              }
-       in Right $ sendConnectionRequest conn'
+      Right $
+        sendConnectionRequest
+          conn
+            { connState = Connecting,
+              connRequestTime = Just now,
+              connRetryCount = 0
+            }
 
 -- | Initiate disconnect.
 disconnect :: DisconnectReason -> MonoTime -> Connection -> Connection
@@ -288,53 +297,54 @@ disconnect reason now conn
                 opType = Disconnect,
                 opPayload = BS.singleton (disconnectReasonCode reason)
               }
-          conn' =
-            conn
-              { connState = Disconnecting,
-                connDisconnectTime = Just now,
-                connDisconnectRetries = 0,
-                connSendQueue = connSendQueue conn Seq.|> pkt,
-                connLocalSeq = connLocalSeq conn + 1
-              }
-       in conn'
+       in conn
+            { connState = Disconnecting,
+              connDisconnectTime = Just now,
+              connDisconnectRetries = 0,
+              connSendQueue = connSendQueue conn Seq.|> pkt,
+              connLocalSeq = connLocalSeq conn + 1
+            }
 
 -- | Send a message on a channel.
 sendMessage :: Word8 -> BS.ByteString -> MonoTime -> Connection -> Either ConnectionError Connection
 sendMessage channelId payload now conn
   | connState conn /= Connected = Left ErrNotConnected
-  | idx >= V.length channels = Left (ErrInvalidChannel channelId)
   | otherwise =
-      let channel = channels V.! idx
-       in case Channel.channelSend payload now channel of
-            Nothing -> Left (ErrChannelError ChannelBufferFull)
-            Just (_msgSeq, channel') ->
-              let channels' = channels V.// [(idx, channel')]
-               in Right conn {connChannels = channels'}
+      case IntMap.lookup idx (connChannels conn) of
+        Nothing -> Left (ErrInvalidChannel channelId)
+        Just channel ->
+          case Channel.channelSend payload now channel of
+            Left chErr -> Left (ErrChannelError chErr)
+            Right (_msgSeq, channel') ->
+              Right $ modifyChannel idx (const channel') conn
   where
-    channels = connChannels conn
     idx = fromIntegral channelId
 
--- | Receive a message from a channel.
-receiveMessage :: Word8 -> Connection -> (Maybe BS.ByteString, Connection)
-receiveMessage channelId conn
-  | idx >= V.length channels = (Nothing, conn)
-  | otherwise =
-      let channel = channels V.! idx
-          (msgs, channel') = Channel.channelReceive channel
-          channels' = channels V.// [(idx, channel')]
-       in case msgs of
-            [] -> (Nothing, conn {connChannels = channels'})
-            (m : _) -> (Just m, conn {connChannels = channels'})
+-- | Receive all pending messages from a channel.
+receiveMessage :: Word8 -> Connection -> ([BS.ByteString], Connection)
+receiveMessage channelId conn =
+  case IntMap.lookup idx (connChannels conn) of
+    Nothing -> ([], conn)
+    Just channel ->
+      let (msgs, channel') = Channel.channelReceive channel
+       in (msgs, modifyChannel idx (const channel') conn)
   where
-    channels = connChannels conn
+    idx = fromIntegral channelId
+
+-- | Route an incoming payload through the appropriate channel.
+receiveIncomingPayload :: Word8 -> Word16 -> BS.ByteString -> MonoTime -> Connection -> Connection
+receiveIncomingPayload channelId chSeq payload now conn =
+  case IntMap.lookup idx (connChannels conn) of
+    Nothing -> conn
+    Just _ -> modifyChannel idx (Channel.onMessageReceived chSeq payload now) conn
+  where
     idx = fromIntegral channelId
 
 -- | Create a packet header (increments local sequence).
 createHeader :: Connection -> (PacketHeader, Connection)
 createHeader conn =
   let header = createHeaderInternal conn
-      conn' = conn {connLocalSeq = connLocalSeq conn + 1}
-   in (header, conn')
+   in (header, conn {connLocalSeq = connLocalSeq conn + 1})
 
 -- | Internal header creation without state update.
 createHeaderInternal :: Connection -> PacketHeader
@@ -368,43 +378,43 @@ sendConnectionRequest conn =
 
 -- | Process incoming packet header for reliability.
 processIncomingHeader :: PacketHeader -> MonoTime -> Connection -> Connection
-processIncomingHeader header now conn =
-  let rel = Rel.onPacketReceived (sequenceNum header) (connReliability conn)
-      conn' = conn {connReliability = rel, connPendingAck = True}
-      -- Update remote sequence if newer
-      conn'' =
-        if sequenceGreaterThan (sequenceNum header) (connRemoteSeq conn')
-          then conn' {connRemoteSeq = sequenceNum header}
-          else conn'
-      -- Process ACKs (extend 32-bit wire format to 64-bit)
-      ackBits64 = fromIntegral (ackBitfield header) :: Word64
-      (ackResult, rel') = Rel.processAcks (ack header) ackBits64 now (connReliability conn'')
+processIncomingHeader header now = execState $ do
+  -- Record received packet for ACK generation
+  modify' $ \c ->
+    c
+      { connReliability = Rel.onPacketReceived (sequenceNum header) (connReliability c),
+        connPendingAck = True
+      }
+
+  -- Update remote sequence if newer
+  remoteSeq <- gets connRemoteSeq
+  if sequenceGreaterThan (sequenceNum header) remoteSeq
+    then modify' $ \c -> c {connRemoteSeq = sequenceNum header}
+    else pure ()
+
+  -- Process ACKs (extend 32-bit wire format to 64-bit)
+  rel <- gets connReliability
+  let ackBits64 = fromIntegral (ackBitfield header) :: Word64
+      (ackResult, rel') = Rel.processAcks (ack header) ackBits64 now rel
       (ackedPairs, fastRetransmits) = ackResult
-      conn''' = conn'' {connReliability = rel'}
-      -- Feed ack/loss info to cwnd
-      conn'''' = case connCwnd conn''' of
-        Just cw ->
-          let hasLoss = not (null fastRetransmits)
-              ackedBytes = length ackedPairs * ncMtu (connConfig conn''')
-              cw'
-                | hasLoss = cwOnLoss cw
-                | ackedBytes > 0 = cwOnAck ackedBytes cw
-                | otherwise = cw
-           in conn''' {connCwnd = Just cw'}
-        Nothing -> conn'''
-      -- Acknowledge messages on channels
-      conn''''' = foldl ackChannelMessage conn'''' ackedPairs
-   in conn'''''
-  where
-    ackChannelMessage c (chId, chSeq) =
-      let idx = fromIntegral chId
-          channels = connChannels c
-       in if idx < V.length channels
-            then
-              let channel = Channel.acknowledgeMessage chSeq (channels V.! idx)
-                  channels' = channels V.// [(idx, channel)]
-               in c {connChannels = channels'}
-            else c
+  modify' $ \c -> c {connReliability = rel'}
+
+  -- Feed ack/loss info to cwnd
+  cw <- gets connCwnd
+  cfg <- gets connConfig
+  case cw of
+    Just cwVal -> do
+      let hasLoss = not (null fastRetransmits)
+          ackedBytes = length ackedPairs * ncMtu cfg
+          cwVal'
+            | hasLoss = cwOnLoss cwVal
+            | ackedBytes > 0 = cwOnAck ackedBytes cwVal
+            | otherwise = cwVal
+      modify' $ \c -> c {connCwnd = Just cwVal'}
+    Nothing -> pure ()
+
+  -- Acknowledge messages on channels
+  mapM_ (\(chId, chSeq) -> modify' $ modifyChannel (fromIntegral chId) (Channel.acknowledgeMessage chSeq)) ackedPairs
 
 -- | Update connection state (called each tick).
 updateTick :: MonoTime -> Connection -> Either ConnectionError Connection
@@ -446,64 +456,74 @@ updateConnected now conn = do
       timeoutMs = ncConnectionTimeoutMs (connConfig conn)
   if timeSinceRecv > timeoutMs
     then Left ErrTimeout
-    else do
-      -- Update congestion
-      let stats = connStats conn
-          cong = ccUpdate (nsPacketLoss stats) (nsRtt stats) now (connCongestion conn)
-          congRefilled = ccRefillBudget (ncMtu (connConfig conn)) cong
-          connCong = conn {connCongestion = congRefilled}
+    else
+      Right $ execState (updateConnectedS now) conn
 
-      -- Update cwnd pacing and check for slow start restart
-      let connPaced = case connCwnd connCong of
-            Just cw ->
-              let rto = Rel.rtoMs (connReliability connCong)
-                  cwRestarted = cwSlowStartRestart rto now cw
-                  cwPaced = cwUpdatePacing rto cwRestarted
-               in connCong {connCwnd = Just cwPaced}
-            Nothing -> connCong
+-- | State-based connected update (after timeout check passes).
+updateConnectedS :: MonoTime -> State Connection ()
+updateConnectedS now = do
+  -- Update congestion
+  stats <- gets connStats
+  cfg <- gets connConfig
+  cong <- gets connCongestion
+  let cong' = ccRefillBudget (ncMtu cfg) $ ccUpdate (nsPacketLoss stats) (nsRtt stats) now cong
+  modify' $ \c -> c {connCongestion = cong'}
 
-      -- Send keepalive if needed
-      let timeSinceSend = elapsedMs (connLastSendTime connPaced) now
-          keepaliveMs = ncKeepaliveIntervalMs (connConfig connPaced)
-          connKeepalive =
-            if timeSinceSend > keepaliveMs
-              then sendKeepalive connPaced
-              else connPaced
+  -- Update cwnd pacing and check for slow start restart
+  cw <- gets connCwnd
+  rel <- gets connReliability
+  case cw of
+    Just cwVal -> do
+      let rto = Rel.rtoMs rel
+          cwPaced = cwUpdatePacing rto $ cwSlowStartRestart rto now cwVal
+      modify' $ \c -> c {connCwnd = Just cwPaced}
+    Nothing -> pure ()
 
-      -- Process channel outgoing messages
-      let connOutput = processChannelOutput now connKeepalive
+  -- Send keepalive if needed
+  lastSend <- gets connLastSendTime
+  let timeSinceSend = elapsedMs lastSend now
+      keepaliveMs = ncKeepaliveIntervalMs cfg
+  if timeSinceSend > keepaliveMs
+    then modify' sendKeepalive
+    else pure ()
 
-      -- Update channels
-      let updatedChannels = V.map (Channel.channelUpdate now) (connChannels connOutput)
-          connChannelsUpdated = connOutput {connChannels = updatedChannels}
+  -- Process channel outgoing messages
+  modify' (processChannelOutput now)
 
-      -- Send AckOnly if needed
-      let connAcked =
-            if connPendingAck connChannelsUpdated && not (connDataSentThisTick connChannelsUpdated)
-              then sendAckOnly connChannelsUpdated
-              else connChannelsUpdated
+  -- Update channels
+  modify' $ \c -> c {connChannels = IntMap.map (Channel.channelUpdate now) (connChannels c)}
 
-      -- Compute congestion level (worst of binary and window-based)
-      let binaryLevel = ccCongestionLevel (connCongestion connAcked)
-          windowLevel = maybe CongestionNone cwCongestionLevel (connCwnd connAcked)
-          congLevel = max binaryLevel windowLevel
+  -- Send AckOnly if needed
+  pending <- gets connPendingAck
+  dataSent <- gets connDataSentThisTick
+  if pending && not dataSent
+    then modify' sendAckOnly
+    else pure ()
 
-      -- Update stats
-      let rel = connReliability connAcked
-          stats' =
-            (connStats connAcked)
-              { nsRtt = realToFrac (Rel.srttMs rel),
-                nsPacketLoss = Rel.packetLossPercent rel,
-                nsBandwidthUp = realToFrac (btBytesPerSecond (connBandwidthUp connAcked)),
-                nsBandwidthDown = realToFrac (btBytesPerSecond (connBandwidthDown connAcked)),
-                nsConnectionQuality = assessConnectionQuality (nsRtt stats) (nsPacketLoss stats * 100),
-                nsCongestionLevel = congLevel
-              }
-      Right
-        connAcked
-          { connStats = stats',
-            connPendingAck = False
-          }
+  -- Compute congestion level (worst of binary and window-based)
+  cong'' <- gets connCongestion
+  cw' <- gets connCwnd
+  let binaryLevel = ccCongestionLevel cong''
+      windowLevel = maybe CongestionNone cwCongestionLevel cw'
+      congLevel = max binaryLevel windowLevel
+
+  -- Update stats
+  rel' <- gets connReliability
+  bwUp <- gets connBandwidthUp
+  bwDown <- gets connBandwidthDown
+  modify' $ \c ->
+    c
+      { connStats =
+          (connStats c)
+            { nsRtt = realToFrac (Rel.srttMs rel'),
+              nsPacketLoss = Rel.packetLossPercent rel',
+              nsBandwidthUp = realToFrac (btBytesPerSecond bwUp),
+              nsBandwidthDown = realToFrac (btBytesPerSecond bwDown),
+              nsConnectionQuality = assessConnectionQuality (realToFrac (Rel.srttMs rel')) (Rel.packetLossPercent rel' * 100),
+              nsCongestionLevel = congLevel
+            },
+        connPendingAck = False
+      }
 
 -- | Process outgoing messages from channels.
 processChannelOutput :: MonoTime -> Connection -> Connection
@@ -513,9 +533,9 @@ processChannelOutput now conn =
 
 processChannelIdx :: MonoTime -> Connection -> Int -> Connection
 processChannelIdx now conn chIdx =
-  if chIdx >= V.length (connChannels conn)
-    then conn
-    else processChannelMessages now conn chIdx
+  if IntMap.member chIdx (connChannels conn)
+    then processChannelMessages now conn chIdx
+    else conn
 
 processChannelMessages :: MonoTime -> Connection -> Int -> Connection
 processChannelMessages now conn chIdx =
@@ -526,52 +546,53 @@ processChannelMessages now conn chIdx =
         Nothing -> True
    in if not canSendCong || not canSendCwnd
         then conn
-        else
-          let channels = connChannels conn
-              channel = channels V.! chIdx
-           in case Channel.getOutgoingMessage channel of
-                Nothing -> conn
-                Just (msg, channel') ->
-                  let msgData = cmData msg
-                      msgSeq = cmSequence msg
-                      -- Prepend payload header: channel (3 bits) + is_fragment (1 bit)
-                      -- Format: [is_fragment:1][reserved:4][channel:3]
-                      headerByte = fromIntegral chIdx .&. 0x07 -- Not a fragment
-                      wireData = BS.cons headerByte msgData
-                      channels' = channels V.// [(chIdx, channel')]
-                      header = createHeaderInternal conn
-                      pkt =
-                        OutgoingPacket
-                          { opHeader = header {packetType = Payload},
-                            opType = Payload,
-                            opPayload = wireData
-                          }
-                      cong' = ccDeductBudget (BS.length wireData) (connCongestion conn)
-                      cwnd' = case connCwnd conn of
-                        Just cw -> Just (cwOnSend (BS.length wireData) now cw)
-                        Nothing -> Nothing
-                      rel' =
-                        if Channel.channelIsReliable channel
-                          then
-                            Rel.onPacketSent
-                              (connLocalSeq conn)
-                              now
-                              (fromIntegral chIdx)
-                              msgSeq
-                              (BS.length wireData)
-                              (connReliability conn)
-                          else connReliability conn
-                      conn' =
-                        conn
-                          { connChannels = channels',
-                            connSendQueue = connSendQueue conn Seq.|> pkt,
-                            connLocalSeq = connLocalSeq conn + 1,
-                            connCongestion = cong',
-                            connCwnd = cwnd',
-                            connReliability = rel',
-                            connDataSentThisTick = True
-                          }
-                   in processChannelMessages now conn' chIdx
+        else case IntMap.lookup chIdx (connChannels conn) of
+          Nothing -> conn
+          Just channel ->
+            case Channel.getOutgoingMessage channel of
+              Nothing -> conn
+              Just (msg, channel') ->
+                let msgData = cmData msg
+                    msgSeq = cmSequence msg
+                    -- Prepend payload header: channel (3 bits) + is_fragment (1 bit)
+                    -- Format: [headerByte:1][channelSeqHi:1][channelSeqLo:1][msgData:N]
+                    headerByte = fromIntegral chIdx .&. 0x07 -- Not a fragment
+                    seqHi = fromIntegral (msgSeq `shiftR` 8) :: Word8
+                    seqLo = fromIntegral (msgSeq .&. 0xFF) :: Word8
+                    wireData = BS.cons headerByte $ BS.cons seqHi $ BS.cons seqLo msgData
+                    header = createHeaderInternal conn
+                    pkt =
+                      OutgoingPacket
+                        { opHeader = header {packetType = Payload},
+                          opType = Payload,
+                          opPayload = wireData
+                        }
+                    cong' = ccDeductBudget (BS.length wireData) (connCongestion conn)
+                    cwnd' = case connCwnd conn of
+                      Just cw -> Just (cwOnSend (BS.length wireData) now cw)
+                      Nothing -> Nothing
+                    rel' =
+                      if Channel.channelIsReliable channel
+                        then
+                          Rel.onPacketSent
+                            (connLocalSeq conn)
+                            now
+                            (fromIntegral chIdx)
+                            msgSeq
+                            (BS.length wireData)
+                            (connReliability conn)
+                        else connReliability conn
+                    conn' =
+                      conn
+                        { connChannels = IntMap.insert chIdx channel' (connChannels conn),
+                          connSendQueue = connSendQueue conn Seq.|> pkt,
+                          connLocalSeq = connLocalSeq conn + 1,
+                          connCongestion = cong',
+                          connCwnd = cwnd',
+                          connReliability = rel',
+                          connDataSentThisTick = True
+                        }
+                 in processChannelMessages now conn' chIdx
 
 -- | Send keepalive packet.
 sendKeepalive :: Connection -> Connection
@@ -648,7 +669,7 @@ resetConnection conn =
           connDisconnectRetries = 0,
           connPendingAck = False,
           connDataSentThisTick = False,
-          connChannels = V.map Channel.resetChannel (connChannels conn),
+          connChannels = IntMap.map Channel.resetChannel (connChannels conn),
           connCongestion =
             newCongestionController
               (ncSendRate config)
@@ -668,10 +689,12 @@ drainSendQueue conn =
 -- | Update last receive time.
 touchRecvTime :: MonoTime -> Connection -> Connection
 touchRecvTime now conn = conn {connLastRecvTime = now}
+{-# INLINE touchRecvTime #-}
 
 -- | Update last send time.
 touchSendTime :: MonoTime -> Connection -> Connection
 touchSendTime now conn = conn {connLastSendTime = now}
+{-# INLINE touchSendTime #-}
 
 -- | Mark connection as established (Connected state).
 -- Used after handshake completes.

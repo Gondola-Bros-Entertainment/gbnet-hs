@@ -50,22 +50,28 @@ data UdpSocket = UdpSocket
   deriving (Show)
 
 -- | Create a new UDP socket bound to the specified address.
+-- Uses bracket-style cleanup to avoid leaking the socket FD if bind fails.
 newUdpSocket :: SockAddr -> IO (Either SocketError UdpSocket)
 newUdpSocket addr = do
-  result <- tryIO $ do
-    sock <- NS.socket NS.AF_INET NS.Datagram NS.defaultProtocol
-    NS.setSocketOption sock NS.ReuseAddr 1
-    NS.bind sock addr
-    NS.withFdSocket sock NS.setNonBlockIfNeeded
-    return sock
-  return $ case result of
-    Left err -> Left (SocketIoError err)
-    Right sock ->
-      Right
-        UdpSocket
-          { usSocket = sock,
-            usStats = defaultSocketStats
-          }
+  sockResult <- tryIO $ NS.socket NS.AF_INET NS.Datagram NS.defaultProtocol
+  case sockResult of
+    Left err -> return $ Left (SocketIoError err)
+    Right sock -> do
+      bindResult <- tryIO $ do
+        NS.setSocketOption sock NS.ReuseAddr 1
+        NS.bind sock addr
+        NS.withFdSocket sock NS.setNonBlockIfNeeded
+      case bindResult of
+        Left err -> do
+          NS.close sock -- Clean up on failure
+          return $ Left (SocketIoError err)
+        Right () ->
+          return $
+            Right
+              UdpSocket
+                { usSocket = sock,
+                  usStats = defaultSocketStats
+                }
 
 -- | Close the socket.
 closeSocket :: UdpSocket -> IO ()

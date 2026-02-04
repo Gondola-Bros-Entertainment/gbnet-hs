@@ -52,11 +52,13 @@ module GBNet.Reliability
 where
 
 import Data.Bits (shiftL, (.&.), (.|.))
+import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Vector.Unboxed (Vector)
 import qualified Data.Vector.Unboxed as UV
 import Data.Word (Word16, Word32, Word64, Word8)
+import GBNet.Class (MonoTime)
 import GBNet.Util (sequenceDiff, sequenceGreaterThan)
 
 -- Constants
@@ -92,9 +94,6 @@ defaultMaxInFlight :: Int
 defaultMaxInFlight = 256
 
 -- Monotonic time
-
--- | Monotonic time in nanoseconds.
-type MonoTime = Word64
 
 -- | Elapsed time in milliseconds.
 elapsedMs :: MonoTime -> MonoTime -> Double
@@ -288,7 +287,7 @@ onPacketReceived seqNum ep =
                 then
                   let diff = fromIntegral (sequenceDiff seqNum (reRemoteSequence ep')) :: Word64
                       newBits =
-                        if diff <= fromIntegral ackBitsWindow
+                        if diff < fromIntegral ackBitsWindow
                           then
                             (reAckBits ep' `shiftL` fromIntegral diff)
                               .|. (1 `shiftL` (fromIntegral diff - 1))
@@ -313,9 +312,9 @@ processAcks ackSeq ackBitsVal now ep =
           Map.member (ackSeq - (i + 1)) (reSentPackets ep)
         ]
       ackedSeqs = directAck ++ bitsAcks
-      (acked, ep') = foldl (ackOneWithTime now) ([], ep) ackedSeqs
+      (acked, ep') = foldl' (ackOneWithTime now) ([], ep) ackedSeqs
       inFlightSeqs = Map.keys (reSentPackets ep')
-      (fastRetransmit, ep'') = foldl (nackOne ackSeq ackBitsVal) ([], ep') inFlightSeqs
+      (fastRetransmit, ep'') = foldl' (nackOne ackSeq ackBitsVal) ([], ep') inFlightSeqs
    in ((acked, fastRetransmit), ep'')
 
 ackOneWithTime ::
@@ -359,8 +358,7 @@ nackOne ackSeq ackBitsVal (retransmits, ep) seqNum
                       Nothing -> (retransmits, ep)
                       Just record ->
                         let newNack = min 255 (sprNackCount record + 1)
-                            record' = record {sprNackCount = newNack}
-                            ep' = ep {reSentPackets = Map.insert seqNum record' (reSentPackets ep)}
+                            ep' = ep {reSentPackets = Map.adjust (\r -> r {sprNackCount = newNack}) seqNum (reSentPackets ep)}
                             retransmits' =
                               if newNack == fastRetransmitThreshold
                                 then (sprChannelId record, sprChannelSequence record) : retransmits
@@ -405,12 +403,15 @@ recordLossSample lost ep =
 
 getAckInfo :: ReliableEndpoint -> (Word16, Word64)
 getAckInfo ep = (reRemoteSequence ep, reAckBits ep)
+{-# INLINE getAckInfo #-}
 
 rtoMs :: ReliableEndpoint -> Double
 rtoMs = reRto
+{-# INLINE rtoMs #-}
 
 srttMs :: ReliableEndpoint -> Double
 srttMs = reSrtt
+{-# INLINE srttMs #-}
 
 packetLossPercent :: ReliableEndpoint -> Float
 packetLossPercent ep
@@ -422,6 +423,8 @@ packetLossPercent ep
 
 isInFlight :: Word16 -> ReliableEndpoint -> Bool
 isInFlight seqNum ep = Map.member seqNum (reSentPackets ep)
+{-# INLINE isInFlight #-}
 
 packetsInFlight :: ReliableEndpoint -> Int
 packetsInFlight = Map.size . reSentPackets
+{-# INLINE packetsInFlight #-}

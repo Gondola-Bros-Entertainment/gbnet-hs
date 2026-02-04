@@ -34,7 +34,7 @@ module GBNet
     runNetT,
     evalNetT,
     execNetT,
-    NetState (..),
+    NetState,
     newNetState,
 
     -- * IO Backend
@@ -47,8 +47,12 @@ module GBNet
     ipv4,
     anyAddr,
 
+    -- * Socket
+    SocketError (..),
+    UdpSocket,
+
     -- * Peer Networking
-    NetPeer (..),
+    NetPeer,
     PeerId (..),
     peerIdFromAddr,
     PeerEvent (..),
@@ -72,19 +76,45 @@ module GBNet
     peerSend,
     peerBroadcast,
 
+    -- ** Pure Processing Types
+    PeerResult (..),
+    IncomingPacket (..),
+    RawPacket (..),
+
     -- ** Peer Queries
     peerCount,
     peerIsConnected,
     peerStats,
     peerLocalAddr,
     peerConnectedIds,
+    peerConfig,
+
+    -- * Connection
+    ConnectionState (..),
+    ConnectionError (..),
+    ChannelError (..),
 
     -- * Configuration
     NetworkConfig (..),
     defaultNetworkConfig,
+    ConfigError (..),
+    validateConfig,
+    SimulationConfig (..),
+    defaultSimulationConfig,
     ChannelConfig (..),
     defaultChannelConfig,
+    unreliableConfig,
+    reliableOrderedConfig,
+    reliableSequencedConfig,
     DeliveryMode (..),
+
+    -- * Simulation
+    NetworkSimulator,
+    newNetworkSimulator,
+    simulatorProcessSend,
+    simulatorReceiveReady,
+    simulatorPendingCount,
+    simulatorConfig,
 
     -- * Testing
     TestNet,
@@ -147,10 +177,10 @@ module GBNet
 where
 
 import Data.Word (Word16, Word8)
-import GBNet.Channel (ChannelConfig (..), DeliveryMode (..), defaultChannelConfig)
+import GBNet.Channel (ChannelConfig (..), ChannelError (..), DeliveryMode (..), defaultChannelConfig, reliableOrderedConfig, reliableSequencedConfig, unreliableConfig)
 import GBNet.Class
-import GBNet.Config (NetworkConfig (..), defaultNetworkConfig)
-import GBNet.Connection (DisconnectReason (..))
+import GBNet.Config (ConfigError (..), NetworkConfig (..), SimulationConfig (..), defaultNetworkConfig, defaultSimulationConfig, validateConfig)
+import GBNet.Connection (ConnectionError (..), ConnectionState (..), DisconnectReason (..))
 import GBNet.Net
 import GBNet.Net.IO (initNetState)
 import GBNet.Peer
@@ -161,6 +191,8 @@ import GBNet.Replication.Interpolation (Interpolatable (..), SnapshotBuffer, new
 import GBNet.Replication.Priority (PriorityAccumulator, accumulate, drainTop, newPriorityAccumulator, register, unregister)
 import GBNet.Serialize.BitBuffer (BitBuffer, empty, fromBytes, toBytes)
 import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..))
+import GBNet.Simulator (NetworkSimulator (..), newNetworkSimulator, simulatorPendingCount, simulatorProcessSend, simulatorReceiveReady)
+import GBNet.Socket (SocketError (..), UdpSocket)
 import GBNet.Stats (CongestionLevel (..), NetworkStats (..))
 import GBNet.TestNet
 import Network.Socket (SockAddr (..))
@@ -204,3 +236,11 @@ filterRelevant ::
   [b]
 filterRelevant mgr observerPos =
   map snd . filter (\(entPos, _) -> Interest.relevant mgr entPos observerPos)
+
+-- | Get the network configuration from a peer.
+peerConfig :: NetPeer -> NetworkConfig
+peerConfig = npConfig
+
+-- | Get the simulation configuration from a simulator.
+simulatorConfig :: NetworkSimulator -> SimulationConfig
+simulatorConfig = nsConfig
