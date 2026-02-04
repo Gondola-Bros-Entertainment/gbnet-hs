@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 -- |
 -- Module      : GBNet.Serialize.BitBuffer
 -- Description : Bit-level read/write buffer for sub-byte serialization
@@ -190,7 +192,7 @@ readBits numBits buf
       case readBit b of
         Left err -> Left err
         Right (ReadResult bitVal b') ->
-          let accum' = (accum `shiftL` 1) .|. (if bitVal then 1 else 0)
+          let !accum' = (accum `shiftL` 1) .|. (if bitVal then 1 else 0)
            in readBitsLoop (n - 1) accum' b'
 
 -- | Convert buffer to ByteString (only written bytes).

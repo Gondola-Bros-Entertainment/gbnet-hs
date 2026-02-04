@@ -200,9 +200,10 @@ instance (BitDeserialize a) => BitDeserialize (Maybe a) where
 -- | 16-bit length prefix + elements.
 instance (BitSerialize a) => BitSerialize [a] where
   bitSerialize xs buf =
-    let len = min (length xs) defaultMaxLength
+    let truncated = take defaultMaxLength xs
+        len = length truncated
         buf' = writeBits (fromIntegral len) lengthPrefixBitWidth buf
-     in foldl (flip bitSerialize) buf' xs
+     in foldl (flip bitSerialize) buf' truncated
 
 instance (BitDeserialize a) => BitDeserialize [a] where
   bitDeserialize = runDeserialize $ do

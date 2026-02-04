@@ -27,11 +27,13 @@ module GBNet.Security
   )
 where
 
-import Data.Bits (shiftR, (.&.))
+import Data.Bits (shiftL, shiftR, (.&.))
 import qualified Data.ByteString as BS
 import qualified Data.Digest.CRC32C as CRC
+import Data.List (minimumBy)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Ord (comparing)
 import Data.Word (Word32, Word64)
 import GBNet.Reliability (MonoTime, elapsedMs)
 
@@ -83,7 +85,7 @@ word32FromLEBytes bs
           b1 = fromIntegral (BS.index bs 1) :: Word32
           b2 = fromIntegral (BS.index bs 2) :: Word32
           b3 = fromIntegral (BS.index bs 3) :: Word32
-       in b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+       in b0 + (b1 `shiftL` 8) + (b2 `shiftL` 16) + (b3 `shiftL` 24)
 
 -- | Cleanup interval — sweep stale entries every 5 seconds.
 cleanupIntervalMs :: Double
@@ -229,4 +231,4 @@ evictOldest tv =
         }
   where
     findOldest [] = Nothing
-    findOldest xs = Just $ foldr1 (\a b -> if snd a < snd b then a else b) xs
+    findOldest xs = Just $ minimumBy (comparing snd) xs

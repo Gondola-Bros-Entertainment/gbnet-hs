@@ -89,11 +89,11 @@ mkDeserClause :: Int -> [Con] -> Q Clause
 mkDeserClause tagBits cons = do
   bufName <- newName "buf"
   body <-
-    if length cons == 1
-      then do
-        let (conName, fieldTypes) = conFieldTypes (head cons)
+    case cons of
+      [con] -> do
+        let (conName, fieldTypes) = conFieldTypes con
         mkReadFields conName fieldTypes (varE bufName)
-      else do
+      _ -> do
         tagName <- newName "tagVal"
         buf'Name <- newName "buf'"
         matches <- mapM (mkConMatch buf'Name) (zip [0 ..] cons)

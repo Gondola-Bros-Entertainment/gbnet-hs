@@ -42,9 +42,12 @@ module GBNet.Fragment
   )
 where
 
+import Data.Bits (shiftL, shiftR, (.&.))
 import qualified Data.ByteString as BS
+import Data.List (minimumBy)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Ord (comparing)
 import Data.Word (Word32, Word8)
 import GBNet.Reliability (MonoTime, elapsedMs)
 
@@ -91,10 +94,10 @@ serializeFragmentHeader :: FragmentHeader -> BS.ByteString
 serializeFragmentHeader hdr =
   let msgId = fhMessageId hdr
    in BS.pack
-        [ fromIntegral (msgId `div` (256 ^ (3 :: Int)) `mod` 256),
-          fromIntegral (msgId `div` (256 ^ (2 :: Int)) `mod` 256),
-          fromIntegral (msgId `div` 256 `mod` 256),
-          fromIntegral (msgId `mod` 256),
+        [ fromIntegral ((msgId `shiftR` 24) .&. 0xFF),
+          fromIntegral ((msgId `shiftR` 16) .&. 0xFF),
+          fromIntegral ((msgId `shiftR` 8) .&. 0xFF),
+          fromIntegral (msgId .&. 0xFF),
           fhFragmentIndex hdr,
           fhFragmentCount hdr
         ]
@@ -108,7 +111,7 @@ deserializeFragmentHeader bs
           b1 = fromIntegral (BS.index bs 1) :: Word32
           b2 = fromIntegral (BS.index bs 2) :: Word32
           b3 = fromIntegral (BS.index bs 3) :: Word32
-          msgId = b0 * 256 ^ (3 :: Int) + b1 * 256 ^ (2 :: Int) + b2 * 256 + b3
+          msgId = (b0 `shiftL` 24) + (b1 `shiftL` 16) + (b2 `shiftL` 8) + b3
        in Just
             FragmentHeader
               { fhMessageId = msgId,
@@ -275,10 +278,7 @@ expireOldest asm =
     findOldest m =
       case Map.toList m of
         [] -> Nothing
-        xs -> Just $ minimumByCreatedAt xs
-
-    minimumByCreatedAt :: [(Word32, FragmentBuffer)] -> (Word32, FragmentBuffer)
-    minimumByCreatedAt = foldr1 (\a b -> if fbCreatedAt (snd a) < fbCreatedAt (snd b) then a else b)
+        xs -> Just $ minimumBy (comparing (fbCreatedAt . snd)) xs
 
 -- | MTU discovery state.
 data MtuState

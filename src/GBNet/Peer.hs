@@ -69,6 +69,7 @@ import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import Data.Either (fromRight)
 import Data.Foldable (toList)
+import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
@@ -376,7 +377,7 @@ peerProcess now packets peer =
 drainAllConnectionQueues :: MonoTime -> NetPeer -> NetPeer
 drainAllConnectionQueues _now peer =
   let peerIds = Map.keys (npConnections peer)
-   in foldl drainConnectionQueue peer peerIds
+   in foldl' drainConnectionQueue peer peerIds
   where
     drainConnectionQueue p peerId =
       case Map.lookup peerId (npConnections p) of
@@ -386,7 +387,7 @@ drainAllConnectionQueues _now peer =
               p' = p {npConnections = Map.insert peerId conn' (npConnections p)}
               -- Convert OutgoingPackets to RawPackets
               rawPackets = map (outgoingToRaw peerId) connPackets
-           in foldl (flip queueRawPacket) p' rawPackets
+           in foldl' (flip queueRawPacket) p' rawPackets
 
     outgoingToRaw peerId (OutgoingPacket hdr ptype payload) =
       let header = hdr {packetType = ptype}
@@ -448,7 +449,7 @@ peerTick messages peer = do
   -- 1. Receive all available packets
   packets <- peerRecvAllM
   -- 2. Queue messages to all connections
-  let peer1 = foldl (queueMessage now) peer messages
+  let peer1 = foldl' (queueMessage now) peer messages
   -- 3. Process packets (pure)
   let result = peerProcess now packets peer1
       peer2 = prPeer result
@@ -815,7 +816,7 @@ updateConnections now peer =
 retryPendingConnectionsPure :: MonoTime -> NetPeer -> NetPeer
 retryPendingConnectionsPure now peer =
   let outbound = Map.toList $ Map.filter (\p -> pcDirection p == Outbound) (npPending peer)
-   in foldl (retryOne now) peer outbound
+   in foldl' (retryOne now) peer outbound
   where
     retryOne t p (peerId, pending) =
       let elapsed = elapsedMs (pcLastRetry pending) t
@@ -907,7 +908,7 @@ peerBroadcast ::
 peerBroadcast channel dat except now peer =
   let peerIds = filter (\p -> Just p /= except) $ Map.keys (npConnections peer)
       -- Queue message to each connection's channel
-      peer' = foldr (\pid p -> fromRight p (peerSend pid channel dat now p)) peer peerIds
+      peer' = foldl' (\p pid -> fromRight p (peerSend pid channel dat now p)) peer peerIds
    in -- Drain connection queues to npSendQueue so packets are ready
       drainAllConnectionQueues now peer'
 

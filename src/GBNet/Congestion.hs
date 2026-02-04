@@ -305,10 +305,12 @@ cwOnAck bytes cw =
            in if newCwnd >= cwSsthresh cw'
                 then cw' {cwCwnd = newCwnd, cwPhase = Avoidance}
                 else cw' {cwCwnd = newCwnd}
-        Avoidance ->
-          -- Additive increase: cwnd += mtu * bytes / cwnd
-          let increase = fromIntegral (cwMtu cw') * fromIntegral bytes / cwCwnd cw'
-           in cw' {cwCwnd = cwCwnd cw' + increase}
+        Avoidance
+          | cwCwnd cw' > 0 ->
+              -- Additive increase: cwnd += mtu * bytes / cwnd
+              let increase = fromIntegral (cwMtu cw') * fromIntegral bytes / cwCwnd cw'
+               in cw' {cwCwnd = cwCwnd cw' + increase}
+          | otherwise -> cw'
         Recovery ->
           cw' -- Conservative in recovery
 

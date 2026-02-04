@@ -24,6 +24,14 @@ import Data.Word (Word64)
 import GBNet.Config (SimulationConfig (..))
 import GBNet.Reliability (MonoTime, elapsedMs)
 
+-- | Maximum extra delay (ms) applied to out-of-order packets.
+outOfOrderMaxDelayMs :: Double
+outOfOrderMaxDelayMs = 50.0
+
+-- | Packets with total delay below this threshold (ms) are delivered immediately.
+immediateDeliveryThresholdMs :: Double
+immediateDeliveryThresholdMs = 1.0
+
 -- | A packet delayed for later delivery.
 data DelayedPacket = DelayedPacket
   { dpData :: !BS.ByteString,
@@ -101,7 +109,7 @@ simulatorProcessSend dat addr now sim =
                       outOfOrderChance = realToFrac (simOutOfOrderChance config) :: Double
                       extraDelay =
                         if outOfOrderChance > 0.0 && randomDouble r3 < outOfOrderChance
-                          then randomDouble r4 * 50.0
+                          then randomDouble r4 * outOfOrderMaxDelayMs
                           else 0.0
 
                       totalDelayMs = delayMs + extraDelay
@@ -116,7 +124,7 @@ simulatorProcessSend dat addr now sim =
                           }
 
                       (immediate, sim6) =
-                        if totalDelayMs < 1.0
+                        if totalDelayMs < immediateDeliveryThresholdMs
                           then ([(dat, addr)], sim5)
                           else ([], sim5 {nsDelayedPackets = nsDelayedPackets sim5 Seq.|> delayed})
 

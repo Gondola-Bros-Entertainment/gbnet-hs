@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 -- |
 -- Module      : GBNet.Channel
 -- Description : Channel-based message delivery with multiple reliability modes
@@ -362,8 +364,8 @@ takePendingAcks ch = (chPendingAck ch, ch {chPendingAck = []})
 -- | Update channel state (flush old ordered messages, clean up acked).
 channelUpdate :: MonoTime -> Channel -> Channel
 channelUpdate now ch =
-  let ch' = cleanupAcked ch
-      ch'' = flushTimedOutOrdered now ch'
+  let !ch' = cleanupAcked ch
+      !ch'' = flushTimedOutOrdered now ch'
    in ch''
 
 -- | Remove acked messages from send buffer.

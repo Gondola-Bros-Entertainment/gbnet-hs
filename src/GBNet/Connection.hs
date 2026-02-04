@@ -58,7 +58,7 @@ where
 
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
-import Data.List (sortBy)
+import Data.List (foldl', sortBy)
 import Data.Ord (Down (..), comparing)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
@@ -261,7 +261,7 @@ connectionStats = connStats
 
 -- | Get number of channels.
 channelCount :: Connection -> Word8
-channelCount conn = fromIntegral $ V.length (connChannels conn)
+channelCount = fromIntegral . V.length . connChannels
 
 -- | Initiate connection.
 connect :: MonoTime -> Connection -> Either ConnectionError Connection
@@ -509,7 +509,7 @@ updateConnected now conn = do
 processChannelOutput :: MonoTime -> Connection -> Connection
 processChannelOutput now conn =
   let conn' = conn {connDataSentThisTick = False}
-   in foldl (processChannelIdx now) conn' (connChannelPriority conn')
+   in foldl' (processChannelIdx now) conn' (connChannelPriority conn')
 
 processChannelIdx :: MonoTime -> Connection -> Int -> Connection
 processChannelIdx now conn chIdx =
