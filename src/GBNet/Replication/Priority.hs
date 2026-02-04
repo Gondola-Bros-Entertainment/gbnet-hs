@@ -1,5 +1,5 @@
 -- |
--- Module      : GBNet.Priority
+-- Module      : GBNet.Replication.Priority
 -- Description : Priority accumulator for bandwidth-limited entity replication
 --
 -- 'PriorityAccumulator' tracks per-entity priority that grows over time,
@@ -18,7 +18,7 @@
 -- -- Drain entities that fit in budget
 -- let (selected, acc'') = drainTop 1200 entitySize acc'
 -- @
-module GBNet.Priority
+module GBNet.Replication.Priority
   ( -- * Priority accumulator
     PriorityAccumulator,
     newPriorityAccumulator,

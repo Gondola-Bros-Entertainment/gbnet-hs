@@ -151,14 +151,14 @@ import GBNet.Channel (ChannelConfig (..), DeliveryMode (..), defaultChannelConfi
 import GBNet.Class
 import GBNet.Config (NetworkConfig (..), defaultNetworkConfig)
 import GBNet.Connection (DisconnectReason (..))
-import GBNet.Delta (BaselineManager, DeltaTracker, NetworkDelta (..), deltaDecode, deltaEncode, deltaOnAck, getBaseline, newBaselineManager, newDeltaTracker, pushBaseline)
-import GBNet.Interest (GridInterest, InterestManager (..), RadiusInterest, newGridInterest, newRadiusInterest)
-import qualified GBNet.Interest as Interest
-import GBNet.Interpolation (Interpolatable (..), SnapshotBuffer, newSnapshotBuffer, pushSnapshot, sampleSnapshot)
+import GBNet.Replication.Delta (BaselineManager, DeltaTracker, NetworkDelta (..), deltaDecode, deltaEncode, deltaOnAck, getBaseline, newBaselineManager, newDeltaTracker, pushBaseline)
+import GBNet.Replication.Interest (GridInterest, InterestManager (..), RadiusInterest, newGridInterest, newRadiusInterest)
+import qualified GBNet.Replication.Interest as Interest
+import GBNet.Replication.Interpolation (Interpolatable (..), SnapshotBuffer, newSnapshotBuffer, pushSnapshot, sampleSnapshot)
 import GBNet.Net
 import GBNet.Net.IO (initNetState)
 import GBNet.Peer
-import GBNet.Priority (PriorityAccumulator, accumulate, drainTop, newPriorityAccumulator, register, unregister)
+import GBNet.Replication.Priority (PriorityAccumulator, accumulate, drainTop, newPriorityAccumulator, register, unregister)
 import GBNet.Serialize.BitBuffer (BitBuffer, empty, fromBytes, toBytes)
 import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..))
 import GBNet.Stats (CongestionLevel (..), NetworkStats (..))

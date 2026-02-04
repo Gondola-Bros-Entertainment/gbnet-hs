@@ -1,5 +1,5 @@
 -- |
--- Module      : GBNet.Interest
+-- Module      : GBNet.Replication.Interest
 -- Description : Interest management for area-of-interest filtering
 --
 -- Determines which entities are relevant to a given observer, reducing
@@ -7,7 +7,7 @@
 --
 -- Use 'RadiusInterest' for sphere-based filtering or 'GridInterest' for
 -- cell-based spatial partitioning.
-module GBNet.Interest
+module GBNet.Replication.Interest
   ( -- * Position type
     Position,
 

@@ -1,5 +1,5 @@
 -- |
--- Module      : GBNet.Interpolation
+-- Module      : GBNet.Replication.Interpolation
 -- Description : Snapshot interpolation for smooth client-side rendering
 --
 -- 'SnapshotBuffer' stores timestamped snapshots and interpolates between
@@ -17,7 +17,7 @@
 --   Nothing -> renderLastKnown
 --   Just interpolated -> render interpolated
 -- @
-module GBNet.Interpolation
+module GBNet.Replication.Interpolation
   ( -- * Constants
     defaultBufferDepth,
     defaultPlaybackDelayMs,

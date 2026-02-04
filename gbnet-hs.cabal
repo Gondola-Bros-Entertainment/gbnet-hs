@@ -34,10 +34,10 @@ library
     GBNet.Simulator
     GBNet.Socket
     GBNet.Peer
-    GBNet.Delta
-    GBNet.Interest
-    GBNet.Priority
-    GBNet.Interpolation
+    GBNet.Replication.Delta
+    GBNet.Replication.Interest
+    GBNet.Replication.Priority
+    GBNet.Replication.Interpolation
     GBNet.Class
     GBNet.TestNet
     GBNet.Net

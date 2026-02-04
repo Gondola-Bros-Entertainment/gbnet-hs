@@ -13,12 +13,12 @@ import qualified Data.Text as T
 import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Config (NetworkConfig (..), defaultNetworkConfig)
 import GBNet.Congestion
-import GBNet.Interest
-import GBNet.Interpolation
+import GBNet.Replication.Interest
+import GBNet.Replication.Interpolation
 import GBNet.Packet
 import GBNet.Connection (DisconnectReason (..))
 import GBNet.Peer
-import GBNet.Priority
+import GBNet.Replication.Priority
 import GBNet.Reliability
 import GBNet.Serialize.BitBuffer
 import GBNet.Serialize.Class

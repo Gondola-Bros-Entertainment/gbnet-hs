@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
 -- |
--- Module      : GBNet.Delta
+-- Module      : GBNet.Replication.Delta
 -- Description : Delta compression for bandwidth-efficient state replication
 --
 -- 'DeltaTracker' manages per-sequence snapshots for delta encoding against
@@ -11,7 +11,7 @@
 --
 -- Delta compression only sends changed fields between states, dramatically
 -- reducing bandwidth for entity replication.
-module GBNet.Delta
+module GBNet.Replication.Delta
   ( -- * Types
     BaselineSeq,
     noBaseline,
