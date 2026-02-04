@@ -1,5 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
-
 -- |
 -- Module      : GBNet.Channel
 -- Description : Channel-based message delivery with multiple reliability modes

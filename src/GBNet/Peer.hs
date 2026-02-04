@@ -77,7 +77,6 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word64, Word8)
 import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime (..))
-import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Config (NetworkConfig (..))
 import GBNet.Connection
   ( Connection,
@@ -112,6 +111,7 @@ import GBNet.Socket
     socketLocalAddr,
   )
 import GBNet.Stats (NetworkStats)
+import GBNet.Types (ChannelId (..), SequenceNum (..))
 import Network.Socket (SockAddr)
 
 -- | Peer identifier wrapping a socket address.
@@ -300,9 +300,10 @@ decodeChannelSeq :: BS.ByteString -> Maybe (SequenceNum, BS.ByteString)
 decodeChannelSeq bs
   | BS.length bs < 2 = Nothing
   | otherwise =
-      let chSeq = SequenceNum $
-            (fromIntegral (BS.index bs 0) `shiftL` 8)
-              .|. fromIntegral (BS.index bs 1)
+      let chSeq =
+            SequenceNum $
+              (fromIntegral (BS.index bs 0) `shiftL` 8)
+                .|. fromIntegral (BS.index bs 1)
        in Just (chSeq, BS.drop 2 bs)
 {-# INLINE decodeChannelSeq #-}
 

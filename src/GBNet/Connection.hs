@@ -70,7 +70,6 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word32, Word64, Word8)
 import GBNet.Channel (Channel, ChannelError (..), ChannelMessage (..))
-import GBNet.Types (ChannelId (..), SequenceNum (..), channelIdToInt)
 import qualified GBNet.Channel as Channel
 import GBNet.Config (NetworkConfig (..))
 import GBNet.Congestion
@@ -105,6 +104,7 @@ import GBNet.Stats
     assessConnectionQuality,
     defaultNetworkStats,
   )
+import GBNet.Types (ChannelId (..), SequenceNum (..), channelIdToInt)
 import GBNet.Util (sequenceGreaterThan)
 
 -- | States of the connection state machine.
@@ -392,7 +392,8 @@ processIncomingHeader header now = execState $ do
   -- Update remote sequence if newer
   remoteSeq <- gets connRemoteSeq
   when (sequenceGreaterThan (sequenceNum header) remoteSeq) $
-    modify' $ \c -> c {connRemoteSeq = sequenceNum header}
+    modify' $
+      \c -> c {connRemoteSeq = sequenceNum header}
 
   -- Process ACKs (extend 32-bit wire format to 64-bit)
   rel <- gets connReliability

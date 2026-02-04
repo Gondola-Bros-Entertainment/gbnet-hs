@@ -25,8 +25,8 @@ import Data.Foldable (toList)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word64)
-import GBNet.Config (SimulationConfig (..))
 import GBNet.Class (MonoTime (..))
+import GBNet.Config (SimulationConfig (..))
 import GBNet.Reliability (elapsedMs)
 
 -- | Maximum extra delay (ms) applied to out-of-order packets.

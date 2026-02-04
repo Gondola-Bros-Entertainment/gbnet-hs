@@ -24,13 +24,13 @@ where
 import Control.Monad.State.Strict (StateT (..))
 import Control.Monad.Trans.Class (lift)
 import Data.ByteString (ByteString)
-import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
 import Network.Socket (SockAddr)
 
 -- | Monotonic time in nanoseconds.
 -- Derives 'Num' because arithmetic on timestamps is pervasive.
-newtype MonoTime = MonoTime { unMonoTime :: Word64 }
+newtype MonoTime = MonoTime {unMonoTime :: Word64}
   deriving stock (Eq, Ord, Show)
   deriving newtype (Num, Bounded, Enum, Real, Integral)
 

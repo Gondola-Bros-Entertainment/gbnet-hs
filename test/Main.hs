@@ -18,7 +18,6 @@ import GBNet.Connection (DisconnectReason (..))
 import GBNet.Packet
 import GBNet.Peer
 import GBNet.Reliability
-import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Replication.Interest
 import GBNet.Replication.Interpolation
 import GBNet.Replication.Priority
@@ -28,6 +27,7 @@ import GBNet.Serialize.TH
 import GBNet.Socket (UdpSocket (..))
 import GBNet.Stats (CongestionLevel (..), defaultSocketStats)
 import GBNet.TestNet
+import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Util
 import Network.Socket (SockAddr (..), tupleToHostAddress)
 import qualified Network.Socket as NS

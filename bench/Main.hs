@@ -74,15 +74,22 @@ deriveNetworkSerialize ''Vec3
 
 -- Primitives / newtypes
 instance NFData SequenceNum where rnf (SequenceNum w) = rnf w
+
 instance NFData ChannelId where rnf (ChannelId w) = rnf w
+
 instance NFData MonoTime where rnf (MonoTime w) = rnf w
+
 instance NFData PacketType where rnf = rwhnf
+
 instance NFData DeliveryMode where rnf = rwhnf
+
 instance NFData ChannelError where rnf = rwhnf
 
 -- Serialization
 instance NFData BitBuffer where rnf buf = rnf (toBytes buf)
+
 instance NFData Vec3 where rnf (Vec3 x y z) = rnf x `seq` rnf y `seq` rnf z
+
 instance NFData (ReadResult a) where rnf (ReadResult !_ !_) = ()
 
 -- Packet
@@ -99,16 +106,38 @@ instance (NFData a) => NFData (SequenceBuffer a) where
 
 instance NFData ReliableEndpoint where
   rnf (ReliableEndpoint ls rs ab sp rp msd mif srtt rv rto hrs lw lwi lwc ts ta tl pe bs ba) =
-    rnf ls `seq` rnf rs `seq` rnf ab `seq` rnf sp `seq` rnf rp `seq`
-    rnf msd `seq` rnf mif `seq` rnf srtt `seq` rnf rv `seq` rnf rto `seq`
-    rnf hrs `seq` rnf lw `seq` rnf lwi `seq` rnf lwc `seq`
-    rnf ts `seq` rnf ta `seq` rnf tl `seq` rnf pe `seq` rnf bs `seq` rnf ba
+    rnf ls `seq`
+      rnf rs `seq`
+        rnf ab `seq`
+          rnf sp `seq`
+            rnf rp `seq`
+              rnf msd `seq`
+                rnf mif `seq`
+                  rnf srtt `seq`
+                    rnf rv `seq`
+                      rnf rto `seq`
+                        rnf hrs `seq`
+                          rnf lw `seq`
+                            rnf lwi `seq`
+                              rnf lwc `seq`
+                                rnf ts `seq`
+                                  rnf ta `seq`
+                                    rnf tl `seq`
+                                      rnf pe `seq`
+                                        rnf bs `seq`
+                                          rnf ba
 
 -- Channel
 instance NFData ChannelConfig where
   rnf (ChannelConfig dm mms mbs bof obt mobs mrr p) =
-    rnf dm `seq` rnf mms `seq` rnf mbs `seq` rnf bof `seq`
-    rnf obt `seq` rnf mobs `seq` rnf mrr `seq` rnf p
+    rnf dm `seq`
+      rnf mms `seq`
+        rnf mbs `seq`
+          rnf bof `seq`
+            rnf obt `seq`
+              rnf mobs `seq`
+                rnf mrr `seq`
+                  rnf p
 
 instance NFData ChannelMessage where
   rnf (ChannelMessage s d t a r rel) =
@@ -116,9 +145,19 @@ instance NFData ChannelMessage where
 
 instance NFData Channel where
   rnf (Channel cfg ci ls rs sb rb pa orb oe ts tr td trt) =
-    rnf cfg `seq` rnf ci `seq` rnf ls `seq` rnf rs `seq` rnf sb `seq`
-    rnf rb `seq` rnf pa `seq` rnf orb `seq` rnf oe `seq`
-    rnf ts `seq` rnf tr `seq` rnf td `seq` rnf trt
+    rnf cfg `seq`
+      rnf ci `seq`
+        rnf ls `seq`
+          rnf rs `seq`
+            rnf sb `seq`
+              rnf rb `seq`
+                rnf pa `seq`
+                  rnf orb `seq`
+                    rnf oe `seq`
+                      rnf ts `seq`
+                        rnf tr `seq`
+                          rnf td `seq`
+                            rnf trt
 
 --------------------------------------------------------------------------------
 -- Setup helpers
@@ -240,16 +279,16 @@ main =
           env (pure (buildEndpointWithInFlight 10)) $ \ep ->
             bench "processAcks/10-inflight" $
               nf
-                (\e -> processAcks (SequenceNum 9) 0x1FF (MonoTime 50000000) e)
+                (processAcks (SequenceNum 9) 0x1FF (MonoTime 50000000))
                 ep,
           env (pure (buildEndpointWithInFlight 100)) $ \ep ->
             bench "processAcks/100-inflight" $
               nf
-                (\e -> processAcks (SequenceNum 99) maxBound (MonoTime 500000000) e)
+                (processAcks (SequenceNum 99) maxBound (MonoTime 500000000))
                 ep,
           env (pure (newReliableEndpoint 256)) $ \ep ->
             bench "updateRtt" $
-              nf (\e -> updateRtt 25.0 (updateRtt 30.0 e)) ep
+              nf (updateRtt 25.0 . updateRtt 30.0) ep
         ],
       -- Group 3: SequenceBuffer
       bgroup
@@ -286,10 +325,10 @@ main =
         "channel"
         [ env (pure (newChannel (ChannelId 0) defaultChannelConfig)) $ \ch ->
             bench "channelSend/reliable" $
-              nf (\c -> channelSend payload64 (MonoTime 1000000) c) ch,
+              nf (channelSend payload64 (MonoTime 1000000)) ch,
           env (pure (newChannel (ChannelId 0) unreliableConfig)) $ \ch ->
             bench "channelSend/unreliable" $
-              nf (\c -> channelSend payload64 (MonoTime 1000000) c) ch,
+              nf (channelSend payload64 (MonoTime 1000000)) ch,
           env (pure (newChannel (ChannelId 0) defaultChannelConfig)) $ \ch ->
             bench "onMessageReceived/ordered" $
               nf

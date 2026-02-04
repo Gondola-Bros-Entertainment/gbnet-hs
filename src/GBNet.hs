@@ -189,7 +189,6 @@ where
 import Data.Word (Word16, Word8)
 import GBNet.Channel (ChannelConfig (..), ChannelError (..), DeliveryMode (..), defaultChannelConfig, reliableOrderedConfig, reliableSequencedConfig, unreliableConfig)
 import GBNet.Class
-import GBNet.Types
 import GBNet.Config (ConfigError (..), NetworkConfig (..), SimulationConfig (..), defaultNetworkConfig, defaultSimulationConfig, validateConfig)
 import GBNet.Connection (ConnectionError (..), ConnectionState (..), DisconnectReason (..))
 import GBNet.Net
@@ -206,6 +205,7 @@ import GBNet.Simulator (NetworkSimulator (..), newNetworkSimulator, simulatorPen
 import GBNet.Socket (SocketError (..), UdpSocket)
 import GBNet.Stats (CongestionLevel (..), NetworkStats (..))
 import GBNet.TestNet
+import GBNet.Types
 import Network.Socket (SockAddr (..))
 import qualified Network.Socket as NS
 

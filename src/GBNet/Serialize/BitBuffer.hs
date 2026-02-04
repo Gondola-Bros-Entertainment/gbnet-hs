@@ -123,22 +123,24 @@ writeBits value numBits buf
               bitPos = bitPos buf + numBits
             }
   | otherwise =
-      let !startBit  = bitPos buf
-          !endBit    = startBit + numBits - 1
+      let !startBit = bitPos buf
+          !endBit = startBit + numBits - 1
           !startByte = startBit `div` bitsPerByte
-          !endByte   = endBit `div` bitsPerByte
+          !endByte = endBit `div` bitsPerByte
           !neededLen = endByte + 1
-          !existing  = bufferBytes buf
-          !curLen    = BS.length existing
-          !padded    = if neededLen > curLen
-                         then existing <> BS.replicate (neededLen - curLen) 0
-                         else existing
-          !newSlice  = BS.pack
-            [ computeByte value numBits startBit i (BS.index padded i)
-            | i <- [startByte .. endByte]
-            ]
+          !existing = bufferBytes buf
+          !curLen = BS.length existing
+          !padded =
+            if neededLen > curLen
+              then existing <> BS.replicate (neededLen - curLen) 0
+              else existing
+          !newSlice =
+            BS.pack
+              [ computeByte value numBits startBit i (BS.index padded i)
+              | i <- [startByte .. endByte]
+              ]
           !before = BS.take startByte padded
-          !after  = BS.drop (endByte + 1) padded
+          !after = BS.drop (endByte + 1) padded
        in buf
             { bufferBytes = before <> newSlice <> after,
               bitPos = startBit + numBits
@@ -150,18 +152,22 @@ writeBits value numBits buf
 -- pure arithmetic (mask/shift/OR) — no ByteString operations.
 computeByte :: Word64 -> Int -> Int -> Int -> Word8 -> Word8
 computeByte value numBits startBitPos byteIdx oldByte =
-  let !writeEnd   = startBitPos + numBits - 1
-      !byteStart  = byteIdx * bitsPerByte
-      !lo         = max byteStart startBitPos
-      !hi         = min (byteStart + msbIndex) writeEnd
-      !count      = hi - lo + 1
+  let !writeEnd = startBitPos + numBits - 1
+      !byteStart = byteIdx * bitsPerByte
+      !lo = max byteStart startBitPos
+      !hi = min (byteStart + msbIndex) writeEnd
+      !count = hi - lo + 1
       !localLoBit = msbIndex - (hi - byteStart)
       !valueBitLo = writeEnd - hi
-      !extracted  = fromIntegral ((value `shiftR` valueBitLo)
-                    .&. ((1 `shiftL` count) - 1)) :: Word8
-      !shifted    = extracted `shiftL` localLoBit
-      !mask16     = (((1 :: Word16) `shiftL` count) - 1) `shiftL` localLoBit
-      !mask       = fromIntegral mask16 :: Word8
+      !extracted =
+        fromIntegral
+          ( (value `shiftR` valueBitLo)
+              .&. ((1 `shiftL` count) - 1)
+          ) ::
+          Word8
+      !shifted = extracted `shiftL` localLoBit
+      !mask16 = (((1 :: Word16) `shiftL` count) - 1) `shiftL` localLoBit
+      !mask = fromIntegral mask16 :: Word8
    in (oldByte .&. complement mask) .|. shifted
 {-# INLINE computeByte #-}
 
