@@ -298,7 +298,7 @@ import GBNet.Config (NetworkConfig(..), defaultNetworkConfig)
 Only send changed fields:
 
 ```haskell
-import GBNet.Delta
+import GBNet.Replication.Delta
 
 instance NetworkDelta PlayerState where
   type Delta PlayerState = PlayerDelta
@@ -311,7 +311,7 @@ instance NetworkDelta PlayerState where
 Filter by area-of-interest:
 
 ```haskell
-import GBNet.Interest
+import GBNet.Replication.Interest
 
 let interest = newRadiusInterest 100.0
 if relevant interest entityPos observerPos
@@ -324,7 +324,7 @@ if relevant interest entityPos observerPos
 Fair bandwidth allocation:
 
 ```haskell
-import GBNet.Priority
+import GBNet.Replication.Priority
 
 let acc = newPriorityAccumulator
         & register playerId 10.0
@@ -337,7 +337,7 @@ let (selected, acc') = drainTop 1200 entitySize acc
 Smooth client-side rendering:
 
 ```haskell
-import GBNet.Interpolation
+import GBNet.Replication.Interpolation
 
 let buffer' = pushSnapshot serverTime state buffer
 case sampleSnapshot renderTime buffer' of
@@ -373,12 +373,13 @@ A cwnd-based controller layered alongside binary mode:
 Applications can query congestion pressure and adapt:
 
 ```haskell
-stats <- peerStats peerId peer
-case nsCongestionLevel stats of
-  CongestionNone     -> sendFreely
-  CongestionElevated -> reduceNonEssential
-  CongestionHigh     -> dropLowPriority
-  CongestionCritical -> onlySendEssential
+case peerStats peerId peer of
+  Nothing -> pure ()  -- Peer not connected
+  Just stats -> case nsCongestionLevel stats of
+    CongestionNone     -> sendFreely
+    CongestionElevated -> reduceNonEssential
+    CongestionHigh     -> dropLowPriority
+    CongestionCritical -> onlySendEssential
 ```
 
 ---
