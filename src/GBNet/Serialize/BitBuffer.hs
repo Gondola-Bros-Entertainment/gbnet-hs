@@ -42,10 +42,9 @@ module GBNet.Serialize.BitBuffer
   )
 where
 
-import Data.Bits (clearBit, setBit, shiftL, shiftR, testBit, (.&.), (.|.))
+import Data.Bits (complement, shiftL, shiftR, testBit, (.&.), (.|.))
 import qualified Data.ByteString as BS
-import Data.List (foldl')
-import Data.Word (Word64, Word8)
+import Data.Word (Word16, Word64, Word8)
 
 bitsPerByte :: Int
 bitsPerByte = 8
@@ -97,24 +96,8 @@ fromBytes bs =
 
 -- | Write a single bit (MSB-first within each byte).
 writeBit :: Bool -> BitBuffer -> BitBuffer
-writeBit bit buf =
-  let byteIndex = bitPos buf `div` bitsPerByte
-      bitOffset = bitPos buf `mod` bitsPerByte
-      currentBytes =
-        if byteIndex >= BS.length (bufferBytes buf)
-          then BS.snoc (bufferBytes buf) 0
-          else bufferBytes buf
-      currentByte = BS.index currentBytes byteIndex
-      newByte =
-        if bit
-          then setBit currentByte (msbIndex - bitOffset)
-          else clearBit currentByte (msbIndex - bitOffset)
-      (before, after) = BS.splitAt byteIndex currentBytes
-      newBytes = before `BS.append` BS.cons newByte (BS.drop 1 after)
-   in buf
-        { bufferBytes = newBytes,
-          bitPos = bitPos buf + 1
-        }
+writeBit bit = writeBits (if bit then 1 else 0) 1
+{-# INLINE writeBit #-}
 
 -- | Write N bits from a Word64 (MSB-first).
 writeBits :: Word64 -> Int -> BitBuffer -> BitBuffer
@@ -139,11 +122,48 @@ writeBits value numBits buf
             { bufferBytes = before `BS.append` padding `BS.append` newBytes `BS.append` after,
               bitPos = bitPos buf + numBits
             }
-  | otherwise = foldl' writeSingleBit buf [numBits - 1, numBits - 2 .. 0]
-  where
-    writeSingleBit :: BitBuffer -> Int -> BitBuffer
-    writeSingleBit b i = writeBit (testBit value i) b
+  | otherwise =
+      let !startBit  = bitPos buf
+          !endBit    = startBit + numBits - 1
+          !startByte = startBit `div` bitsPerByte
+          !endByte   = endBit `div` bitsPerByte
+          !neededLen = endByte + 1
+          !existing  = bufferBytes buf
+          !curLen    = BS.length existing
+          !padded    = if neededLen > curLen
+                         then existing <> BS.replicate (neededLen - curLen) 0
+                         else existing
+          !newSlice  = BS.pack
+            [ computeByte value numBits startBit i (BS.index padded i)
+            | i <- [startByte .. endByte]
+            ]
+          !before = BS.take startByte padded
+          !after  = BS.drop (endByte + 1) padded
+       in buf
+            { bufferBytes = before <> newSlice <> after,
+              bitPos = startBit + numBits
+            }
 {-# INLINE writeBits #-}
+
+-- | Compute a single byte of the buffer after merging in written bits.
+-- For each affected byte, extracts the relevant bits from the value via
+-- pure arithmetic (mask/shift/OR) — no ByteString operations.
+computeByte :: Word64 -> Int -> Int -> Int -> Word8 -> Word8
+computeByte value numBits startBitPos byteIdx oldByte =
+  let !writeEnd   = startBitPos + numBits - 1
+      !byteStart  = byteIdx * bitsPerByte
+      !lo         = max byteStart startBitPos
+      !hi         = min (byteStart + msbIndex) writeEnd
+      !count      = hi - lo + 1
+      !localLoBit = msbIndex - (hi - byteStart)
+      !valueBitLo = writeEnd - hi
+      !extracted  = fromIntegral ((value `shiftR` valueBitLo)
+                    .&. ((1 `shiftL` count) - 1)) :: Word8
+      !shifted    = extracted `shiftL` localLoBit
+      !mask16     = (((1 :: Word16) `shiftL` count) - 1) `shiftL` localLoBit
+      !mask       = fromIntegral mask16 :: Word8
+   in (oldByte .&. complement mask) .|. shifted
+{-# INLINE computeByte #-}
 
 -- | Read a single bit from the buffer.
 readBit :: BitBuffer -> Either String (ReadResult Bool)
