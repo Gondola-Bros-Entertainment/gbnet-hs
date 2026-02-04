@@ -25,7 +25,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Word (Word64)
 import Network.Socket (SockAddr)
 
--- | Monotonic time in milliseconds.
+-- | Monotonic time in nanoseconds.
 type MonoTime = Word64
 
 -- | Network errors.
@@ -37,7 +37,7 @@ data NetError
 
 -- | Monad that can provide monotonic time.
 class (Monad m) => MonadTime m where
-  -- | Get current monotonic time in milliseconds.
+  -- | Get current monotonic time in nanoseconds.
   getMonoTime :: m MonoTime
 
 -- | Monad that can perform network IO.
@@ -68,11 +68,11 @@ instance (MonadNetwork m) => MonadNetwork (StateT s m) where
   netRecv = lift netRecv
   netClose = lift netClose
 
--- | Get current monotonic time in milliseconds (IO helper).
+-- | Get current monotonic time in nanoseconds (IO helper).
 getMonoTimeIO :: IO MonoTime
 getMonoTimeIO = do
   t <- getPOSIXTime
-  pure $ round (t * 1000)
+  pure $ round (t * 1e9)
 
 -- | MonadTime instance for IO.
 instance MonadTime IO where
