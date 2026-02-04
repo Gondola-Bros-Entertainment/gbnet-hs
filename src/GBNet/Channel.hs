@@ -49,8 +49,9 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
-import Data.Word (Word16, Word64, Word8)
+import Data.Word (Word64, Word8)
 import GBNet.Reliability (MonoTime, elapsedMs)
+import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Util (sequenceGreaterThan)
 
 -- | Delivery mode for channel messages.
@@ -136,7 +137,7 @@ reliableSequencedConfig =
 
 -- | A message in the channel system.
 data ChannelMessage = ChannelMessage
-  { cmSequence :: !Word16,
+  { cmSequence :: !SequenceNum,
     cmData :: !BS.ByteString,
     cmSendTime :: !MonoTime,
     cmAcked :: !Bool,
@@ -148,14 +149,14 @@ data ChannelMessage = ChannelMessage
 -- | Channel state for message delivery.
 data Channel = Channel
   { chConfig :: !ChannelConfig,
-    chChannelId :: !Word8,
-    chLocalSequence :: !Word16,
-    chRemoteSequence :: !Word16,
-    chSendBuffer :: !(Map Word16 ChannelMessage),
+    chChannelId :: !ChannelId,
+    chLocalSequence :: !SequenceNum,
+    chRemoteSequence :: !SequenceNum,
+    chSendBuffer :: !(Map SequenceNum ChannelMessage),
     chReceiveBuffer :: !(Seq BS.ByteString), -- O(1) append via |>
-    chPendingAck :: ![Word16],
-    chOrderedReceiveBuffer :: !(Map Word16 (BS.ByteString, MonoTime)),
-    chOrderedExpected :: !Word16,
+    chPendingAck :: ![SequenceNum],
+    chOrderedReceiveBuffer :: !(Map SequenceNum (BS.ByteString, MonoTime)),
+    chOrderedExpected :: !SequenceNum,
     chTotalSent :: !Word64,
     chTotalReceived :: !Word64,
     chTotalDropped :: !Word64,
@@ -164,7 +165,7 @@ data Channel = Channel
   deriving (Show)
 
 -- | Create a new channel with the given configuration.
-newChannel :: Word8 -> ChannelConfig -> Channel
+newChannel :: ChannelId -> ChannelConfig -> Channel
 newChannel channelId config =
   Channel
     { chConfig = config,
@@ -185,7 +186,7 @@ newChannel channelId config =
 -- | Queue a message for sending.
 -- Returns 'Left ChannelBufferFull' if the buffer is full and blocking is enabled.
 -- Returns 'Left ChannelMessageTooLarge' if the message exceeds the max size.
-channelSend :: BS.ByteString -> MonoTime -> Channel -> Either ChannelError (Word16, Channel)
+channelSend :: BS.ByteString -> MonoTime -> Channel -> Either ChannelError (SequenceNum, Channel)
 channelSend payload now ch
   | BS.length payload > ccMaxMessageSize (chConfig ch) = Left ChannelMessageTooLarge
   | bufferFull && ccBlockOnFull (chConfig ch) = Left ChannelBufferFull
@@ -268,7 +269,7 @@ getRetransmitMessages now rtoMs ch
       | otherwise = (acc, c)
 
 -- | Process a received message. Returns updated channel.
-onMessageReceived :: Word16 -> BS.ByteString -> MonoTime -> Channel -> Channel
+onMessageReceived :: SequenceNum -> BS.ByteString -> MonoTime -> Channel -> Channel
 onMessageReceived seqNum payload now ch =
   case ccDeliveryMode (chConfig ch) of
     Unreliable ->
@@ -323,7 +324,7 @@ deliverOrdered payload ch =
    in flushOrderedBuffer ch'
 
 -- | Buffer an out-of-order message for later delivery.
-bufferOrdered :: Word16 -> BS.ByteString -> MonoTime -> Channel -> Channel
+bufferOrdered :: SequenceNum -> BS.ByteString -> MonoTime -> Channel -> Channel
 bufferOrdered seqNum payload now ch
   | Map.size (chOrderedReceiveBuffer ch) >= ccMaxOrderedBufferSize (chConfig ch) =
       ch {chTotalDropped = chTotalDropped ch + 1}
@@ -346,7 +347,7 @@ flushOrderedBuffer ch =
        in flushOrderedBuffer ch'
 
 -- | Acknowledge a message by sequence number.
-acknowledgeMessage :: Word16 -> Channel -> Channel
+acknowledgeMessage :: SequenceNum -> Channel -> Channel
 acknowledgeMessage seqNum ch =
   ch {chSendBuffer = Map.adjust (\msg -> msg {cmAcked = True}) seqNum (chSendBuffer ch)}
 
@@ -355,7 +356,7 @@ channelReceive :: Channel -> ([BS.ByteString], Channel)
 channelReceive ch = (toList (chReceiveBuffer ch), ch {chReceiveBuffer = Seq.empty})
 
 -- | Take pending ack sequence numbers.
-takePendingAcks :: Channel -> ([Word16], Channel)
+takePendingAcks :: Channel -> ([SequenceNum], Channel)
 takePendingAcks ch = (chPendingAck ch, ch {chPendingAck = []})
 
 -- | Update channel state (flush old ordered messages, clean up acked).

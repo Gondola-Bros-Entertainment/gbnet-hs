@@ -59,6 +59,7 @@ import Data.Vector.Unboxed (Vector)
 import qualified Data.Vector.Unboxed as UV
 import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Class (MonoTime)
+import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Util (sequenceDiff, sequenceGreaterThan)
 
 -- Constants
@@ -102,10 +103,10 @@ elapsedMs start now = fromIntegral (now - start) / 1e6
 
 -- SequenceBuffer
 
--- | Circular buffer indexed by Word16 sequence numbers.
+-- | Circular buffer indexed by SequenceNum (Word16 under the hood).
 data SequenceBuffer a = SequenceBuffer
-  { sbEntries :: !(Map Word16 (Word16, a)),
-    sbSequence :: !Word16,
+  { sbEntries :: !(Map Word16 (SequenceNum, a)),
+    sbSequence :: !SequenceNum,
     sbSize :: !Int
   }
   deriving (Show)
@@ -118,7 +119,7 @@ newSequenceBuffer size =
       sbSize = size
     }
 
-sbInsert :: Word16 -> a -> SequenceBuffer a -> SequenceBuffer a
+sbInsert :: SequenceNum -> a -> SequenceBuffer a -> SequenceBuffer a
 sbInsert seqNum val buf
   | sequenceGreaterThan seqNum (sbSequence buf) =
       let diff = fromIntegral (sequenceDiff seqNum (sbSequence buf)) :: Int
@@ -135,7 +136,7 @@ sbInsert seqNum val buf
       let idx = fromIntegral seqNum `mod` sbSize buf
        in buf {sbEntries = Map.insert (fromIntegral idx) (seqNum, val) (sbEntries buf)}
 
-clearRange :: Word16 -> Int -> SequenceBuffer a -> SequenceBuffer a
+clearRange :: SequenceNum -> Int -> SequenceBuffer a -> SequenceBuffer a
 clearRange currentSeq diff buf = go 0 (sbEntries buf)
   where
     go i entries
@@ -145,14 +146,14 @@ clearRange currentSeq diff buf = go 0 (sbEntries buf)
               idx = fromIntegral s `mod` sbSize buf
            in go (i + 1) (Map.delete (fromIntegral idx) entries)
 
-sbExists :: Word16 -> SequenceBuffer a -> Bool
+sbExists :: SequenceNum -> SequenceBuffer a -> Bool
 sbExists seqNum buf =
   let idx = fromIntegral seqNum `mod` sbSize buf
    in case Map.lookup (fromIntegral idx) (sbEntries buf) of
         Just (storedSeq, _) -> storedSeq == seqNum
         Nothing -> False
 
-sbGet :: Word16 -> SequenceBuffer a -> Maybe a
+sbGet :: SequenceNum -> SequenceBuffer a -> Maybe a
 sbGet seqNum buf =
   let idx = fromIntegral seqNum `mod` sbSize buf
    in case Map.lookup (fromIntegral idx) (sbEntries buf) of
@@ -162,8 +163,8 @@ sbGet seqNum buf =
 -- SentPacketRecord
 
 data SentPacketRecord = SentPacketRecord
-  { sprChannelId :: !Word8,
-    sprChannelSequence :: !Word16,
+  { sprChannelId :: !ChannelId,
+    sprChannelSequence :: !SequenceNum,
     sprSendTime :: !MonoTime,
     sprSize :: !Int,
     sprNackCount :: !Word8
@@ -173,13 +174,13 @@ data SentPacketRecord = SentPacketRecord
 -- ReliableEndpoint
 
 -- | Result of processing ACKs: (acked pairs, fast retransmit candidates).
-type AckResult = ([(Word8, Word16)], [(Word8, Word16)])
+type AckResult = ([(ChannelId, SequenceNum)], [(ChannelId, SequenceNum)])
 
 data ReliableEndpoint = ReliableEndpoint
-  { reLocalSequence :: !Word16,
-    reRemoteSequence :: !Word16,
+  { reLocalSequence :: !SequenceNum,
+    reRemoteSequence :: !SequenceNum,
     reAckBits :: !Word64,
-    reSentPackets :: !(Map Word16 SentPacketRecord),
+    reSentPackets :: !(Map SequenceNum SentPacketRecord),
     reReceivedPackets :: !(SequenceBuffer Bool),
     reMaxSequenceDistance :: !Word16,
     reMaxInFlight :: !Int,
@@ -227,16 +228,16 @@ newReliableEndpoint bufferSize =
 withMaxInFlight :: Int -> ReliableEndpoint -> ReliableEndpoint
 withMaxInFlight maxFlight ep = ep {reMaxInFlight = maxFlight}
 
-nextSequence :: ReliableEndpoint -> (Word16, ReliableEndpoint)
+nextSequence :: ReliableEndpoint -> (SequenceNum, ReliableEndpoint)
 nextSequence ep =
   let s = reLocalSequence ep
    in (s, ep {reLocalSequence = s + 1})
 
 onPacketSent ::
-  Word16 ->
+  SequenceNum ->
   MonoTime ->
-  Word8 ->
-  Word16 ->
+  ChannelId ->
+  SequenceNum ->
   Int ->
   ReliableEndpoint ->
   ReliableEndpoint
@@ -274,7 +275,7 @@ evictWorstInFlight ep =
       | sprSendTime r < bestT = Just (s, sprSendTime r)
       | otherwise = Just (bestS, bestT)
 
-onPacketReceived :: Word16 -> ReliableEndpoint -> ReliableEndpoint
+onPacketReceived :: SequenceNum -> ReliableEndpoint -> ReliableEndpoint
 onPacketReceived seqNum ep =
   let distance = fromIntegral (abs (sequenceDiff seqNum (reRemoteSequence ep))) :: Word32
    in if distance > fromIntegral (reMaxSequenceDistance ep)
@@ -302,14 +303,14 @@ onPacketReceived seqNum ep =
                         then ep' {reAckBits = reAckBits ep' .|. (1 `shiftL` (fromIntegral diff - 1))}
                         else ep'
 
-processAcks :: Word16 -> Word64 -> MonoTime -> ReliableEndpoint -> (AckResult, ReliableEndpoint)
+processAcks :: SequenceNum -> Word64 -> MonoTime -> ReliableEndpoint -> (AckResult, ReliableEndpoint)
 processAcks ackSeq ackBitsVal now ep =
   let directAck = [ackSeq | Map.member ackSeq (reSentPackets ep)]
       bitsAcks =
-        [ ackSeq - (i + 1)
+        [ ackSeq - SequenceNum (i + 1)
         | i <- [0 .. ackBitsWindow - 1],
           (ackBitsVal .&. (1 `shiftL` fromIntegral i)) /= 0,
-          Map.member (ackSeq - (i + 1)) (reSentPackets ep)
+          Map.member (ackSeq - SequenceNum (i + 1)) (reSentPackets ep)
         ]
       ackedSeqs = directAck ++ bitsAcks
       (acked, ep') = foldl' (ackOneWithTime now) ([], ep) ackedSeqs
@@ -319,9 +320,9 @@ processAcks ackSeq ackBitsVal now ep =
 
 ackOneWithTime ::
   MonoTime ->
-  ([(Word8, Word16)], ReliableEndpoint) ->
-  Word16 ->
-  ([(Word8, Word16)], ReliableEndpoint)
+  ([(ChannelId, SequenceNum)], ReliableEndpoint) ->
+  SequenceNum ->
+  ([(ChannelId, SequenceNum)], ReliableEndpoint)
 ackOneWithTime now (pairs, ep) seqNum =
   case Map.lookup seqNum (reSentPackets ep) of
     Nothing -> (pairs, ep)
@@ -339,11 +340,11 @@ ackOneWithTime now (pairs, ep) seqNum =
        in (pair : pairs, ep'')
 
 nackOne ::
-  Word16 ->
+  SequenceNum ->
   Word64 ->
-  ([(Word8, Word16)], ReliableEndpoint) ->
-  Word16 ->
-  ([(Word8, Word16)], ReliableEndpoint)
+  ([(ChannelId, SequenceNum)], ReliableEndpoint) ->
+  SequenceNum ->
+  ([(ChannelId, SequenceNum)], ReliableEndpoint)
 nackOne ackSeq ackBitsVal (retransmits, ep) seqNum
   | not (sequenceGreaterThan ackSeq seqNum) = (retransmits, ep)
   | otherwise =
@@ -401,7 +402,7 @@ recordLossSample lost ep =
           reLossWindowCount = newCount
         }
 
-getAckInfo :: ReliableEndpoint -> (Word16, Word64)
+getAckInfo :: ReliableEndpoint -> (SequenceNum, Word64)
 getAckInfo ep = (reRemoteSequence ep, reAckBits ep)
 {-# INLINE getAckInfo #-}
 
@@ -421,7 +422,7 @@ packetLossPercent ep
           lost = UV.length $ UV.filter id $ UV.take count (reLossWindow ep)
        in fromIntegral lost / fromIntegral count
 
-isInFlight :: Word16 -> ReliableEndpoint -> Bool
+isInFlight :: SequenceNum -> ReliableEndpoint -> Bool
 isInFlight seqNum ep = Map.member seqNum (reSentPackets ep)
 {-# INLINE isInFlight #-}
 

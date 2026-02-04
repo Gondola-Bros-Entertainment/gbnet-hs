@@ -42,6 +42,7 @@ module GBNet.Fragment
   )
 where
 
+import Control.Monad (when)
 import Control.Monad.State.Strict (gets, modify', runState)
 import Data.Bits (shiftL, shiftR, (.&.))
 import qualified Data.ByteString as BS
@@ -51,6 +52,7 @@ import qualified Data.Map.Strict as Map
 import Data.Ord (comparing)
 import Data.Word (Word32, Word8)
 import GBNet.Reliability (MonoTime, elapsedMs)
+import GBNet.Types (MessageId (..))
 
 -- Constants
 
@@ -84,7 +86,7 @@ mtuConvergenceThreshold = 1
 
 -- | Fragment header.
 data FragmentHeader = FragmentHeader
-  { fhMessageId :: !Word32,
+  { fhMessageId :: !MessageId,
     fhFragmentIndex :: !Word8,
     fhFragmentCount :: !Word8
   }
@@ -93,7 +95,7 @@ data FragmentHeader = FragmentHeader
 -- | Serialize fragment header to bytes.
 serializeFragmentHeader :: FragmentHeader -> BS.ByteString
 serializeFragmentHeader hdr =
-  let msgId = fhMessageId hdr
+  let msgId = unMessageId (fhMessageId hdr)
    in BS.pack
         [ fromIntegral ((msgId `shiftR` 24) .&. 0xFF),
           fromIntegral ((msgId `shiftR` 16) .&. 0xFF),
@@ -112,7 +114,7 @@ deserializeFragmentHeader bs
           b1 = fromIntegral (BS.index bs 1) :: Word32
           b2 = fromIntegral (BS.index bs 2) :: Word32
           b3 = fromIntegral (BS.index bs 3) :: Word32
-          msgId = (b0 `shiftL` 24) + (b1 `shiftL` 16) + (b2 `shiftL` 8) + b3
+          msgId = MessageId $ (b0 `shiftL` 24) + (b1 `shiftL` 16) + (b2 `shiftL` 8) + b3
        in Just
             FragmentHeader
               { fhMessageId = msgId,
@@ -126,7 +128,7 @@ data FragmentError
   deriving (Eq, Show)
 
 -- | Split a message into fragments.
-fragmentMessage :: Word32 -> BS.ByteString -> Int -> Either FragmentError [BS.ByteString]
+fragmentMessage :: MessageId -> BS.ByteString -> Int -> Either FragmentError [BS.ByteString]
 fragmentMessage messageId dat maxFragmentPayload
   | BS.null dat || maxFragmentPayload <= 0 = Right []
   | fragCount > maxFragmentCount = Left TooManyFragments
@@ -193,7 +195,7 @@ assembleFragments buf
 
 -- | Fragment reassembler managing multiple in-progress messages.
 data FragmentAssembler = FragmentAssembler
-  { faBuffers :: !(Map Word32 FragmentBuffer),
+  { faBuffers :: !(Map MessageId FragmentBuffer),
     faTimeoutMs :: !Double,
     faMaxBufferSize :: !Int,
     faCurrentBufferSize :: !Int
@@ -230,9 +232,8 @@ processFragment dat now = runState $ do
           -- Enforce memory limit
           currentSize <- gets faCurrentBufferSize
           maxSize <- gets faMaxBufferSize
-          if currentSize + fragSize > maxSize
-            then modify' expireOldest
-            else pure ()
+          when (currentSize + fragSize > maxSize) $
+            modify' expireOldest
           -- Get or create buffer
           buf <- gets $ \s ->
             case Map.lookup msgId (faBuffers s) of
@@ -278,7 +279,7 @@ expireOldest asm =
           faCurrentBufferSize = faCurrentBufferSize asm - fbTotalSize oldestBuf
         }
   where
-    findOldest :: Map Word32 FragmentBuffer -> Maybe (Word32, FragmentBuffer)
+    findOldest :: Map MessageId FragmentBuffer -> Maybe (MessageId, FragmentBuffer)
     findOldest m =
       case Map.toList m of
         [] -> Nothing

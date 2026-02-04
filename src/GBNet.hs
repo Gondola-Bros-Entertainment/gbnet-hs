@@ -26,8 +26,14 @@ module GBNet
   ( -- * Effect Classes
     MonadTime (..),
     MonadNetwork (..),
-    MonoTime,
+    MonoTime (..),
     NetError (..),
+
+    -- * Domain Types
+    ChannelId (..),
+    channelIdToInt,
+    SequenceNum (..),
+    MessageId (..),
 
     -- * Network Monad
     NetT,
@@ -179,6 +185,7 @@ where
 import Data.Word (Word16, Word8)
 import GBNet.Channel (ChannelConfig (..), ChannelError (..), DeliveryMode (..), defaultChannelConfig, reliableOrderedConfig, reliableSequencedConfig, unreliableConfig)
 import GBNet.Class
+import GBNet.Types
 import GBNet.Config (ConfigError (..), NetworkConfig (..), SimulationConfig (..), defaultNetworkConfig, defaultSimulationConfig, validateConfig)
 import GBNet.Connection (ConnectionError (..), ConnectionState (..), DisconnectReason (..))
 import GBNet.Net

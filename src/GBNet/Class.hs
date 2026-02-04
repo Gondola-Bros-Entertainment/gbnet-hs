@@ -1,3 +1,6 @@
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 -- |
 -- Module      : GBNet.Class
 -- Description : Effect abstractions for networking
@@ -8,7 +11,7 @@
 -- - Clean separation of pure logic from IO
 module GBNet.Class
   ( -- * Time
-    MonoTime,
+    MonoTime (..),
     MonadTime (..),
     getMonoTimeIO,
 
@@ -26,7 +29,10 @@ import Data.Word (Word64)
 import Network.Socket (SockAddr)
 
 -- | Monotonic time in nanoseconds.
-type MonoTime = Word64
+-- Derives 'Num' because arithmetic on timestamps is pervasive.
+newtype MonoTime = MonoTime { unMonoTime :: Word64 }
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (Num, Bounded, Enum, Real, Integral)
 
 -- | Network errors.
 data NetError
@@ -70,7 +76,7 @@ instance (MonadNetwork m) => MonadNetwork (StateT s m) where
 
 -- | Get current monotonic time in nanoseconds (IO helper).
 getMonoTimeIO :: IO MonoTime
-getMonoTimeIO = getMonotonicTimeNSec
+getMonoTimeIO = MonoTime <$> getMonotonicTimeNSec
 
 -- | MonadTime instance for IO.
 instance MonadTime IO where

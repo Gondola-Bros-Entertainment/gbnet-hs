@@ -44,7 +44,7 @@ import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word64)
-import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime, NetError (..))
+import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime (..), NetError (..))
 import Network.Socket (SockAddr)
 import System.Random (StdGen, mkStdGen, randomR)
 
@@ -126,7 +126,7 @@ instance MonadNetwork TestNet where
           else do
             -- Calculate delivery time
             let (jitter, rng'') = randomR (0, tncJitterMs cfg) rng'
-                deliverAt = tnsCurrentTime st + tncLatencyMs cfg + jitter
+                deliverAt = tnsCurrentTime st + MonoTime (tncLatencyMs cfg) + MonoTime jitter
                 pkt =
                   InFlightPacket
                     { ifpFrom = tnsLocalAddr st,

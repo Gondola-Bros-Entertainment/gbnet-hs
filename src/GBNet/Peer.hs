@@ -75,8 +75,9 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import Data.Word (Word16, Word64, Word8)
-import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime)
+import Data.Word (Word64, Word8)
+import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime (..))
+import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Config (NetworkConfig (..))
 import GBNet.Connection
   ( Connection,
@@ -136,7 +137,7 @@ data PeerEvent
   | -- | A peer disconnected
     PeerDisconnected !PeerId !DisconnectReason
   | -- | Received a message from a peer
-    PeerMessage !PeerId !Word8 !BS.ByteString
+    PeerMessage !PeerId !ChannelId !BS.ByteString
   | -- | A peer's address changed (connection migration)
     PeerMigrated !PeerId !PeerId -- old, new
   deriving (Eq, Show)
@@ -242,7 +243,7 @@ newPeerState ::
   MonoTime ->
   NetPeer
 newPeerState sock localAddr config now =
-  let rng0 = now
+  let rng0 = unMonoTime now
       (secret, rng1) = generateCookieSecret rng0
    in NetPeer
         { npSocket = sock,
@@ -295,14 +296,13 @@ withConnection pid f peer = peer {npConnections = Map.adjust f pid (npConnection
 
 -- | Decode channel sequence from payload bytes.
 -- Returns (channelSeq, remaining data) or Nothing if too short.
-decodeChannelSeq :: BS.ByteString -> Maybe (Word16, BS.ByteString)
+decodeChannelSeq :: BS.ByteString -> Maybe (SequenceNum, BS.ByteString)
 decodeChannelSeq bs
   | BS.length bs < 2 = Nothing
   | otherwise =
-      let chSeq =
+      let chSeq = SequenceNum $
             (fromIntegral (BS.index bs 0) `shiftL` 8)
-              .|. fromIntegral (BS.index bs 1) ::
-              Word16
+              .|. fromIntegral (BS.index bs 1)
        in Just (chSeq, BS.drop 2 bs)
 {-# INLINE decodeChannelSeq #-}
 
@@ -472,7 +472,7 @@ peerShutdownM peer = do
 -- @
 peerTick ::
   (MonadNetwork m) =>
-  [(Word8, BS.ByteString)] ->
+  [(ChannelId, BS.ByteString)] ->
   NetPeer ->
   m ([PeerEvent], NetPeer)
 peerTick messages peer = do
@@ -718,9 +718,9 @@ payloadChannelMask :: Word8
 payloadChannelMask = 0x07
 
 -- | Decode payload header byte.
-decodePayloadHeader :: Word8 -> (Word8, Bool)
+decodePayloadHeader :: Word8 -> (ChannelId, Bool)
 decodePayloadHeader b =
-  let channel = b .&. payloadChannelMask
+  let channel = ChannelId (b .&. payloadChannelMask)
       isFragment = (b .&. payloadFragmentFlag) /= 0
    in (channel, isFragment)
 {-# INLINE decodePayloadHeader #-}
@@ -767,7 +767,7 @@ handlePayloadS peerId pkt now = do
 
 -- | Handle a fragment, reassembling if complete (State version).
 -- After reassembly, routes through the channel system for ordering/dedup.
-handleFragmentS :: PeerId -> Word8 -> BS.ByteString -> MonoTime -> State NetPeer [PeerEvent]
+handleFragmentS :: PeerId -> ChannelId -> BS.ByteString -> MonoTime -> State NetPeer [PeerEvent]
 handleFragmentS peerId channel fragData now = do
   assemblers <- gets npFragmentAssemblers
   let assembler =
@@ -880,8 +880,9 @@ updateConnectionsS now = do
     collectFromChannels peerId ch maxCh conn acc
       | ch >= maxCh = (acc, conn)
       | otherwise =
-          let (msgs, conn') = Conn.receiveMessage ch conn
-              evts = map (PeerMessage peerId ch) msgs
+          let chId = ChannelId ch
+              (msgs, conn') = Conn.receiveMessage chId conn
+              evts = map (PeerMessage peerId chId) msgs
            in collectFromChannels peerId (ch + 1) maxCh conn' (evts ++ acc)
 
 -- | Retry pending outbound connections (pure).
@@ -964,7 +965,7 @@ sockAddrToKey addr =
 -- | Send a message to a connected peer.
 peerSend ::
   PeerId ->
-  Word8 ->
+  ChannelId ->
   BS.ByteString ->
   MonoTime ->
   NetPeer ->
@@ -981,7 +982,7 @@ peerSend peerId channel dat now peer =
 -- | Broadcast a message to all connected peers.
 -- This queues the message and drains connection queues so packets are ready to send.
 peerBroadcast ::
-  Word8 ->
+  ChannelId ->
   BS.ByteString ->
   Maybe PeerId ->
   MonoTime ->

@@ -17,6 +17,7 @@ module GBNet.Simulator
   )
 where
 
+import Control.Monad (when)
 import Control.Monad.State.Strict (State, gets, modify', runState)
 import Data.Bits (shiftR, xor, (.&.))
 import qualified Data.ByteString as BS
@@ -25,7 +26,8 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word64)
 import GBNet.Config (SimulationConfig (..))
-import GBNet.Reliability (MonoTime, elapsedMs)
+import GBNet.Class (MonoTime (..))
+import GBNet.Reliability (elapsedMs)
 
 -- | Maximum extra delay (ms) applied to out-of-order packets.
 outOfOrderMaxDelayMs :: Double
@@ -65,7 +67,7 @@ newNetworkSimulator config now =
       nsDelayedPackets = Seq.empty,
       nsTokenBucketTokens = 0.0,
       nsLastTokenRefill = now,
-      nsRngState = now -- Use time as initial seed
+      nsRngState = unMonoTime now -- Use time as initial seed
     }
 
 -- | Process an outgoing packet through the simulator.
@@ -143,18 +145,16 @@ simulatorProcessSend dat addr now =
             -- Handle duplicates
             r5 <- nextRandomS
             let dupChance = realToFrac (simDuplicateChance config) :: Double
-            if dupChance > 0.0 && randomDouble r5 < dupChance
-              then do
-                let dupDelayMs = delayMs + randomDouble r5 * duplicateJitterMs
-                    dupDeliverAt = now + round (dupDelayMs * 1e6)
-                    dupPacket =
-                      DelayedPacket
-                        { dpData = dat,
-                          dpAddr = addr,
-                          dpDeliverAt = dupDeliverAt
-                        }
-                modify' $ \s -> s {nsDelayedPackets = nsDelayedPackets s Seq.|> dupPacket}
-              else pure ()
+            when (dupChance > 0.0 && randomDouble r5 < dupChance) $ do
+              let dupDelayMs = delayMs + randomDouble r5 * duplicateJitterMs
+                  dupDeliverAt = now + round (dupDelayMs * 1e6)
+                  dupPacket =
+                    DelayedPacket
+                      { dpData = dat,
+                        dpAddr = addr,
+                        dpDeliverAt = dupDeliverAt
+                      }
+              modify' $ \s -> s {nsDelayedPackets = nsDelayedPackets s Seq.|> dupPacket}
             pure immediate
 
 -- | Retrieve packets ready for delivery.

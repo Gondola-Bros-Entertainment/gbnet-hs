@@ -46,6 +46,7 @@ library
     GBNet.Replication.Priority
     GBNet.Replication.Interpolation
     GBNet.Class
+    GBNet.Types
     GBNet.TestNet
     GBNet.Net
     GBNet.Net.IO

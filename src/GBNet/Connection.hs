@@ -57,6 +57,7 @@ module GBNet.Connection
   )
 where
 
+import Control.Monad (when)
 import Control.Monad.State.Strict (State, execState, gets, modify')
 import Data.Bits (shiftR, (.&.))
 import qualified Data.ByteString as BS
@@ -66,8 +67,9 @@ import Data.List (foldl', sortBy)
 import Data.Ord (Down (..), comparing)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import Data.Word (Word16, Word32, Word64, Word8)
+import Data.Word (Word32, Word64, Word8)
 import GBNet.Channel (Channel, ChannelError (..), ChannelMessage (..))
+import GBNet.Types (ChannelId (..), SequenceNum (..), channelIdToInt)
 import qualified GBNet.Channel as Channel
 import GBNet.Config (NetworkConfig (..))
 import GBNet.Congestion
@@ -149,7 +151,7 @@ data ConnectionError
   | ErrTimeout
   | ErrProtocolMismatch
   | ErrInvalidPacket
-  | ErrInvalidChannel Word8
+  | ErrInvalidChannel ChannelId
   | ErrChannelError ChannelError
   | ErrMessageTooLarge
   deriving (Eq, Show)
@@ -176,8 +178,8 @@ data Connection = Connection
     connRequestTime :: !(Maybe MonoTime),
     connRetryCount :: !Int,
     -- Sequences
-    connLocalSeq :: !Word16,
-    connRemoteSeq :: !Word16,
+    connLocalSeq :: !SequenceNum,
+    connRemoteSeq :: !SequenceNum,
     -- Subsystems
     connReliability :: !ReliableEndpoint,
     connChannels :: !(IntMap Channel),
@@ -211,7 +213,7 @@ newConnection config clientSalt now =
       defaultCfg = ncDefaultChannelConfig config
       -- Pad custom configs with defaults, then take exactly numChannels
       configs = take numChannels $ ncChannelConfigs config ++ repeat defaultCfg
-      channels = IntMap.fromList $ zip [0 ..] $ zipWith Channel.newChannel [0 ..] configs
+      channels = IntMap.fromList $ zip [0 ..] $ zipWith Channel.newChannel (map ChannelId [0 ..]) configs
       -- Sort channel indices by priority (highest first)
       -- Zip indices with configs, sort by priority, extract indices
       priorityOrder =
@@ -306,7 +308,7 @@ disconnect reason now conn
             }
 
 -- | Send a message on a channel.
-sendMessage :: Word8 -> BS.ByteString -> MonoTime -> Connection -> Either ConnectionError Connection
+sendMessage :: ChannelId -> BS.ByteString -> MonoTime -> Connection -> Either ConnectionError Connection
 sendMessage channelId payload now conn
   | connState conn /= Connected = Left ErrNotConnected
   | otherwise =
@@ -318,10 +320,10 @@ sendMessage channelId payload now conn
             Right (_msgSeq, channel') ->
               Right $ modifyChannel idx (const channel') conn
   where
-    idx = fromIntegral channelId
+    idx = channelIdToInt channelId
 
 -- | Receive all pending messages from a channel.
-receiveMessage :: Word8 -> Connection -> ([BS.ByteString], Connection)
+receiveMessage :: ChannelId -> Connection -> ([BS.ByteString], Connection)
 receiveMessage channelId conn =
   case IntMap.lookup idx (connChannels conn) of
     Nothing -> ([], conn)
@@ -329,16 +331,16 @@ receiveMessage channelId conn =
       let (msgs, channel') = Channel.channelReceive channel
        in (msgs, modifyChannel idx (const channel') conn)
   where
-    idx = fromIntegral channelId
+    idx = channelIdToInt channelId
 
 -- | Route an incoming payload through the appropriate channel.
-receiveIncomingPayload :: Word8 -> Word16 -> BS.ByteString -> MonoTime -> Connection -> Connection
+receiveIncomingPayload :: ChannelId -> SequenceNum -> BS.ByteString -> MonoTime -> Connection -> Connection
 receiveIncomingPayload channelId chSeq payload now conn =
   case IntMap.lookup idx (connChannels conn) of
     Nothing -> conn
     Just _ -> modifyChannel idx (Channel.onMessageReceived chSeq payload now) conn
   where
-    idx = fromIntegral channelId
+    idx = channelIdToInt channelId
 
 -- | Create a packet header (increments local sequence).
 createHeader :: Connection -> (PacketHeader, Connection)
@@ -388,9 +390,8 @@ processIncomingHeader header now = execState $ do
 
   -- Update remote sequence if newer
   remoteSeq <- gets connRemoteSeq
-  if sequenceGreaterThan (sequenceNum header) remoteSeq
-    then modify' $ \c -> c {connRemoteSeq = sequenceNum header}
-    else pure ()
+  when (sequenceGreaterThan (sequenceNum header) remoteSeq) $
+    modify' $ \c -> c {connRemoteSeq = sequenceNum header}
 
   -- Process ACKs (extend 32-bit wire format to 64-bit)
   rel <- gets connReliability
@@ -414,7 +415,7 @@ processIncomingHeader header now = execState $ do
     Nothing -> pure ()
 
   -- Acknowledge messages on channels
-  mapM_ (\(chId, chSeq) -> modify' $ modifyChannel (fromIntegral chId) (Channel.acknowledgeMessage chSeq)) ackedPairs
+  mapM_ (\(chId, chSeq) -> modify' $ modifyChannel (channelIdToInt chId) (Channel.acknowledgeMessage chSeq)) ackedPairs
 
 -- | Update connection state (called each tick).
 updateTick :: MonoTime -> Connection -> Either ConnectionError Connection
@@ -483,9 +484,8 @@ updateConnectedS now = do
   lastSend <- gets connLastSendTime
   let timeSinceSend = elapsedMs lastSend now
       keepaliveMs = ncKeepaliveIntervalMs cfg
-  if timeSinceSend > keepaliveMs
-    then modify' sendKeepalive
-    else pure ()
+  when (timeSinceSend > keepaliveMs) $
+    modify' sendKeepalive
 
   -- Process channel outgoing messages
   modify' (processChannelOutput now)
@@ -496,9 +496,8 @@ updateConnectedS now = do
   -- Send AckOnly if needed
   pending <- gets connPendingAck
   dataSent <- gets connDataSentThisTick
-  if pending && not dataSent
-    then modify' sendAckOnly
-    else pure ()
+  when (pending && not dataSent) $
+    modify' sendAckOnly
 
   -- Compute congestion level (worst of binary and window-based)
   cong'' <- gets connCongestion
@@ -553,12 +552,12 @@ processChannelMessages now conn chIdx =
               Nothing -> conn
               Just (msg, channel') ->
                 let msgData = cmData msg
-                    msgSeq = cmSequence msg
+                    msgSeqRaw = unSequenceNum (cmSequence msg)
                     -- Prepend payload header: channel (3 bits) + is_fragment (1 bit)
                     -- Format: [headerByte:1][channelSeqHi:1][channelSeqLo:1][msgData:N]
                     headerByte = fromIntegral chIdx .&. 0x07 -- Not a fragment
-                    seqHi = fromIntegral (msgSeq `shiftR` 8) :: Word8
-                    seqLo = fromIntegral (msgSeq .&. 0xFF) :: Word8
+                    seqHi = fromIntegral (msgSeqRaw `shiftR` 8) :: Word8
+                    seqLo = fromIntegral (msgSeqRaw .&. 0xFF) :: Word8
                     wireData = BS.cons headerByte $ BS.cons seqHi $ BS.cons seqLo msgData
                     header = createHeaderInternal conn
                     pkt =
@@ -577,8 +576,8 @@ processChannelMessages now conn chIdx =
                           Rel.onPacketSent
                             (connLocalSeq conn)
                             now
-                            (fromIntegral chIdx)
-                            msgSeq
+                            (ChannelId (fromIntegral chIdx))
+                            (cmSequence msg)
                             (BS.length wireData)
                             (connReliability conn)
                         else connReliability conn

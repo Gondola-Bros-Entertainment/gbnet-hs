@@ -23,7 +23,7 @@ module GBNet.Packet
 where
 
 import qualified Data.ByteString as BS
-import Data.Word (Word16, Word32)
+import Data.Word (Word32)
 import GBNet.Serialize.BitBuffer
   ( BitReader (..),
     ReadResult (..),
@@ -40,6 +40,7 @@ import GBNet.Serialize.Class
     packetTypeBitWidth,
     runDeserialize,
   )
+import GBNet.Types (SequenceNum (..))
 
 -- | Header size in bits (4 + 16 + 16 + 32 = 68).
 packetHeaderBitSize :: Int
@@ -82,9 +83,9 @@ data PacketHeader = PacketHeader
   { -- | 4 bits
     packetType :: !PacketType,
     -- | 16 bits
-    sequenceNum :: !Word16,
+    sequenceNum :: !SequenceNum,
     -- | 16 bits - most recent received sequence
-    ack :: !Word16,
+    ack :: !SequenceNum,
     -- | 32 bits - preceding 32 acks
     ackBitfield :: !Word32
   }

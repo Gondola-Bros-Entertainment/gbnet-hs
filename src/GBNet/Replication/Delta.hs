@@ -42,6 +42,7 @@ module GBNet.Replication.Delta
 where
 
 import qualified Data.ByteString as BS
+import Data.Int (Int32)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word16)
@@ -58,7 +59,6 @@ import GBNet.Serialize.Class
   ( BitDeserialize (..),
     BitSerialize (..),
   )
-import GBNet.Util (sequenceDiff)
 
 -- | Sequence number used to identify baseline snapshots on the wire.
 type BaselineSeq = Word16
@@ -66,6 +66,10 @@ type BaselineSeq = Word16
 -- | Sentinel value indicating no baseline is available (full state required).
 noBaseline :: BaselineSeq
 noBaseline = maxBound
+
+-- | Signed difference between two baseline sequence numbers with wraparound.
+baselineSeqDiff :: BaselineSeq -> BaselineSeq -> Int32
+baselineSeqDiff s1 s2 = fromIntegral (s1 - s2 :: Word16)
 
 -- | Wire header size for baseline sequence.
 baselineSeqBits :: Int
@@ -169,7 +173,7 @@ deltaOnAck seq' tracker =
       let (ackSeq, snapshot) = Seq.index (dtPending tracker) idx
           -- Drop everything older than the acked position
           pending' =
-            Seq.filter (\(s, _) -> sequenceDiff s ackSeq >= 0) $
+            Seq.filter (\(s, _) -> baselineSeqDiff s ackSeq >= 0) $
               Seq.drop (idx + 1) (dtPending tracker)
        in tracker
             { dtPending = pending',

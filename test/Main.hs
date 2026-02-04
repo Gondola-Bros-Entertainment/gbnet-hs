@@ -11,12 +11,14 @@ import qualified Data.ByteString as BS
 import Data.Int (Int16, Int32, Int64, Int8)
 import qualified Data.Text as T
 import Data.Word (Word16, Word32, Word64, Word8)
+import GBNet.Class (MonoTime (..))
 import GBNet.Config (NetworkConfig (..), defaultNetworkConfig)
 import GBNet.Congestion
 import GBNet.Connection (DisconnectReason (..))
 import GBNet.Packet
 import GBNet.Peer
 import GBNet.Reliability
+import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Replication.Interest
 import GBNet.Replication.Interpolation
 import GBNet.Replication.Priority
@@ -686,75 +688,75 @@ testBitWidthRoundTrip = do
 testSequenceGreaterThan :: IO ()
 testSequenceGreaterThan = do
   putStrLn "sequenceGreaterThan:"
-  assertEqual "1 > 0" True (sequenceGreaterThan 1 0)
-  assertEqual "0 > 1" False (sequenceGreaterThan 0 1)
-  assertEqual "100 > 50" True (sequenceGreaterThan 100 50)
-  assertEqual "50 > 100" False (sequenceGreaterThan 50 100)
+  assertEqual "1 > 0" True (sequenceGreaterThan (SequenceNum 1) (SequenceNum 0))
+  assertEqual "0 > 1" False (sequenceGreaterThan (SequenceNum 0) (SequenceNum 1))
+  assertEqual "100 > 50" True (sequenceGreaterThan (SequenceNum 100) (SequenceNum 50))
+  assertEqual "50 > 100" False (sequenceGreaterThan (SequenceNum 50) (SequenceNum 100))
   -- Wraparound
-  assertEqual "0 > 65535" True (sequenceGreaterThan 0 65535)
-  assertEqual "65535 > 0" False (sequenceGreaterThan 65535 0)
-  assertEqual "1 > 65534" True (sequenceGreaterThan 1 65534)
-  assertEqual "100 > 65500" True (sequenceGreaterThan 100 65500)
+  assertEqual "0 > 65535" True (sequenceGreaterThan (SequenceNum 0) (SequenceNum 65535))
+  assertEqual "65535 > 0" False (sequenceGreaterThan (SequenceNum 65535) (SequenceNum 0))
+  assertEqual "1 > 65534" True (sequenceGreaterThan (SequenceNum 1) (SequenceNum 65534))
+  assertEqual "100 > 65500" True (sequenceGreaterThan (SequenceNum 100) (SequenceNum 65500))
 
 testSequenceDiff :: IO ()
 testSequenceDiff = do
   putStrLn "sequenceDiff:"
-  assertEqual "diff(5,3)" 2 (sequenceDiff 5 3)
-  assertEqual "diff(3,5)" (-2) (sequenceDiff 3 5)
-  assertEqual "diff(100,100)" 0 (sequenceDiff 100 100)
+  assertEqual "diff(5,3)" 2 (sequenceDiff (SequenceNum 5) (SequenceNum 3))
+  assertEqual "diff(3,5)" (-2) (sequenceDiff (SequenceNum 3) (SequenceNum 5))
+  assertEqual "diff(100,100)" 0 (sequenceDiff (SequenceNum 100) (SequenceNum 100))
   -- Wraparound
-  assertEqual "diff(0,65535)" 1 (sequenceDiff 0 65535)
-  assertEqual "diff(65535,0)" (-1) (sequenceDiff 65535 0)
-  assertEqual "diff(5,65530)" 11 (sequenceDiff 5 65530)
+  assertEqual "diff(0,65535)" 1 (sequenceDiff (SequenceNum 0) (SequenceNum 65535))
+  assertEqual "diff(65535,0)" (-1) (sequenceDiff (SequenceNum 65535) (SequenceNum 0))
+  assertEqual "diff(5,65530)" 11 (sequenceDiff (SequenceNum 5) (SequenceNum 65530))
 
 testSequenceAtBoundaries :: IO ()
 testSequenceAtBoundaries = do
   putStrLn "Sequence at Word16 boundaries:"
-  assertEqual "0 > maxBound" True (sequenceGreaterThan 0 maxBound)
-  assertEqual "maxBound > 0" False (sequenceGreaterThan maxBound 0)
-  assertEqual "diff(0,max)" 1 (sequenceDiff 0 maxBound)
-  assertEqual "diff(max,0)" (-1) (sequenceDiff maxBound 0)
+  assertEqual "0 > maxBound" True (sequenceGreaterThan 0 (maxBound :: SequenceNum))
+  assertEqual "maxBound > 0" False (sequenceGreaterThan (maxBound :: SequenceNum) 0)
+  assertEqual "diff(0,max)" 1 (sequenceDiff 0 (maxBound :: SequenceNum))
+  assertEqual "diff(max,0)" (-1) (sequenceDiff (maxBound :: SequenceNum) 0)
 
 testSequenceBufferOps :: IO ()
 testSequenceBufferOps = do
   putStrLn "SequenceBuffer operations:"
   let buf0 = newSequenceBuffer 16 :: SequenceBuffer Word32
-  let buf1 = sbInsert 0 100 buf0
-  let buf2 = sbInsert 1 200 buf1
-  let buf3 = sbInsert 2 300 buf2
-  assertEqual "exists 0" True (sbExists 0 buf3)
-  assertEqual "exists 1" True (sbExists 1 buf3)
-  assertEqual "exists 2" True (sbExists 2 buf3)
-  assertEqual "exists 3" False (sbExists 3 buf3)
-  assertEqual "get 0" (Just 100) (sbGet 0 buf3)
-  assertEqual "get 1" (Just 200) (sbGet 1 buf3)
-  assertEqual "get 2" (Just 300) (sbGet 2 buf3)
+  let buf1 = sbInsert (SequenceNum 0) 100 buf0
+  let buf2 = sbInsert (SequenceNum 1) 200 buf1
+  let buf3 = sbInsert (SequenceNum 2) 300 buf2
+  assertEqual "exists 0" True (sbExists (SequenceNum 0) buf3)
+  assertEqual "exists 1" True (sbExists (SequenceNum 1) buf3)
+  assertEqual "exists 2" True (sbExists (SequenceNum 2) buf3)
+  assertEqual "exists 3" False (sbExists (SequenceNum 3) buf3)
+  assertEqual "get 0" (Just 100) (sbGet (SequenceNum 0) buf3)
+  assertEqual "get 1" (Just 200) (sbGet (SequenceNum 1) buf3)
+  assertEqual "get 2" (Just 300) (sbGet (SequenceNum 2) buf3)
 
 testSequenceBufferWraparound :: IO ()
 testSequenceBufferWraparound = do
   putStrLn "SequenceBuffer wraparound:"
   let buf0 = newSequenceBuffer 16 :: SequenceBuffer Word32
-  let buf1 = sbInsert 65534 100 buf0
-  let buf2 = sbInsert 65535 200 buf1
-  let buf3 = sbInsert 0 300 buf2
-  let buf4 = sbInsert 1 400 buf3
-  assertEqual "exists 65534" True (sbExists 65534 buf4)
-  assertEqual "exists 65535" True (sbExists 65535 buf4)
-  assertEqual "exists 0" True (sbExists 0 buf4)
-  assertEqual "exists 1" True (sbExists 1 buf4)
+  let buf1 = sbInsert (SequenceNum 65534) 100 buf0
+  let buf2 = sbInsert (SequenceNum 65535) 200 buf1
+  let buf3 = sbInsert (SequenceNum 0) 300 buf2
+  let buf4 = sbInsert (SequenceNum 1) 400 buf3
+  assertEqual "exists 65534" True (sbExists (SequenceNum 65534) buf4)
+  assertEqual "exists 65535" True (sbExists (SequenceNum 65535) buf4)
+  assertEqual "exists 0" True (sbExists (SequenceNum 0) buf4)
+  assertEqual "exists 1" True (sbExists (SequenceNum 1) buf4)
 
 testSequenceBufferCollision :: IO ()
 testSequenceBufferCollision = do
   putStrLn "SequenceBuffer collision:"
   let buf0 = newSequenceBuffer 16 :: SequenceBuffer Word32
-  let buf1 = sbInsert 0 100 buf0
-  assertEqual "exists 0 before" True (sbExists 0 buf1)
+  let buf1 = sbInsert (SequenceNum 0) 100 buf0
+  assertEqual "exists 0 before" True (sbExists (SequenceNum 0) buf1)
   -- Sequence 16 maps to the same slot (16 % 16 == 0)
-  let buf2 = sbInsert 16 200 buf1
-  assertEqual "exists 16" True (sbExists 16 buf2)
-  assertEqual "exists 0 after" False (sbExists 0 buf2)
-  assertEqual "get 16" (Just 200) (sbGet 16 buf2)
-  assertEqual "get 0 after" Nothing (sbGet 0 buf2)
+  let buf2 = sbInsert (SequenceNum 16) 200 buf1
+  assertEqual "exists 16" True (sbExists (SequenceNum 16) buf2)
+  assertEqual "exists 0 after" False (sbExists (SequenceNum 0) buf2)
+  assertEqual "get 16" (Just 200) (sbGet (SequenceNum 16) buf2)
+  assertEqual "get 0 after" Nothing (sbGet (SequenceNum 0) buf2)
 
 testRttConvergence :: IO ()
 testRttConvergence = do
@@ -807,24 +809,24 @@ testProcessAcksReturnsChannelInfo = do
   putStrLn "processAcks returns channel info:"
   let ep0 = newReliableEndpoint 256
   let now = 1000000000 :: MonoTime -- 1 second in nanoseconds
-  let ep1 = onPacketSent 10 now 2 5 100 ep0
-  let ep2 = onPacketSent 11 now 3 7 200 ep1
+  let ep1 = onPacketSent 10 now (ChannelId 2) 5 100 ep0
+  let ep2 = onPacketSent 11 now (ChannelId 3) 7 200 ep1
   -- ACK packet 11 directly, packet 10 via ack_bits (bit 0 = seq 10)
   let ackTime = 1050000000 :: MonoTime -- 1.05 seconds
   let ((acked, _fastRetransmit), _ep3) = processAcks 11 1 ackTime ep2
   assertEqual "2 acked" 2 (length acked)
-  assertEqual "contains (3,7)" True ((3, 7) `elem` acked)
-  assertEqual "contains (2,5)" True ((2, 5) `elem` acked)
+  assertEqual "contains (3,7)" True ((ChannelId 3, 7) `elem` acked)
+  assertEqual "contains (2,5)" True ((ChannelId 2, 5) `elem` acked)
 
 testInFlightEviction :: IO ()
 testInFlightEviction = do
   putStrLn "In-flight eviction:"
   let ep0 = withMaxInFlight 4 $ newReliableEndpoint 256
   -- Send 4 packets
-  let ep1 = foldl (\e i -> onPacketSent i (fromIntegral i * 1000000) 0 i 100 e) ep0 [0 .. 3]
+  let ep1 = foldl (\e i -> onPacketSent i (fromIntegral i * 1000000) (ChannelId 0) i 100 e) ep0 [0 .. 3]
   assertEqual "4 in flight" 4 (packetsInFlight ep1)
   -- Send 5th — should evict one
-  let ep2 = onPacketSent 4 4000000 0 4 100 ep1
+  let ep2 = onPacketSent 4 4000000 (ChannelId 0) 4 100 ep1
   assertEqual "still 4 in flight" 4 (packetsInFlight ep2)
   assertEqual "1 evicted" 1 (rePacketsEvicted ep2)
 
@@ -834,7 +836,7 @@ testFastRetransmit = do
   let ep0 = newReliableEndpoint 256
   let now = 1000000000 :: MonoTime
   -- Send packets 0-4
-  let ep1 = foldl (\e i -> onPacketSent i now 0 i 100 e) ep0 [0 .. 4]
+  let ep1 = foldl (\e i -> onPacketSent i now (ChannelId 0) i 100 e) ep0 [0 .. 4]
   -- ACK packets 1,2,3,4 but NOT 0 — seq 0 should accumulate nacks
   -- Each ack where 0 is in range but not covered increments nack
   let ackTime = 1050000000 :: MonoTime
@@ -845,7 +847,7 @@ testFastRetransmit = do
   -- ACK 3: ack=3, ack_bits=0. seq 0 diff=3, bit 2 not set -> nack = 3, triggers fast retransmit
   let ((_, fastRetransmit), _ep4) = processAcks 3 0 ackTime ep3
   assertEqual "fast retransmit triggered" True (not (null fastRetransmit))
-  assertEqual "retransmit is (0,0)" True ((0, 0) `elem` fastRetransmit)
+  assertEqual "retransmit is (0,0)" True ((ChannelId 0, SequenceNum 0) `elem` fastRetransmit)
 
 -- --------------------------------------------------------------------
 -- Congestion control tests
@@ -1005,13 +1007,13 @@ testPeerMessageDelivery = do
       peer = newPeerState sock addr config now
 
   -- Send a message to a non-connected peer should fail
-  let result = peerSend (peerIdFromAddr (testAddr 1234)) 0 "hello" now peer
+  let result = peerSend (peerIdFromAddr (testAddr 1234)) (ChannelId 0) "hello" now peer
   case result of
     Left _ -> putStrLn "  PASS: send to unconnected peer fails"
     Right _ -> error "  FAIL: should have failed"
 
   -- Broadcast to empty peer should be no-op
-  let peer' = peerBroadcast 0 "test" Nothing now peer
+  let peer' = peerBroadcast (ChannelId 0) "test" Nothing now peer
   assertEqual "broadcast to empty" 0 (peerCount peer')
   putStrLn "  PASS: broadcast to empty peer is no-op"
 
@@ -1087,7 +1089,7 @@ testPeerMaxClients = do
 -- | Run peerTick for a peer inside TestWorld, returning events and updated world.
 tickPeerInWorld ::
   SockAddr ->
-  [(Word8, BS.ByteString)] ->
+  [(ChannelId, BS.ByteString)] ->
   NetPeer ->
   TestWorld ->
   (([PeerEvent], NetPeer), TestWorld)
@@ -1213,7 +1215,7 @@ testTestNetMessageRoundTrip = do
 
   -- Now both are connected. Client sends a message on channel 0.
   let testMsg = "hello from client"
-  let ((_, _cp5), w11) = tickPeerInWorld clientAddr [(0, testMsg)] cp4 w10
+  let ((_, _cp5), w11) = tickPeerInWorld clientAddr [(ChannelId 0, testMsg)] cp4 w10
   let w12 = stepWorld 10 w11
 
   -- Server receives the message
