@@ -13,14 +13,13 @@ import qualified Data.Text as T
 import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Config (NetworkConfig (..), defaultNetworkConfig)
 import GBNet.Congestion
-import Test.QuickCheck (Arbitrary (..), choose, quickCheck, withMaxSuccess, elements, listOf)
+import GBNet.Connection (DisconnectReason (..))
+import GBNet.Packet
+import GBNet.Peer
+import GBNet.Reliability
 import GBNet.Replication.Interest
 import GBNet.Replication.Interpolation
-import GBNet.Packet
-import GBNet.Connection (DisconnectReason (..))
-import GBNet.Peer
 import GBNet.Replication.Priority
-import GBNet.Reliability
 import GBNet.Serialize.BitBuffer
 import GBNet.Serialize.Class
 import GBNet.Serialize.TH
@@ -28,8 +27,9 @@ import GBNet.Socket (UdpSocket (..))
 import GBNet.Stats (CongestionLevel (..), defaultSocketStats)
 import GBNet.TestNet
 import GBNet.Util
-import qualified Network.Socket as NS
 import Network.Socket (SockAddr (..), tupleToHostAddress)
+import qualified Network.Socket as NS
+import Test.QuickCheck (Arbitrary (..), choose, elements, listOf, quickCheck, withMaxSuccess)
 
 -- TH-derived test types (must be before main due to TH staging restriction)
 data Vec3 = Vec3
@@ -1116,7 +1116,6 @@ testTestNetHandshake = do
       config = defaultNetworkConfig
       -- Use different RNG seeds (via init time) to avoid salt collision
       startTime = 1000000000 :: MonoTime -- 1 second
-
   let serverPeer = newPeerState sock serverAddr config 100000000
       clientPeer0 = newPeerState sock clientAddr config 200000000
 
@@ -1271,9 +1270,12 @@ testGridInterestRelevant = do
 testPriorityAccumulate :: IO ()
 testPriorityAccumulate = do
   putStrLn "Priority accumulator:"
-  let acc0 = register ("a" :: String) 10.0
-           $ register "b" 5.0
-             newPriorityAccumulator
+  let acc0 =
+        register ("a" :: String) 10.0 $
+          register
+            "b"
+            5.0
+            newPriorityAccumulator
   assertEqual "2 entities" 2 (priorityCount acc0)
   assertEqual "initial priority" (Just 0.0) (getPriority "a" acc0)
 
@@ -1288,10 +1290,13 @@ testPriorityAccumulate = do
 testPriorityDrain :: IO ()
 testPriorityDrain = do
   putStrLn "Priority drain:"
-  let acc0 = accumulate 1.0
-           $ register ("high" :: String) 20.0
-           $ register "low" 1.0
-             newPriorityAccumulator
+  let acc0 =
+        accumulate 1.0 $
+          register ("high" :: String) 20.0 $
+            register
+              "low"
+              1.0
+              newPriorityAccumulator
   -- High = 20.0, Low = 1.0
   -- Budget fits one entity at 100 bytes each
   let (selected, acc1) = drainTop 100 (const 100) acc0
@@ -1330,10 +1335,13 @@ testSnapshotInterpolation :: IO ()
 testSnapshotInterpolation = do
   putStrLn "Snapshot interpolation:"
   let buf0 = newSnapshotBufferWithConfig 2 100.0 :: SnapshotBuffer Float
-  let buf1 = pushSnapshot 200.0 20.0
-           $ pushSnapshot 100.0 10.0
-           $ pushSnapshot 0.0 0.0
-             buf0
+  let buf1 =
+        pushSnapshot 200.0 20.0 $
+          pushSnapshot 100.0 10.0 $
+            pushSnapshot
+              0.0
+              0.0
+              buf0
 
   -- At render time 250, target = 250 - 100 = 150
   -- Interpolate between t=100 (10.0) and t=200 (20.0), t=0.5
