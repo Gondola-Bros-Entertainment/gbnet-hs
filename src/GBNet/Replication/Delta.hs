@@ -222,18 +222,12 @@ newBaselineManager maxSnapshots timeoutMs =
 -- | Store a confirmed snapshot at the given sequence.
 pushBaseline :: BaselineSeq -> a -> MonoTime -> BaselineManager a -> BaselineManager a
 pushBaseline seq' state now manager =
-  let -- Evict expired
-      snapshots =
-        Seq.filter (\(_, _, ts) -> elapsedMs ts now < bmTimeoutMs manager) $
-          bmSnapshots manager
-      -- Evict oldest if at capacity
-      snapshots' =
-        if Seq.length snapshots >= bmMaxSnapshots manager
-          then Seq.drop 1 snapshots
-          else snapshots
-      -- Add new snapshot
-      snapshots'' = snapshots' Seq.|> (seq', state, now)
-   in manager {bmSnapshots = snapshots''}
+  let evictExpired = Seq.filter (\(_, _, ts) -> elapsedMs ts now < bmTimeoutMs manager)
+      evictOldest s
+        | Seq.length s >= bmMaxSnapshots manager = Seq.drop 1 s
+        | otherwise = s
+      snapshots = evictOldest (evictExpired (bmSnapshots manager)) Seq.|> (seq', state, now)
+   in manager {bmSnapshots = snapshots}
 
 -- | Look up a baseline by sequence number.
 getBaseline :: BaselineSeq -> BaselineManager a -> Maybe a
@@ -264,25 +258,14 @@ deltaDecode ::
   BS.ByteString ->
   BaselineManager a ->
   Either String a
-deltaDecode dat baselines =
-  let buf = fromBytes dat
-   in case readBits baselineSeqBits buf of
-        Left err -> Left err
-        Right result ->
-          let baseSeqVal = readValue result
-              buf' = readBuffer result
-              baseSeq = fromIntegral baseSeqVal :: BaselineSeq
-           in if baseSeq == noBaseline
-                then -- Full state
-                  case bitDeserialize buf' of
-                    Left err -> Left err
-                    Right stateResult -> Right (readValue stateResult)
-                else -- Delta against baseline
-                  case getBaseline baseSeq baselines of
-                    Nothing -> Left $ "Missing baseline for seq " ++ show baseSeq
-                    Just baseline ->
-                      case bitDeserialize buf' of
-                        Left err -> Left err
-                        Right deltaResult ->
-                          let delta = readValue deltaResult
-                           in Right (apply baseline delta)
+deltaDecode dat baselines = do
+  result <- readBits baselineSeqBits (fromBytes dat)
+  let baseSeq = fromIntegral (readValue result) :: BaselineSeq
+      buf' = readBuffer result
+  if baseSeq == noBaseline
+    then readValue <$> bitDeserialize buf'
+    else do
+      baseline <-
+        maybe (Left $ "Missing baseline for seq " ++ show baseSeq) Right $
+          getBaseline baseSeq baselines
+      apply baseline . readValue <$> bitDeserialize buf'
