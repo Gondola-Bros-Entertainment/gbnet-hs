@@ -22,7 +22,7 @@ A transport-level networking library providing:
 - **Reliable UDP** — Connection-oriented with ACKs, retransmits, and ordering
 - **Unified Peer API** — Same code for client, server, or P2P mesh
 - **Effect abstraction** — `MonadNetwork` typeclass enables pure deterministic testing
-- **Congestion control** — Dual-layer: Gaffer-style binary mode + TCP New Reno window, with application-level backpressure
+- **Congestion control** — Dual-layer: binary mode + TCP New Reno window, with application-level backpressure
 - **Zero-poll receive** — Dedicated receive thread via GHC IO manager (epoll/kqueue), STM TQueue delivery
 - **Connection migration** — Seamless IP address change handling
 
@@ -351,7 +351,7 @@ case sampleSnapshot renderTime buffer' of
 
 gbnet-hs uses a dual-layer congestion control strategy:
 
-### Binary Mode (Gaffer-style)
+### Binary Mode
 
 A send-rate controller that tracks Good/Bad network conditions:
 
@@ -423,7 +423,7 @@ Optimized for game networking:
 - [x] Self-cleaning rate limiter
 
 ### Congestion Control
-- [x] Gaffer-style binary mode (Good/Bad with AIMD recovery)
+- [x] Binary mode (Good/Bad with AIMD recovery)
 - [x] TCP New Reno window-based control (slow start, avoidance, recovery)
 - [x] Slow Start Restart for idle connections (RFC 2861)
 - [x] Application-level backpressure via `CongestionLevel`

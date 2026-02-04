@@ -5,7 +5,7 @@
 Initial release.
 
 - Reliable and unreliable UDP channels with bitpacked serialization
-- Dual-layer congestion control (Gaffer binary mode + TCP New Reno CWND)
+- Dual-layer congestion control (binary mode + TCP New Reno CWND)
 - Jacobson/Karels RTT estimation with adaptive RTO and fast retransmit
 - Fragment reassembly with MTU discovery
 - Effect-abstracted design via `MonadNetwork` / `MonadTime` typeclasses
