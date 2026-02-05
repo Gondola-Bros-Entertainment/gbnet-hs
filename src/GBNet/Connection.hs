@@ -115,7 +115,6 @@ bandwidthWindowMs = 1000.0
 data ConnectionState
   = Disconnected
   | Connecting
-  | ChallengeResponse
   | Connected
   | Disconnecting
   deriving (Eq, Show)
@@ -427,7 +426,6 @@ updateTick :: MonoTime -> Connection -> Either ConnectionError Connection
 updateTick now conn = case connState conn of
   Disconnected -> Right conn
   Connecting -> updateConnecting now conn
-  ChallengeResponse -> Right conn -- Wait for accept
   Connected -> updateConnected now conn
   Disconnecting -> updateDisconnecting now conn
 

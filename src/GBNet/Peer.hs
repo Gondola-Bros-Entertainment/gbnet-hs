@@ -833,24 +833,24 @@ migrationTokenFor = Conn.connClientSalt
 updateConnectionsS :: MonoTime -> State NetPeer [PeerEvent]
 updateConnectionsS now = do
   conns <- gets npConnections
-  let (events, conns', disconnectedIds) = Map.foldrWithKey updateOne ([], Map.empty, []) conns
+  let (events, conns', disconnectedIds) = Map.foldlWithKey' updateOne ([], Map.empty, []) conns
   modify' $ \peer ->
     foldl' (flip cleanupPeer) (peer {npConnections = conns'}) disconnectedIds
   pure events
   where
-    updateOne peerId conn (evts, connsAcc, discs) =
+    updateOne (evts, connsAcc, discs) peerId conn =
       case Conn.updateTick now conn of
         Left _err ->
           -- Connection timed out
-          (PeerDisconnected peerId ReasonTimeout : evts, connsAcc, peerId : discs)
+          (evts ++ [PeerDisconnected peerId ReasonTimeout], connsAcc, peerId : discs)
         Right conn'
           | Conn.connectionState conn' == Conn.Disconnected ->
               -- Graceful disconnect complete
-              (PeerDisconnected peerId ReasonRequested : evts, connsAcc, peerId : discs)
+              (evts ++ [PeerDisconnected peerId ReasonRequested], connsAcc, peerId : discs)
           | otherwise ->
               -- Collect messages from all channels
               let (msgs, conn'') = collectMessages peerId conn' []
-               in (msgs ++ evts, Map.insert peerId conn'' connsAcc, discs)
+               in (evts ++ msgs, Map.insert peerId conn'' connsAcc, discs)
 
     collectMessages peerId conn acc =
       let numChannels = Conn.channelCount conn
@@ -862,7 +862,7 @@ updateConnectionsS now = do
           let chId = ChannelId ch
               (msgs, conn') = Conn.receiveMessage chId conn
               evts = map (PeerMessage peerId chId) msgs
-           in collectFromChannels peerId (ch + 1) maxCh conn' (evts ++ acc)
+           in collectFromChannels peerId (ch + 1) maxCh conn' (acc ++ evts)
 
 -- | Retry pending outbound connections (pure).
 retryPendingConnectionsPure :: MonoTime -> NetPeer -> NetPeer
