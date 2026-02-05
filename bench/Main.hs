@@ -49,6 +49,7 @@ import GBNet.Packet
   )
 import GBNet.Reliability
   ( ReliableEndpoint (..),
+    SBEntry (..),
     SentPacketRecord (..),
     SequenceBuffer (..),
     newReliableEndpoint,
@@ -58,6 +59,7 @@ import GBNet.Reliability
     processAcks,
     sbExists,
     sbInsert,
+    sbInsertMany,
     updateRtt,
   )
 import GBNet.Security (appendCrc32, validateAndStripCrc32)
@@ -314,6 +316,9 @@ main =
                       [0 .. 99]
                 )
                 buf,
+          env (pure (newSequenceBuffer 256 :: SequenceBuffer (), [(SequenceNum i, ()) | i <- [0 .. 99]])) $ \ ~(buf, items) ->
+            bench "sbInsertMany/100" $
+              nf (sbInsertMany items) buf,
           env (pure (buildSequenceBuffer 100)) $ \buf ->
             bench "sbExists/hit" $
               whnf (sbExists (SequenceNum 50)) buf,

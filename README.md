@@ -178,7 +178,7 @@ let bytes = serialize (Transform pos angle)  -- still 14ns
 
 ### Why Storable?
 
-- **17x faster** than bit-buffer approaches (14ns vs 267ns)
+- **C-level speed** — 14ns serialization via direct memory layout
 - **Standard Haskell** — uses base `Storable` typeclass
 - **Composable** — nested types work automatically
 - **Pure API** — `serialize`/`deserialize` are pure functions

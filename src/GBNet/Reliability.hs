@@ -28,9 +28,11 @@ module GBNet.Reliability
     emptyLossWindow,
 
     -- * Sequence buffer
+    SBEntry (..),
     SequenceBuffer (..),
     newSequenceBuffer,
     sbInsert,
+    sbInsertMany,
     sbExists,
     sbGet,
 
@@ -61,8 +63,6 @@ import Control.DeepSeq (NFData (..))
 import Control.Monad.ST (runST)
 import Data.Bits (complement, popCount, shiftL, (.&.), (.|.))
 import Data.List (foldl')
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 import qualified Data.Vector.Mutable as MV
 import qualified Data.Vector.Unboxed as VU
@@ -71,6 +71,7 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Class (MonoTime (..))
 import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Util (sequenceDiff, sequenceGreaterThan)
+import GBNet.ZeroCopy (zeroCopyMutate, zeroCopyMutate')
 
 -- Constants
 
@@ -159,62 +160,97 @@ elapsedMs start now = fromIntegral (now - start) / 1e6
 
 -- SequenceBuffer
 
--- | Circular buffer indexed by SequenceNum (Word16 under the hood).
+-- | Ring buffer entry. Stores sequence number for validation.
+data SBEntry a
+  = SBEmpty
+  | SBEntry !SequenceNum a
+  deriving (Show)
+
+instance NFData (SBEntry a) where
+  rnf SBEmpty = ()
+  rnf (SBEntry s _) = rnf s
+
+-- | High-performance circular buffer using Vector ring buffer.
+-- O(1) insert, O(1) lookup, O(1) exists via zero-copy mutation.
+-- Size must be power of 2 for fast bitwise modulo.
 data SequenceBuffer a = SequenceBuffer
-  { sbEntries :: !(Map Word16 (SequenceNum, a)),
+  { sbEntries :: !(V.Vector (SBEntry a)),
     sbSequence :: !SequenceNum,
-    sbSize :: !Int
+    sbSize :: !Int -- Keep for API compat, but use mask internally
   }
   deriving (Show)
 
+-- | Create a new sequence buffer. Size is rounded up to power of 2.
 newSequenceBuffer :: Int -> SequenceBuffer a
-newSequenceBuffer size =
-  SequenceBuffer
-    { sbEntries = Map.empty,
-      sbSequence = 0,
-      sbSize = size
-    }
+newSequenceBuffer requestedSize =
+  let size = nextPowerOf2 requestedSize
+   in SequenceBuffer
+        { sbEntries = V.replicate size SBEmpty,
+          sbSequence = 0,
+          sbSize = size
+        }
 
-sbInsert :: SequenceNum -> a -> SequenceBuffer a -> SequenceBuffer a
-sbInsert seqNum val buf
-  | sequenceGreaterThan seqNum (sbSequence buf) =
-      let diff = fromIntegral (sequenceDiff seqNum (sbSequence buf)) :: Int
-          cleared =
-            if diff < sbSize buf
-              then clearRange (sbSequence buf) diff buf
-              else buf {sbEntries = Map.empty}
-          idx = fromIntegral seqNum `mod` sbSize buf
-       in cleared
-            { sbSequence = seqNum,
-              sbEntries = Map.insert (fromIntegral idx) (seqNum, val) (sbEntries cleared)
-            }
-  | otherwise =
-      let idx = fromIntegral seqNum `mod` sbSize buf
-       in buf {sbEntries = Map.insert (fromIntegral idx) (seqNum, val) (sbEntries buf)}
-
-clearRange :: SequenceNum -> Int -> SequenceBuffer a -> SequenceBuffer a
-clearRange currentSeq diff buf = go 0 (sbEntries buf)
+-- | Round up to next power of 2.
+nextPowerOf2 :: Int -> Int
+nextPowerOf2 n
+  | n <= 1 = 1
+  | otherwise = go 1
   where
-    go i entries
-      | i >= diff = buf {sbEntries = entries}
-      | otherwise =
-          let s = currentSeq + fromIntegral (i + 1)
-              idx = fromIntegral s `mod` sbSize buf
-           in go (i + 1) (Map.delete (fromIntegral idx) entries)
+    go p
+      | p >= n = p
+      | otherwise = go (p * 2)
+{-# INLINE nextPowerOf2 #-}
 
+-- | O(1) insert using zero-copy mutation.
+sbInsert :: SequenceNum -> a -> SequenceBuffer a -> SequenceBuffer a
+sbInsert seqNum val buf =
+  let !idx = seqToIndex seqNum buf
+      newHighest
+        | sequenceGreaterThan seqNum (sbSequence buf) = seqNum
+        | otherwise = sbSequence buf
+      entries' = zeroCopyMutate (sbEntries buf) $ \mv ->
+        MV.unsafeWrite mv idx (SBEntry seqNum val)
+   in buf {sbEntries = entries', sbSequence = newHighest}
+{-# INLINE sbInsert #-}
+
+-- | Batched insert - O(n) with single thaw/freeze for n entries.
+sbInsertMany :: [(SequenceNum, a)] -> SequenceBuffer a -> SequenceBuffer a
+sbInsertMany [] buf = buf
+sbInsertMany items buf =
+  let (entries', newHighest) = zeroCopyMutate' (sbEntries buf) $ \mv ->
+        go mv (sbSequence buf) items
+   in buf {sbEntries = entries', sbSequence = newHighest}
+  where
+    go _ !highest [] = return highest
+    go mv !highest ((seqNum, val) : rest) = do
+      let !idx = seqToIndex seqNum buf
+      MV.unsafeWrite mv idx (SBEntry seqNum val)
+      let !highest' =
+            if sequenceGreaterThan seqNum highest then seqNum else highest
+      go mv highest' rest
+{-# INLINE sbInsertMany #-}
+
+-- | O(1) existence check via direct index.
 sbExists :: SequenceNum -> SequenceBuffer a -> Bool
 sbExists seqNum buf =
-  let idx = fromIntegral seqNum `mod` sbSize buf
-   in case Map.lookup (fromIntegral idx) (sbEntries buf) of
-        Just (storedSeq, _) -> storedSeq == seqNum
-        Nothing -> False
+  case V.unsafeIndex (sbEntries buf) (seqToIndex seqNum buf) of
+    SBEntry storedSeq _ -> storedSeq == seqNum
+    SBEmpty -> False
+{-# INLINE sbExists #-}
 
+-- | O(1) lookup via direct index.
 sbGet :: SequenceNum -> SequenceBuffer a -> Maybe a
 sbGet seqNum buf =
-  let idx = fromIntegral seqNum `mod` sbSize buf
-   in case Map.lookup (fromIntegral idx) (sbEntries buf) of
-        Just (storedSeq, v) | storedSeq == seqNum -> Just v
-        _ -> Nothing
+  case V.unsafeIndex (sbEntries buf) (seqToIndex seqNum buf) of
+    SBEntry storedSeq v
+      | storedSeq == seqNum -> Just v
+    _ -> Nothing
+{-# INLINE sbGet #-}
+
+-- | Fast index using bitwise AND (size must be power of 2).
+seqToIndex :: SequenceNum -> SequenceBuffer a -> Int
+seqToIndex (SequenceNum s) buf = fromIntegral s .&. (sbSize buf - 1)
+{-# INLINE seqToIndex #-}
 
 -- ReceivedBuffer (optimized for packet deduplication)
 
