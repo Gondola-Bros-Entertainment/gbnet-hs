@@ -402,12 +402,22 @@ cabal haddock                            # Generate docs
 
 Optimized for game networking:
 
+- **Zero-allocation packet headers** — direct memory writes via `poke`, 17ns serialize (~60M headers/sec)
 - **Strict fields** with bang patterns throughout
 - **GHC flags**: `-O2 -fspecialise-aggressively -fexpose-all-unfoldings`
 - **INLINE pragmas** on hot paths
 - **Byte-aligned fast paths** when bit position allows
 - **Hardware-accelerated CRC32C** via Google's C++ library (runtime dispatch: SSE4.2, ARMv8 CRC, software fallback)
 - **Zero-poll receive** — dedicated thread blocks on epoll/kqueue, delivers via STM TQueue
+
+### Benchmarks
+
+```
+packetheader/serialize      17.12 ns   (60M ops/sec)
+packetheader/deserialize    18.10 ns   (55M ops/sec)
+```
+
+Run with `cabal bench --enable-benchmarks`.
 
 ---
 

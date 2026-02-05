@@ -117,6 +117,7 @@ main = do
   testPacketType
   testPacketHeaderRoundTrip
   testPacketHeaderMonadic
+  testFastSerializationRoundTrip
 
   -- Collection types
   testMaybeRoundTrip
@@ -490,6 +491,32 @@ testPacketHeaderMonadic = do
       assertEqual "monadic ack" 0 (ack h)
       assertEqual "monadic ackBitfield" (0xFFFFFFFF :: Word32) (ackBitfield h)
       assertEqual "monadic trailing" (99 :: Word8) trailing
+
+-- --------------------------------------------------------------------
+-- Fast serialization tests
+-- --------------------------------------------------------------------
+
+testFastSerializationRoundTrip :: IO ()
+testFastSerializationRoundTrip = do
+  putStrLn "Fast serialization roundtrip:"
+  let headers =
+        [ PacketHeader Payload (SequenceNum 42) (SequenceNum 40) 0xDEADBEEF,
+          PacketHeader ConnectionRequest (SequenceNum 0) (SequenceNum 0) 0,
+          PacketHeader Keepalive (SequenceNum 65535) (SequenceNum 65535) 0xFFFFFFFF,
+          PacketHeader Disconnect (SequenceNum 12345) (SequenceNum 54321) 0x12345678
+        ]
+  mapM_ testHeader headers
+  where
+    testHeader hdr = do
+      let bytes = serializeHeader hdr
+      assertEqual ("size for " ++ show (packetType hdr)) packetHeaderByteSize (BS.length bytes)
+      case deserializeHeader bytes of
+        Left err -> error $ "deserialize failed: " ++ err
+        Right hdr' -> do
+          assertEqual "roundtrip packetType" (packetType hdr) (packetType hdr')
+          assertEqual "roundtrip sequenceNum" (sequenceNum hdr) (sequenceNum hdr')
+          assertEqual "roundtrip ack" (ack hdr) (ack hdr')
+          assertEqual "roundtrip ackBitfield" (ackBitfield hdr) (ackBitfield hdr')
 
 -- --------------------------------------------------------------------
 -- Collection type tests

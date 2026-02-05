@@ -344,12 +344,12 @@ main =
             bench "getRetransmitMessages/50-pending" $
               nf (\(c, t) -> getRetransmitMessages t 100.0 c) (ch, now)
         ],
-      -- Group 5: Packet Header
+      -- Group 5: Packet Header (optimized poke-based serialization)
       bgroup
         "packetheader"
         [ env (pure sampleHeader) $ \hdr ->
-            bench "serializeHeader" $ nf serializeHeader hdr,
+            bench "serialize" $ nf serializeHeader hdr,
           env (pure headerBytes) $ \bs ->
-            bench "deserializeHeader" $ nf deserializeHeader bs
+            bench "deserialize" $ nf deserializeHeader bs
         ]
     ]

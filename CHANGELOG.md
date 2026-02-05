@@ -2,6 +2,8 @@
 
 ## 0.2.0.0
 
+- **23x faster packet header serialization** — zero-allocation `poke`-based writes (380ns → 17ns)
+- **4.6x faster deserialization** — direct memory access via `unsafeIndex` (73ns → 18ns)
 - Type-safe domain newtypes: `ChannelId`, `SequenceNum`, `MonoTime`, `MessageId`
 - `GBNet.Types` module as shared home for domain newtypes
 - Idiomatic cleanup: Either do-notation, function composition, `fmap`/`toList`
