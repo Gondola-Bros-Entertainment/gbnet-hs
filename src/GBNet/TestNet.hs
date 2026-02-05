@@ -57,11 +57,15 @@ data InFlightPacket = InFlightPacket
   }
   deriving (Show)
 
+-- | Nanoseconds per millisecond.
+nsPerMs :: Word64
+nsPerMs = 1000000
+
 -- | Test network configuration.
 data TestNetConfig = TestNetConfig
-  { tncLatencyMs :: !Word64, -- Simulated one-way latency
+  { tncLatencyNs :: !Word64, -- Simulated one-way latency in nanoseconds
     tncLossRate :: !Double, -- Packet loss probability (0.0 - 1.0)
-    tncJitterMs :: !Word64 -- Random jitter range
+    tncJitterNs :: !Word64 -- Random jitter range in nanoseconds
   }
   deriving (Show)
 
@@ -69,9 +73,9 @@ data TestNetConfig = TestNetConfig
 defaultTestNetConfig :: TestNetConfig
 defaultTestNetConfig =
   TestNetConfig
-    { tncLatencyMs = 0,
+    { tncLatencyNs = 0,
       tncLossRate = 0.0,
-      tncJitterMs = 0
+      tncJitterNs = 0
     }
 
 -- | State of the test network.
@@ -125,8 +129,8 @@ instance MonadNetwork TestNet where
             pure (Right ())
           else do
             -- Calculate delivery time
-            let (jitter, rng'') = randomR (0, tncJitterMs cfg) rng'
-                deliverAt = tnsCurrentTime st + MonoTime (tncLatencyMs cfg) + MonoTime jitter
+            let (jitter, rng'') = randomR (0, tncJitterNs cfg) rng'
+                deliverAt = tnsCurrentTime st + MonoTime (tncLatencyNs cfg) + MonoTime jitter
                 pkt =
                   InFlightPacket
                     { ifpFrom = tnsLocalAddr st,
@@ -164,10 +168,10 @@ advanceTime newTime = do
         tnsInbox = tnsInbox st Seq.>< delivered
       }
 
--- | Configure simulated latency.
+-- | Configure simulated one-way latency (in milliseconds).
 simulateLatency :: Word64 -> TestNet ()
 simulateLatency ms = modify' $ \st ->
-  st {tnsConfig = (tnsConfig st) {tncLatencyMs = ms}}
+  st {tnsConfig = (tnsConfig st) {tncLatencyNs = ms * nsPerMs}}
 
 -- | Configure simulated packet loss.
 simulateLoss :: Double -> TestNet ()

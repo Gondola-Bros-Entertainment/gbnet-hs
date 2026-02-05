@@ -1,13 +1,17 @@
--- | Shared sequence number utilities for Word16 wraparound arithmetic.
+-- | Shared utilities: sequence number wraparound and deterministic RNG.
 module GBNet.Util
   ( sequenceHalfRange,
     sequenceGreaterThan,
     sequenceDiff,
+
+    -- * Deterministic RNG (LCG + SplitMix output mixing)
+    nextRandom,
   )
 where
 
+import Data.Bits (shiftR, xor)
 import Data.Int (Int32)
-import Data.Word (Word16)
+import Data.Word (Word16, Word64)
 import GBNet.Types (SequenceNum (..))
 
 -- | Half the Word16 sequence space, used for wraparound comparison.
@@ -36,3 +40,22 @@ sequenceDiff (SequenceNum s1) (SequenceNum s2) =
             then diff + full
             else diff
 {-# INLINE sequenceDiff #-}
+
+-- | LCG constants.
+lcgMultiplier, lcgIncrement :: Word64
+lcgMultiplier = 6364136223846793005
+lcgIncrement = 1442695040888963407
+
+-- | SplitMix-style random number generator.
+-- Returns (output, nextState). Pure, deterministic, no IO.
+nextRandom :: Word64 -> (Word64, Word64)
+nextRandom s =
+  let next = lcgMultiplier * s + lcgIncrement
+      -- SplitMix-style output mixing (state is not exposed)
+      z0 = next `xor` (next `shiftR` 30)
+      z1 = z0 * 0xBF58476D1CE4E5B9
+      z2 = z1 `xor` (z1 `shiftR` 27)
+      z3 = z2 * 0x94D049BB133111EB
+      output = z3 `xor` (z3 `shiftR` 31)
+   in (output, next)
+{-# INLINE nextRandom #-}

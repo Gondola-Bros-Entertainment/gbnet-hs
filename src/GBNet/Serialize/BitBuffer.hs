@@ -171,6 +171,30 @@ computeByte value numBits startBitPos byteIdx oldByte =
    in (oldByte .&. complement mask) .|. shifted
 {-# INLINE computeByte #-}
 
+-- | Extract N bits from a range of bytes, inverse of 'computeByte'.
+-- For each affected byte, extracts the relevant bits via pure arithmetic.
+extractBits :: BS.ByteString -> Int -> Int -> Int -> Int -> Word64
+extractBits bytes numBits startBitPos startByte endByte = go startByte 0
+  where
+    !readEnd = startBitPos + numBits - 1
+    go !byteIdx !accum
+      | byteIdx > endByte = accum
+      | otherwise =
+          let !byteStart = byteIdx * bitsPerByte
+              !lo = max byteStart startBitPos
+              !hi = min (byteStart + msbIndex) readEnd
+              !count = hi - lo + 1
+              -- Which bits within this byte to extract (MSB-first)
+              !localLoBit = msbIndex - (hi - byteStart)
+              !byte = BS.index bytes byteIdx
+              !extracted =
+                fromIntegral
+                  ((byte `shiftR` localLoBit) .&. ((1 `shiftL` count) - 1)) ::
+                  Word64
+              !accum' = (accum `shiftL` count) .|. extracted
+           in go (byteIdx + 1) accum'
+{-# INLINE extractBits #-}
+
 -- | Read a single bit from the buffer.
 readBit :: BitBuffer -> Either String (ReadResult Bool)
 readBit buf =
@@ -195,32 +219,34 @@ readBits 0 buf = Right $ ReadResult {readValue = 0, readBuffer = buf}
 readBits numBits buf
   | numBits < 0 = Left "readBits: negative bit count"
   | numBits > maxBitsPerOp = Left "readBits: exceeds 64 bits"
-  | readPos buf `mod` bitsPerByte == 0 && numBits `mod` bitsPerByte == 0 =
-      -- Fast path: byte-aligned read
+  | isAligned = readAligned
+  | otherwise = readUnaligned
+  where
+    isAligned = readPos buf `mod` bitsPerByte == 0 && numBits `mod` bitsPerByte == 0
+    bytes = bufferBytes buf
+
+    readAligned =
       let startByte = readPos buf `div` bitsPerByte
           numBytes = numBits `div` bitsPerByte
-          endByte = startByte + numBytes
-          bytes = bufferBytes buf
-       in if endByte > BS.length bytes
-            then Left "readBits: buffer underflow"
-            else
-              let slice = BS.take numBytes (BS.drop startByte bytes)
-                  val = BS.foldl' (\acc w -> (acc `shiftL` bitsPerByte) .|. fromIntegral w) 0 slice
-               in Right $
-                    ReadResult
-                      { readValue = val,
-                        readBuffer = buf {readPos = readPos buf + numBits}
-                      }
-  | otherwise = readBitsLoop numBits 0 buf
-  where
-    readBitsLoop :: Int -> Word64 -> BitBuffer -> Either String (ReadResult Word64)
-    readBitsLoop 0 accum b = Right $ ReadResult {readValue = accum, readBuffer = b}
-    readBitsLoop n accum b =
-      case readBit b of
-        Left err -> Left err
-        Right (ReadResult bitVal b') ->
-          let !accum' = (accum `shiftL` 1) .|. (if bitVal then 1 else 0)
-           in readBitsLoop (n - 1) accum' b'
+       in guardBounds (startByte + numBytes - 1) $
+            let slice = BS.take numBytes (BS.drop startByte bytes)
+                val = BS.foldl' (\acc w -> (acc `shiftL` bitsPerByte) .|. fromIntegral w) 0 slice
+             in readResult val numBits
+
+    readUnaligned =
+      let !startBit = readPos buf
+          !endBit = startBit + numBits - 1
+          !startByte = startBit `div` bitsPerByte
+          !endByte = endBit `div` bitsPerByte
+       in guardBounds endByte $
+            let !val = extractBits bytes numBits startBit startByte endByte
+             in readResult val numBits
+
+    guardBounds lastByte ok
+      | lastByte >= BS.length bytes = Left "readBits: buffer underflow"
+      | otherwise = ok
+
+    readResult val n = Right $ ReadResult {readValue = val, readBuffer = buf {readPos = readPos buf + n}}
 
 -- | Convert buffer to ByteString (only written bytes).
 toBytes :: BitBuffer -> BS.ByteString

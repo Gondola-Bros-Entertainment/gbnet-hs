@@ -22,7 +22,7 @@ module GBNet.Reliability
     elapsedMs,
 
     -- * Sequence buffer
-    SequenceBuffer,
+    SequenceBuffer (..),
     newSequenceBuffer,
     sbInsert,
     sbExists,

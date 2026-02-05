@@ -388,10 +388,11 @@ cwSlowStartRestart rtoMs now cw =
     -- Idle for more than 2 RTOs triggers restart
     ssrIdleThreshold = 2.0
 
--- | Bandwidth tracker using a sliding window.
+-- | Bandwidth tracker using a sliding window with cached byte total.
 data BandwidthTracker = BandwidthTracker
   { btWindow :: !(Seq (MonoTime, Int)),
-    btWindowDurationMs :: !Double
+    btWindowDurationMs :: !Double,
+    btTotalBytes :: !Int -- ^ Cached running total of bytes in window
   }
   deriving (Show)
 
@@ -400,13 +401,14 @@ newBandwidthTracker :: Double -> BandwidthTracker
 newBandwidthTracker windowDurationMs =
   BandwidthTracker
     { btWindow = Seq.empty,
-      btWindowDurationMs = windowDurationMs
+      btWindowDurationMs = windowDurationMs,
+      btTotalBytes = 0
     }
 
 -- | Record bytes at the given time.
 btRecord :: Int -> MonoTime -> BandwidthTracker -> BandwidthTracker
 btRecord bytes now bt =
-  let bt' = bt {btWindow = btWindow bt Seq.|> (now, bytes)}
+  let bt' = bt {btWindow = btWindow bt Seq.|> (now, bytes), btTotalBytes = btTotalBytes bt + bytes}
    in btCleanup now bt'
 
 -- | Get bytes per second.
@@ -414,28 +416,31 @@ btBytesPerSecond :: BandwidthTracker -> Double
 btBytesPerSecond bt
   | Seq.null (btWindow bt) = 0.0
   | otherwise =
-      let totalBytes = sum $ snd <$> btWindow bt
-          elapsedSecs = btWindowDurationMs bt / 1000.0
+      let elapsedSecs = btWindowDurationMs bt / 1000.0
        in if elapsedSecs > 0
-            then fromIntegral totalBytes / elapsedSecs
+            then fromIntegral (btTotalBytes bt) / elapsedSecs
             else 0.0
 
--- | Clean up old entries.
+-- | Clean up old entries, maintaining the cached byte total.
 btCleanup :: MonoTime -> BandwidthTracker -> BandwidthTracker
 btCleanup now bt =
   let cutoffMs = btWindowDurationMs bt
-      isRecent (t, _) = elapsedMs t now < cutoffMs
-   in bt {btWindow = Seq.filter isRecent (btWindow bt)}
+      isStale (t, _) = elapsedMs t now >= cutoffMs
+      -- Drop stale entries from the front, subtracting their bytes
+      (stale, recent) = Seq.spanl isStale (btWindow bt)
+      evictedBytes = sum $ snd <$> stale
+   in bt {btWindow = recent, btTotalBytes = btTotalBytes bt - evictedBytes}
 
 -- | Pack multiple messages into batched packets.
 -- Wire format: [u8 count][u16 len][data]...
 batchMessages :: [BS.ByteString] -> Int -> [BS.ByteString]
-batchMessages messages maxSize = go messages [] [] batchHeaderSize 0
+batchMessages messages maxSize = reverse $ go messages [] [] batchHeaderSize 0
   where
-    go [] currentBatch batches _ msgCount
-      | msgCount > 0 = batches ++ [finalizeBatch msgCount currentBatch]
-      | otherwise = batches
-    go (msg : rest) currentBatch batches currentSize msgCount =
+    -- Both accumulators are built in reverse (cons) for O(1) prepend.
+    go [] currentBatch batchesAcc _ msgCount
+      | msgCount > 0 = finalizeBatch msgCount currentBatch : batchesAcc
+      | otherwise = batchesAcc
+    go (msg : rest) currentBatch batchesAcc currentSize msgCount =
       let msgWireSize = batchLengthSize + BS.length msg
           shouldFinalize =
             (currentSize + msgWireSize > maxSize && msgCount > 0)
@@ -445,20 +450,21 @@ batchMessages messages maxSize = go messages [] [] batchHeaderSize 0
               go
                 (msg : rest)
                 []
-                (batches ++ [finalizeBatch msgCount currentBatch])
+                (finalizeBatch msgCount currentBatch : batchesAcc)
                 batchHeaderSize
                 0
             else
               go
                 rest
-                (currentBatch ++ [msg])
-                batches
+                (msg : currentBatch)
+                batchesAcc
                 (currentSize + msgWireSize)
                 (msgCount + 1)
 
     finalizeBatch :: Int -> [BS.ByteString] -> BS.ByteString
-    finalizeBatch count msgs =
-      let countByte = BSB.word8 (fromIntegral count)
+    finalizeBatch count msgsRev =
+      let msgs = reverse msgsRev
+          countByte = BSB.word8 (fromIntegral count)
           msgBuilders = map (\m -> BSB.word16BE (fromIntegral (BS.length m)) <> BSB.byteString m) msgs
        in BSL.toStrict $ BSB.toLazyByteString $ countByte <> mconcat msgBuilders
 

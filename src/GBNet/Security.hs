@@ -27,7 +27,7 @@ module GBNet.Security
   )
 where
 
-import Data.Bits (shiftL, shiftR, (.&.))
+import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import qualified Data.ByteString as BS
 import qualified Data.Digest.CRC32C as CRC
 import Data.List (minimumBy)
@@ -77,15 +77,14 @@ word32ToLEBytes w =
     ]
 
 -- | Convert little-endian bytes to Word32.
+-- Caller must ensure at least 4 bytes; 'validateAndStripCrc32' guarantees this.
 word32FromLEBytes :: BS.ByteString -> Word32
-word32FromLEBytes bs
-  | BS.length bs < 4 = 0
-  | otherwise =
-      let b0 = fromIntegral (BS.index bs 0) :: Word32
-          b1 = fromIntegral (BS.index bs 1) :: Word32
-          b2 = fromIntegral (BS.index bs 2) :: Word32
-          b3 = fromIntegral (BS.index bs 3) :: Word32
-       in b0 + (b1 `shiftL` 8) + (b2 `shiftL` 16) + (b3 `shiftL` 24)
+word32FromLEBytes bs =
+  let b0 = fromIntegral (BS.index bs 0) :: Word32
+      b1 = fromIntegral (BS.index bs 1) :: Word32
+      b2 = fromIntegral (BS.index bs 2) :: Word32
+      b3 = fromIntegral (BS.index bs 3) :: Word32
+   in b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24)
 
 -- | Cleanup interval — sweep stale entries every 5 seconds.
 cleanupIntervalMs :: Double

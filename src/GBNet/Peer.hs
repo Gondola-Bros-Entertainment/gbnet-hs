@@ -65,8 +65,8 @@ module GBNet.Peer
   )
 where
 
-import Control.Monad.State.Strict (State, gets, modify', runState)
-import Data.Bits (shiftL, shiftR, xor, (.&.), (.|.))
+import Control.Monad.State.Strict (State, get, gets, modify', runState)
+import Data.Bits (shiftL, xor, (.&.), (.|.))
 import qualified Data.ByteString as BS
 import Data.Either (fromRight)
 import Data.Foldable (toList)
@@ -78,6 +78,7 @@ import qualified Data.Sequence as Seq
 import Data.Word (Word64, Word8)
 import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime (..))
 import GBNet.Config (NetworkConfig (..))
+import GBNet.Util (nextRandom)
 import GBNet.Connection
   ( Connection,
     ConnectionError (..),
@@ -112,7 +113,7 @@ import GBNet.Socket
   )
 import GBNet.Stats (NetworkStats)
 import GBNet.Types (ChannelId (..), SequenceNum (..))
-import Network.Socket (SockAddr)
+import Network.Socket (PortNumber, SockAddr (..))
 
 -- | Peer identifier wrapping a socket address.
 newtype PeerId = PeerId {unPeerId :: SockAddr}
@@ -269,22 +270,6 @@ generateCookieSecret seed = go seed cookieSecretSize []
       let (r, s') = nextRandom s
        in go s' (n - 1) (fromIntegral (r `mod` 256) : acc)
 
--- | SplitMix-style random number generator.
--- Uses a different output function from the state update to avoid leaking state.
-nextRandom :: Word64 -> (Word64, Word64)
-nextRandom s =
-  let -- LCG state update
-      a = 6364136223846793005
-      c = 1442695040888963407
-      next = a * s + c
-      -- SplitMix-style output mixing (state is not exposed)
-      z0 = next `xor` (next `shiftR` 30)
-      z1 = z0 * 0xBF58476D1CE4E5B9
-      z2 = z1 `xor` (z1 `shiftR` 27)
-      z3 = z2 * 0x94D049BB133111EB
-      output = z3 `xor` (z3 `shiftR` 31)
-   in (output, next)
-
 -- -----------------------------------------------------------------------------
 -- Helper functions for pure API
 -- -----------------------------------------------------------------------------
@@ -406,20 +391,16 @@ peerProcessS now packets = do
   pure (events1 ++ events2 ++ events3)
 
 -- | Drain send queues from all connections into the peer's send queue.
+-- Single-pass over the connection map via foldlWithKey'.
 drainAllConnectionQueues :: MonoTime -> NetPeer -> NetPeer
 drainAllConnectionQueues _now peer =
-  let peerIds = Map.keys (npConnections peer)
-   in foldl' drainConnectionQueue peer peerIds
+  Map.foldlWithKey' drainOne (peer {npConnections = Map.empty}) (npConnections peer)
   where
-    drainConnectionQueue p peerId =
-      case Map.lookup peerId (npConnections p) of
-        Nothing -> p
-        Just conn ->
-          let (connPackets, conn') = Conn.drainSendQueue conn
-              p' = p {npConnections = Map.insert peerId conn' (npConnections p)}
-              -- Convert OutgoingPackets to RawPackets
-              rawPackets = map (outgoingToRaw peerId) connPackets
-           in foldl' (flip queueRawPacket) p' rawPackets
+    drainOne p peerId conn =
+      let (connPackets, conn') = Conn.drainSendQueue conn
+          rawPackets = map (outgoingToRaw peerId) connPackets
+          p' = p {npConnections = Map.insert peerId conn' (npConnections p)}
+       in foldl' (flip queueRawPacket) p' rawPackets
 
     outgoingToRaw peerId (OutgoingPacket hdr ptype payload) =
       let header = hdr {packetType = ptype}
@@ -584,7 +565,7 @@ handleConnectionRequestS peerId now = do
             modify' $ \peer -> peer {npRateLimitDrops = npRateLimitDrops peer + 1}
             pure []
           else do
-            peer <- gets id
+            peer <- get
             let pendingSize = Map.size (npPending peer)
                 connSize = Map.size (npConnections peer)
                 maxClients = ncMaxClients (npConfig peer)
@@ -740,14 +721,12 @@ handlePayloadS peerId pkt now = do
     Just conn -> do
       let conn' = Conn.touchRecvTime now $ processIncomingHeader (pktHeader pkt) now conn
           payload = pktPayload pkt
-      if BS.length payload < 1
-        then do
+      case BS.uncons payload of
+        Nothing -> do
           modify' $ \peer -> peer {npConnections = Map.insert peerId conn' (npConnections peer)}
           pure []
-        else do
-          let headerByte = BS.head payload
-              (channel, isFragment) = decodePayloadHeader headerByte
-              rest = BS.tail payload
+        Just (headerByte, rest) -> do
+          let (channel, isFragment) = decodePayloadHeader headerByte
           if isFragment
             then do
               modify' $ \peer -> peer {npConnections = Map.insert peerId conn' (npConnections peer)}
@@ -794,7 +773,7 @@ handleMigrationS newPeerId pkt now = do
   if not (ncEnableConnectionMigration config)
     then pure []
     else do
-      peer <- gets id
+      peer <- get
       case findMigrationCandidate pkt now peer of
         Nothing -> pure [] -- No matching connection
         Just (oldPeerId, conn, migrationToken) ->
@@ -945,9 +924,7 @@ encodeDenyReason = BS.singleton
 
 -- | Decode a deny reason from bytes.
 decodeDenyReason :: BS.ByteString -> Word8
-decodeDenyReason bs
-  | BS.null bs = 0
-  | otherwise = BS.head bs
+decodeDenyReason bs = maybe 0 fst (BS.uncons bs)
 
 -- | FNV-1a hash seed.
 fnvOffsetBasis :: Word64
@@ -958,10 +935,29 @@ fnvPrime :: Word64
 fnvPrime = 1099511628211
 
 -- | Convert SockAddr to a key for rate limiting using FNV-1a hash.
+-- Hashes the raw address/port words directly, avoiding 'show'.
 sockAddrToKey :: SockAddr -> Word64
-sockAddrToKey addr =
-  let str = show addr
-   in foldl' (\h c -> (h `xor` fromIntegral (fromEnum c)) * fnvPrime) fnvOffsetBasis str
+sockAddrToKey addr = case addr of
+  SockAddrInet port host ->
+    fnvMix (fnvMix fnvOffsetBasis (fromIntegral host)) (fromIntegral (portToWord port))
+  SockAddrInet6 port _ (h1, h2, h3, h4) _ ->
+    foldl' fnvMix fnvOffsetBasis
+      [ fromIntegral (portToWord port),
+        fromIntegral h1,
+        fromIntegral h2,
+        fromIntegral h3,
+        fromIntegral h4
+      ]
+  _ -> fnvMix fnvOffsetBasis 0
+  where
+    portToWord :: PortNumber -> Word64
+    portToWord = fromIntegral
+    {-# INLINE portToWord #-}
+
+-- | FNV-1a mix step: XOR then multiply.
+fnvMix :: Word64 -> Word64 -> Word64
+fnvMix h val = (h `xor` val) * fnvPrime
+{-# INLINE fnvMix #-}
 
 -- | Send a message to a connected peer.
 peerSend ::
@@ -1010,8 +1006,8 @@ peerStats peerId peer =
   Conn.connectionStats <$> Map.lookup peerId (npConnections peer)
 
 -- | Get the local address.
-peerLocalAddr :: NetPeer -> IO (Either SocketError SockAddr)
-peerLocalAddr peer = socketLocalAddr (npSocket peer)
+peerLocalAddr :: NetPeer -> SockAddr
+peerLocalAddr = npLocalAddr
 
 -- | Get list of all connected peer IDs.
 peerConnectedIds :: NetPeer -> [PeerId]

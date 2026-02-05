@@ -107,6 +107,10 @@ import GBNet.Stats
 import GBNet.Types (ChannelId (..), SequenceNum (..), channelIdToInt)
 import GBNet.Util (sequenceGreaterThan)
 
+-- | Bandwidth tracking window duration in milliseconds.
+bandwidthWindowMs :: Double
+bandwidthWindowMs = 1000.0
+
 -- | States of the connection state machine.
 data ConnectionState
   = Disconnected
@@ -229,7 +233,6 @@ newConnection config clientSalt now =
         if ncUseCwndCongestion config
           then Just (newCongestionWindow (ncMtu config))
           else Nothing
-      bandwidthWindowMs = 1000.0
    in Connection
         { connConfig = config,
           connState = Disconnected,
@@ -593,28 +596,19 @@ processChannelMessages now conn chIdx =
                         }
                  in processChannelMessages now conn' chIdx
 
--- | Send keepalive packet.
-sendKeepalive :: Connection -> Connection
-sendKeepalive conn =
+-- | Enqueue an empty keepalive/ack-only packet.
+-- Both keepalive and ack-only use the same wire format (Keepalive with empty payload).
+sendKeepalive, sendAckOnly :: Connection -> Connection
+sendKeepalive = enqueueEmptyPacket
+sendAckOnly = enqueueEmptyPacket
+
+-- | Shared implementation for keepalive and ack-only packets.
+enqueueEmptyPacket :: Connection -> Connection
+enqueueEmptyPacket conn =
   let header = createHeaderInternal conn
       pkt =
         OutgoingPacket
           { opHeader = header {packetType = Keepalive},
-            opType = Keepalive,
-            opPayload = BS.empty
-          }
-   in conn
-        { connSendQueue = connSendQueue conn Seq.|> pkt,
-          connLocalSeq = connLocalSeq conn + 1
-        }
-
--- | Send AckOnly packet.
-sendAckOnly :: Connection -> Connection
-sendAckOnly conn =
-  let header = createHeaderInternal conn
-      pkt =
-        OutgoingPacket
-          { opHeader = header {packetType = Keepalive}, -- Use Keepalive as AckOnly
             opType = Keepalive,
             opPayload = BS.empty
           }
@@ -675,8 +669,8 @@ resetConnection conn =
               (ncCongestionBadLossThreshold config)
               (ncCongestionGoodRttThreshold config)
               (ncCongestionRecoveryTimeMs config),
-          connBandwidthUp = newBandwidthTracker 1000.0,
-          connBandwidthDown = newBandwidthTracker 1000.0
+          connBandwidthUp = newBandwidthTracker bandwidthWindowMs,
+          connBandwidthDown = newBandwidthTracker bandwidthWindowMs
         }
 
 -- | Drain send queue.

@@ -31,7 +31,7 @@ import GBNet.Packet
 import GBNet.Reliability
   ( ReliableEndpoint (..),
     SentPacketRecord (..),
-    SequenceBuffer,
+    SequenceBuffer (..),
     newReliableEndpoint,
     newSequenceBuffer,
     onPacketReceived,
@@ -90,7 +90,8 @@ instance NFData BitBuffer where rnf buf = rnf (toBytes buf)
 
 instance NFData Vec3 where rnf (Vec3 x y z) = rnf x `seq` rnf y `seq` rnf z
 
-instance NFData (ReadResult a) where rnf (ReadResult !_ !_) = ()
+instance (NFData a) => NFData (ReadResult a) where
+  rnf (ReadResult val buf) = rnf val `seq` rnf buf
 
 -- Packet
 instance NFData PacketHeader where
@@ -102,7 +103,7 @@ instance NFData SentPacketRecord where
     rnf ci `seq` rnf cs `seq` rnf st `seq` rnf sz `seq` rnf nc
 
 instance (NFData a) => NFData (SequenceBuffer a) where
-  rnf = rwhnf
+  rnf sb = rnf (sbEntries sb) `seq` rnf (sbSequence sb) `seq` rnf (sbSize sb)
 
 instance NFData ReliableEndpoint where
   rnf (ReliableEndpoint ls rs ab sp rp msd mif srtt rv rto hrs lw lwi lwc ts ta tl pe bs ba) =

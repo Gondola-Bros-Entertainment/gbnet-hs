@@ -19,7 +19,7 @@ where
 
 import Control.Monad (when)
 import Control.Monad.State.Strict (State, gets, modify', runState)
-import Data.Bits (shiftR, xor, (.&.))
+import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
 import Data.Sequence (Seq)
@@ -28,6 +28,7 @@ import Data.Word (Word64)
 import GBNet.Class (MonoTime (..))
 import GBNet.Config (SimulationConfig (..))
 import GBNet.Reliability (elapsedMs)
+import GBNet.Util (nextRandom)
 
 -- | Maximum extra delay (ms) applied to out-of-order packets.
 outOfOrderMaxDelayMs :: Double
@@ -179,25 +180,15 @@ refillTokensS now = modify' $ \sim ->
           nsLastTokenRefill = now
         }
 
--- | SplitMix-style random number generator (State version).
--- Uses a different output function from the state update to avoid leaking state.
+-- | Stateful wrapper around the shared 'nextRandom' from GBNet.Util.
 nextRandomS :: State NetworkSimulator Word64
 nextRandomS = do
   s <- gets nsRngState
-  let -- LCG state update
-      a = 6364136223846793005
-      c = 1442695040888963407
-      next = a * s + c
-      -- SplitMix-style output mixing (state is not exposed)
-      z0 = next `xor` (next `shiftR` 30)
-      z1 = z0 * 0xBF58476D1CE4E5B9
-      z2 = z1 `xor` (z1 `shiftR` 27)
-      z3 = z2 * 0x94D049BB133111EB
-      output = z3 `xor` (z3 `shiftR` 31)
+  let (output, next) = nextRandom s
   modify' $ \sim -> sim {nsRngState = next}
   pure output
 
 -- | Convert random Word64 to double in [0, 1).
--- Uses upper 32 bits for better uniformity with SplitMix output.
+-- Uses lower 32 bits; SplitMix output mixing ensures all bits are well-distributed.
 randomDouble :: Word64 -> Double
 randomDouble w = fromIntegral (w .&. 0xFFFFFFFF) / 4294967296.0

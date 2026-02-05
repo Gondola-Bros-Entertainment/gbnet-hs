@@ -41,13 +41,26 @@ data ConnectionQuality
   | QualityBad
   deriving (Eq, Show, Ord)
 
+-- Quality thresholds: (lossPercent, rttMs)
+badLossThreshold, poorLossThreshold, fairLossThreshold, goodLossThreshold :: Float
+badLossThreshold = 10.0
+poorLossThreshold = 5.0
+fairLossThreshold = 2.0
+goodLossThreshold = 0.5
+
+badRttThreshold, poorRttThreshold, fairRttThreshold, goodRttThreshold :: Float
+badRttThreshold = 500.0
+poorRttThreshold = 250.0
+fairRttThreshold = 150.0
+goodRttThreshold = 80.0
+
 -- | Assess connection quality from RTT and packet loss.
 assessConnectionQuality :: Float -> Float -> ConnectionQuality
 assessConnectionQuality rttMs lossPercent
-  | lossPercent > 10.0 || rttMs > 500.0 = QualityBad
-  | lossPercent > 5.0 || rttMs > 250.0 = QualityPoor
-  | lossPercent > 2.0 || rttMs > 150.0 = QualityFair
-  | lossPercent > 0.5 || rttMs > 80.0 = QualityGood
+  | lossPercent > badLossThreshold || rttMs > badRttThreshold = QualityBad
+  | lossPercent > poorLossThreshold || rttMs > poorRttThreshold = QualityPoor
+  | lossPercent > fairLossThreshold || rttMs > fairRttThreshold = QualityFair
+  | lossPercent > goodLossThreshold || rttMs > goodRttThreshold = QualityGood
   | otherwise = QualityExcellent
 
 -- | Congestion pressure level reported to the application.

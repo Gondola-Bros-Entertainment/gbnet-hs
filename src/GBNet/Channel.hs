@@ -301,7 +301,7 @@ onMessageReceived seqNum payload now ch =
           ch
             { chReceiveBuffer = chReceiveBuffer ch |> payload,
               chPendingAck = seqNum : chPendingAck ch,
-              chRemoteSequence = max seqNum (chRemoteSequence ch),
+              chRemoteSequence = seqNum,
               chTotalReceived = chTotalReceived ch + 1
             }
         else

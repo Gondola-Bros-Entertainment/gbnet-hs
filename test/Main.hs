@@ -11,13 +11,37 @@ import qualified Data.ByteString as BS
 import Data.Int (Int16, Int32, Int64, Int8)
 import qualified Data.Text as T
 import Data.Word (Word16, Word32, Word64, Word8)
+import GBNet.Channel
 import GBNet.Class ()
-import GBNet.Config (NetworkConfig (..), defaultNetworkConfig)
+import GBNet.Config
+  ( ConfigError (..),
+    NetworkConfig (..),
+    SimulationConfig (..),
+    defaultNetworkConfig,
+    defaultSimulationConfig,
+    maxChannelCount,
+    validateConfig,
+  )
 import GBNet.Congestion
-import GBNet.Connection (DisconnectReason (..))
+import GBNet.Connection
+  ( Connection (..),
+    ConnectionError (..),
+    ConnectionState (..),
+    DisconnectReason (..),
+    connect,
+    connectionState,
+    createHeader,
+    markConnected,
+    newConnection,
+    sendMessage,
+  )
+import GBNet.Fragment
 import GBNet.Packet
 import GBNet.Peer
 import GBNet.Reliability
+import GBNet.Replication.Delta
+import GBNet.Security
+import GBNet.Simulator
 import GBNet.Replication.Interest
 import GBNet.Replication.Interpolation
 import GBNet.Replication.Priority
@@ -27,7 +51,7 @@ import GBNet.Serialize.TH
 import GBNet.Socket (UdpSocket (..))
 import GBNet.Stats (CongestionLevel (..), defaultSocketStats)
 import GBNet.TestNet
-import GBNet.Types (ChannelId (..), SequenceNum (..))
+import GBNet.Types (ChannelId (..), MessageId (..), SequenceNum (..))
 import GBNet.Util
 import Network.Socket (SockAddr (..), tupleToHostAddress)
 import qualified Network.Socket as NS
@@ -178,6 +202,43 @@ main = do
 
   -- Integration: Connection migration
   testConnectionMigration
+
+  -- Channel delivery modes, errors, retransmit
+  testChannelSendBufferFull
+  testChannelSendOversized
+  testChannelUnreliableDelivery
+  testChannelReliableOrderedDelivery
+  testChannelReliableSequencedDropOld
+  testChannelRetransmit
+
+  -- Fragment: split, reassemble, header roundtrip, cleanup, too-large
+  testFragmentSplitReassemble
+  testFragmentHeaderRoundTrip
+  testFragmentCleanupExpiry
+  testFragmentTooLarge
+
+  -- Security: CRC32C, rate limiting, token validation
+  testCrc32Roundtrip
+  testCrc32RejectCorrupt
+  testRateLimiterAllow
+  testRateLimiterDeny
+  testTokenValidation
+  testTokenExpired
+  testTokenReplayed
+
+  -- Connection state machine
+  testConnectionStateMachine
+  testConnectionSendReceive
+
+  -- Config validation
+  testValidateConfigValid
+  testValidateConfigErrors
+
+  -- Delta encode/decode
+  testDeltaEncodeDecodeTrivial
+
+  -- Simulator
+  testSimulatorBasic
 
   putStrLn ""
   putStrLn "All tests passed!"
@@ -1587,3 +1648,539 @@ testConnectionMigration = do
           assertEqual "migration config enabled" True (ncEnableConnectionMigration config)
           assertEqual "server still has connection" 1 (peerCount (prPeer result))
           putStrLn "  PASS: Migration wired up (packet not matched)"
+
+-- --------------------------------------------------------------------
+-- Connection state machine tests
+-- --------------------------------------------------------------------
+
+testConnectionStateMachine :: IO ()
+testConnectionStateMachine = do
+  putStrLn "Connection state machine:"
+  let config = defaultNetworkConfig
+      clientSalt = 12345 :: Word64
+      now = 0 :: MonoTime
+
+  -- newConnection starts in Disconnected state
+  let conn0 = newConnection config clientSalt now
+  assertEqual "initial state Disconnected" Disconnected (connectionState conn0)
+
+  -- connect transitions to Connecting
+  case connect now conn0 of
+    Left err -> error $ "  FAIL: connect returned error: " ++ show err
+    Right conn1 -> do
+      assertEqual "state after connect" Connecting (connectionState conn1)
+
+      -- connect on a non-Disconnected connection returns ErrAlreadyConnected
+      case connect now conn1 of
+        Left ErrAlreadyConnected -> putStrLn "  PASS: double connect rejected"
+        Left other -> error $ "  FAIL: expected ErrAlreadyConnected, got " ++ show other
+        Right _ -> error "  FAIL: double connect should fail"
+
+  -- createHeader increments local sequence
+  let conn0' = newConnection config clientSalt now
+  let seqBefore = connLocalSeq conn0'
+  let (_header, conn1') = createHeader conn0'
+  assertEqual "local seq incremented" (seqBefore + 1) (connLocalSeq conn1')
+
+  -- Second createHeader increments again
+  let (_header2, conn2') = createHeader conn1'
+  assertEqual "local seq incremented again" (seqBefore + 2) (connLocalSeq conn2')
+
+testConnectionSendReceive :: IO ()
+testConnectionSendReceive = do
+  putStrLn "Connection send/receive:"
+  let config = defaultNetworkConfig
+      clientSalt = 67890 :: Word64
+      now = 0 :: MonoTime
+
+  -- sendMessage on a Disconnected connection returns ErrNotConnected
+  let conn0 = newConnection config clientSalt now
+  case sendMessage (ChannelId 0) "hello" now conn0 of
+    Left ErrNotConnected -> putStrLn "  PASS: send on disconnected fails"
+    Left other -> error $ "  FAIL: expected ErrNotConnected, got " ++ show other
+    Right _ -> error "  FAIL: send on disconnected should fail"
+
+  -- Mark the connection as Connected, then sendMessage should succeed
+  let connConnected = markConnected now conn0
+  assertEqual "state is Connected" Connected (connectionState connConnected)
+
+  case sendMessage (ChannelId 0) "hello" now connConnected of
+    Left err -> error $ "  FAIL: send on connected failed: " ++ show err
+    Right connAfterSend -> do
+      assertEqual "still Connected after send" Connected (connectionState connAfterSend)
+      putStrLn "  PASS: send on connected channel 0"
+
+  -- sendMessage on an invalid channel returns ErrInvalidChannel
+  case sendMessage (ChannelId 99) "bad" now connConnected of
+    Left (ErrInvalidChannel _) -> putStrLn "  PASS: send on invalid channel rejected"
+    Left other -> error $ "  FAIL: expected ErrInvalidChannel, got " ++ show other
+    Right _ -> error "  FAIL: send on invalid channel should fail"
+
+-- --------------------------------------------------------------------
+-- Config validation tests
+-- --------------------------------------------------------------------
+
+testValidateConfigValid :: IO ()
+testValidateConfigValid = do
+  putStrLn "Config validation (valid):"
+  assertEqual "default config valid" (Right ()) (validateConfig defaultNetworkConfig)
+
+testValidateConfigErrors :: IO ()
+testValidateConfigErrors = do
+  putStrLn "Config validation (errors):"
+
+  -- Fragment threshold > MTU
+  let cfgFragExceedsMtu = defaultNetworkConfig {ncFragmentThreshold = ncMtu defaultNetworkConfig + 1}
+  assertEqual "fragment > mtu" (Left FragmentThresholdExceedsMtu) (validateConfig cfgFragExceedsMtu)
+
+  -- Max channels > maxChannelCount (8)
+  let cfgTooManyChannels = defaultNetworkConfig {ncMaxChannels = maxChannelCount + 1}
+  assertEqual "channels > max" (Left InvalidChannelCount) (validateConfig cfgTooManyChannels)
+
+  -- Max channels = 0
+  let cfgZeroChannels = defaultNetworkConfig {ncMaxChannels = 0}
+  assertEqual "channels = 0" (Left InvalidChannelCount) (validateConfig cfgZeroChannels)
+
+-- --------------------------------------------------------------------
+-- Delta encode/decode tests
+-- --------------------------------------------------------------------
+
+-- Simple test type for delta compression: a pair of Word8 values.
+-- We serialize as two Word8s and delta as two Maybe Word8s.
+data TestDeltaState = TestDeltaState !Word8 !Word8
+  deriving (Eq, Show)
+
+instance BitSerialize TestDeltaState where
+  bitSerialize (TestDeltaState a b) = bitSerialize b . bitSerialize a
+
+instance BitDeserialize TestDeltaState where
+  bitDeserialize buf = do
+    ra <- bitDeserialize buf
+    rb <- bitDeserialize (readBuffer ra)
+    pure (ReadResult (TestDeltaState (readValue ra) (readValue rb)) (readBuffer rb))
+
+data TestDeltaDelta = TestDeltaDelta !(Maybe Word8) !(Maybe Word8)
+  deriving (Eq, Show)
+
+instance BitSerialize TestDeltaDelta where
+  bitSerialize (TestDeltaDelta ma mb) = bitSerialize mb . bitSerialize ma
+
+instance BitDeserialize TestDeltaDelta where
+  bitDeserialize buf = do
+    ra <- bitDeserialize buf
+    rb <- bitDeserialize (readBuffer ra)
+    pure (ReadResult (TestDeltaDelta (readValue ra) (readValue rb)) (readBuffer rb))
+
+instance NetworkDelta TestDeltaState where
+  type Delta TestDeltaState = TestDeltaDelta
+  diff (TestDeltaState a1 b1) (TestDeltaState a2 b2) =
+    TestDeltaDelta
+      (if a1 /= a2 then Just a1 else Nothing)
+      (if b1 /= b2 then Just b1 else Nothing)
+  apply (TestDeltaState a b) (TestDeltaDelta ma mb) =
+    TestDeltaState (maybe a id ma) (maybe b id mb)
+
+testDeltaEncodeDecodeTrivial :: IO ()
+testDeltaEncodeDecodeTrivial = do
+  putStrLn "Delta encode/decode trivial:"
+
+  -- No baseline: encodes full state, decodes back
+  let tracker0 = newDeltaTracker 16 :: DeltaTracker TestDeltaState
+      state1 = TestDeltaState 10 20
+      (encoded, tracker1) = deltaEncode 0 state1 tracker0
+      baselines0 = newBaselineManager 16 5000.0 :: BaselineManager TestDeltaState
+
+  case deltaDecode encoded baselines0 of
+    Left err -> error $ "  FAIL: decode without baseline: " ++ err
+    Right decoded ->
+      assertEqual "full state roundtrip" state1 decoded
+
+  -- Acknowledge seq 0 so it becomes the confirmed baseline
+  let tracker2 = deltaOnAck 0 tracker1
+  assertEqual "confirmed seq" (Just 0) (deltaConfirmedSeq tracker2)
+
+  -- Push baseline on receiver side
+  let baselines1 = pushBaseline 0 state1 0 baselines0
+  assertEqual "baseline count" 1 (baselineCount baselines1)
+  assertEqual "baseline lookup" (Just state1) (getBaseline 0 baselines1)
+
+  -- Encode a new state against the confirmed baseline
+  let state2 = TestDeltaState 10 30 -- only second field changed
+      (encoded2, _tracker3) = deltaEncode 1 state2 tracker2
+
+  case deltaDecode encoded2 baselines1 of
+    Left err -> error $ "  FAIL: decode with baseline: " ++ err
+    Right decoded2 ->
+      assertEqual "delta roundtrip" state2 decoded2
+
+  -- BaselineManager empty/reset
+  assertEqual "baseline not empty" False (baselineIsEmpty baselines1)
+  let baselines2 = baselineReset baselines1
+  assertEqual "baseline empty after reset" True (baselineIsEmpty baselines2)
+
+  -- DeltaTracker reset
+  let tracker4 = deltaReset tracker2
+  assertEqual "confirmed seq after reset" Nothing (deltaConfirmedSeq tracker4)
+
+-- --------------------------------------------------------------------
+-- Simulator tests
+-- --------------------------------------------------------------------
+
+testSimulatorBasic :: IO ()
+testSimulatorBasic = do
+  putStrLn "Simulator basic:"
+  let now = 0 :: MonoTime
+      config = defaultSimulationConfig -- 0% loss, 0 latency, 0 jitter
+
+  -- newNetworkSimulator creates empty simulator
+  let sim0 = newNetworkSimulator config now
+  assertEqual "initial pending count" 0 (simulatorPendingCount sim0)
+
+  -- With 0% loss and 0 latency, packet should be delivered immediately
+  let testData = "hello" :: BS.ByteString
+      testAddr' = 42 :: Word64
+      (immediate, sim1) = simulatorProcessSend testData testAddr' now sim0
+
+  assertEqual "immediate delivery count" 1 (length immediate)
+  case immediate of
+    [(dat, addr)] -> do
+      assertEqual "delivered data" testData dat
+      assertEqual "delivered addr" testAddr' addr
+    _ -> error "  FAIL: unexpected immediate result"
+
+  -- Nothing should be queued since latency is 0
+  assertEqual "no pending after immediate" 0 (simulatorPendingCount sim1)
+
+  -- Test with latency: packets should be delayed
+  let configWithLatency = defaultSimulationConfig {simLatencyMs = 100}
+      sim2 = newNetworkSimulator configWithLatency now
+      (immediate2, sim3) = simulatorProcessSend testData testAddr' now sim2
+
+  assertEqual "no immediate with latency" 0 (length immediate2)
+  assertEqual "1 pending with latency" 1 (simulatorPendingCount sim3)
+
+  -- Receiving before delivery time returns nothing
+  let tooEarly = now + 50000000 -- 50ms in nanoseconds
+      (earlyResults, sim4) = simulatorReceiveReady tooEarly sim3
+  assertEqual "nothing ready early" 0 (length earlyResults)
+  assertEqual "still 1 pending" 1 (simulatorPendingCount sim4)
+
+  -- Receiving after delivery time returns the packet
+  let lateEnough = now + 200000000000 -- well past 100ms delay
+      (lateResults, sim5) = simulatorReceiveReady lateEnough sim4
+  assertEqual "packet ready" 1 (length lateResults)
+  assertEqual "no pending after receive" 0 (simulatorPendingCount sim5)
+
+  case lateResults of
+    [(dat, addr)] -> do
+      assertEqual "received data" testData dat
+      assertEqual "received addr" testAddr' addr
+    _ -> error "  FAIL: unexpected late result"
+
+-- --------------------------------------------------------------------
+-- Channel: delivery modes, errors, retransmit
+-- --------------------------------------------------------------------
+
+testChannelSendBufferFull :: IO ()
+testChannelSendBufferFull = do
+  putStrLn "Channel send buffer full:"
+  let config = defaultChannelConfig {ccMessageBufferSize = 1, ccBlockOnFull = True}
+      ch0 = newChannel (ChannelId 0) config
+      now = 0 :: MonoTime
+      payload = "hello"
+  -- First send succeeds
+  case channelSend payload now ch0 of
+    Left _ -> error "  FAIL: first send should succeed"
+    Right (_, ch1) ->
+      -- Second send should fail with buffer full (blockOnFull = True)
+      case channelSend payload now ch1 of
+        Left ChannelBufferFull -> putStrLn "  PASS: buffer full returns ChannelBufferFull"
+        Left e -> error $ "  FAIL: expected ChannelBufferFull, got " ++ show e
+        Right _ -> error "  FAIL: expected buffer full error"
+
+testChannelSendOversized :: IO ()
+testChannelSendOversized = do
+  putStrLn "Channel send oversized message:"
+  let config = defaultChannelConfig {ccMaxMessageSize = 10}
+      ch = newChannel (ChannelId 0) config
+      now = 0 :: MonoTime
+      bigPayload = BS.replicate 11 0x41
+  case channelSend bigPayload now ch of
+    Left ChannelMessageTooLarge -> putStrLn "  PASS: oversized returns ChannelMessageTooLarge"
+    Left e -> error $ "  FAIL: expected ChannelMessageTooLarge, got " ++ show e
+    Right _ -> error "  FAIL: expected oversized error"
+
+testChannelUnreliableDelivery :: IO ()
+testChannelUnreliableDelivery = do
+  putStrLn "Channel unreliable delivery:"
+  let config = unreliableConfig
+      ch0 = newChannel (ChannelId 0) config
+      now = 0 :: MonoTime
+      payload = "test-data"
+  -- Send a message
+  case channelSend payload now ch0 of
+    Left e -> error $ "  FAIL: send failed: " ++ show e
+    Right (seqNum, ch1) -> do
+      assertEqual "assigned seq 0" (SequenceNum 0) seqNum
+      -- Get outgoing message
+      case getOutgoingMessage ch1 of
+        Nothing -> error "  FAIL: no outgoing message"
+        Just (msg, ch2) -> do
+          assertEqual "outgoing seq" (SequenceNum 0) (cmSequence msg)
+          assertEqual "outgoing data" payload (cmData msg)
+          -- Simulate receiving this message on the remote side
+          let ch3 = onMessageReceived (cmSequence msg) (cmData msg) now ch2
+          -- Read received messages
+          let (received, _ch4) = channelReceive ch3
+          assertEqual "received 1 message" 1 (length received)
+          assertEqual "received data matches" payload (head received)
+          putStrLn "  PASS: unreliable send/receive roundtrip"
+
+testChannelReliableOrderedDelivery :: IO ()
+testChannelReliableOrderedDelivery = do
+  putStrLn "Channel reliable ordered delivery (out-of-order arrival):"
+  let config = reliableOrderedConfig
+      ch0 = newChannel (ChannelId 0) config
+      now = 0 :: MonoTime
+      payload0 = "msg-0"
+      payload1 = "msg-1"
+      payload2 = "msg-2"
+  -- Receive messages out of order: 0, 2, 1
+  -- Receive seq 0 (expected = 0, so delivered immediately)
+  let ch1 = onMessageReceived (SequenceNum 0) payload0 now ch0
+  -- Receive seq 2 (expected = 1, so buffered)
+  let ch2 = onMessageReceived (SequenceNum 2) payload2 now ch1
+  -- Receive seq 1 (expected = 1, so delivered, then flushes buffered seq 2)
+  let ch3 = onMessageReceived (SequenceNum 1) payload1 now ch2
+  -- Read all received messages
+  let (received, _ch4) = channelReceive ch3
+  assertEqual "received 3 messages" 3 (length received)
+  assertEqual "order: msg-0 first" payload0 (received !! 0)
+  assertEqual "order: msg-1 second" payload1 (received !! 1)
+  assertEqual "order: msg-2 third" payload2 (received !! 2)
+
+testChannelReliableSequencedDropOld :: IO ()
+testChannelReliableSequencedDropOld = do
+  putStrLn "Channel reliable sequenced drops old:"
+  let config = reliableSequencedConfig
+      ch0 = newChannel (ChannelId 0) config
+      now = 0 :: MonoTime
+  -- Receive seq 2 first (greater than remote seq 0, so accepted)
+  let ch1 = onMessageReceived (SequenceNum 2) "new-msg" now ch0
+  -- Receive seq 0 (not greater than remote seq 2, so dropped)
+  let ch2 = onMessageReceived (SequenceNum 0) "old-msg" now ch1
+  let (received, _ch3) = channelReceive ch2
+  assertEqual "only 1 message received" 1 (length received)
+  assertEqual "received the newer message" "new-msg" (head received)
+  assertEqual "1 message dropped" 1 (chTotalDropped ch2)
+
+testChannelRetransmit :: IO ()
+testChannelRetransmit = do
+  putStrLn "Channel retransmission after RTO:"
+  let config = reliableOrderedConfig
+      ch0 = newChannel (ChannelId 0) config
+      sendTime = 0 :: MonoTime
+      payload = "reliable-msg"
+      rto = 200.0 :: Double -- RTO in milliseconds
+  -- Send a reliable message
+  case channelSend payload sendTime ch0 of
+    Left e -> error $ "  FAIL: send failed: " ++ show e
+    Right (_, ch1) -> do
+      -- Get outgoing message (marks as sent, retryCount -> 1)
+      case getOutgoingMessage ch1 of
+        Nothing -> error "  FAIL: no outgoing message"
+        Just (_, ch2) -> do
+          -- Check before RTO: no retransmits
+          let beforeRto = sendTime + 100000000 -- 100ms in nanoseconds
+          let (retransBefore, ch3) = getRetransmitMessages beforeRto rto ch2
+          assertEqual "no retransmit before RTO" 0 (length retransBefore)
+          -- Check after RTO: should retransmit
+          let afterRto = sendTime + 300000000 -- 300ms in nanoseconds (> 200ms RTO)
+          let (retransAfter, ch4) = getRetransmitMessages afterRto rto ch3
+          assertEqual "1 retransmit after RTO" 1 (length retransAfter)
+          assertEqual "retransmitted data" payload (cmData (head retransAfter))
+          assertEqual "retransmit count incremented" 1 (chTotalRetransmits ch4)
+
+-- --------------------------------------------------------------------
+-- Fragment: split, reassemble, header roundtrip, cleanup, too-large
+-- --------------------------------------------------------------------
+
+testFragmentSplitReassemble :: IO ()
+testFragmentSplitReassemble = do
+  putStrLn "Fragment split and reassemble:"
+  let msgId = MessageId 42
+      -- Create a message larger than maxFragmentPayload
+      maxPayload = 100
+      msgData = BS.replicate 250 0xAB
+      expectedFragCount = (BS.length msgData + maxPayload - 1) `div` maxPayload -- 3
+  case fragmentMessage msgId msgData maxPayload of
+    Left e -> error $ "  FAIL: fragmentMessage failed: " ++ show e
+    Right frags -> do
+      assertEqual "fragment count" expectedFragCount (length frags)
+      -- Reassemble using processFragment
+      let now = 0 :: MonoTime
+          assembler0 = newFragmentAssembler 5000.0 (1024 * 1024)
+      -- Feed all fragments
+      let (result, _assembler) = foldl feedFrag (Nothing, assembler0) frags
+            where
+              feedFrag (prevResult, asm) frag =
+                let (r, asm') = processFragment frag now asm
+                 in (case r of Nothing -> prevResult; Just _ -> r, asm')
+      case result of
+        Nothing -> error "  FAIL: reassembly did not produce a result"
+        Just reassembled ->
+          assertEqual "reassembled matches original" msgData reassembled
+
+testFragmentHeaderRoundTrip :: IO ()
+testFragmentHeaderRoundTrip = do
+  putStrLn "Fragment header serialize/deserialize roundtrip:"
+  let header =
+        FragmentHeader
+          { fhMessageId = MessageId 0xDEADBEEF,
+            fhFragmentIndex = 7,
+            fhFragmentCount = 15
+          }
+      serialized = serializeFragmentHeader header
+  assertEqual "header size" fragmentHeaderSize (BS.length serialized)
+  case deserializeFragmentHeader serialized of
+    Nothing -> error "  FAIL: deserializeFragmentHeader returned Nothing"
+    Just decoded -> do
+      assertEqual "messageId roundtrip" (fhMessageId header) (fhMessageId decoded)
+      assertEqual "fragmentIndex roundtrip" (fhFragmentIndex header) (fhFragmentIndex decoded)
+      assertEqual "fragmentCount roundtrip" (fhFragmentCount header) (fhFragmentCount decoded)
+
+testFragmentCleanupExpiry :: IO ()
+testFragmentCleanupExpiry = do
+  putStrLn "Fragment cleanup removes expired buffers:"
+  let timeoutMs = 1000.0
+      assembler0 = newFragmentAssembler timeoutMs (1024 * 1024)
+      -- Create a fragment that starts a buffer but does not complete
+      header =
+        FragmentHeader
+          { fhMessageId = MessageId 99,
+            fhFragmentIndex = 0,
+            fhFragmentCount = 3
+          }
+      fragData = serializeFragmentHeader header <> BS.replicate 50 0xCC
+      createTime = 0 :: MonoTime
+  -- Process one fragment (incomplete assembly)
+  let (_result, assembler1) = processFragment fragData createTime assembler0
+  assertEqual "1 buffer in progress" 1 (length (faBuffers assembler1))
+  -- Cleanup before timeout: buffer should remain
+  let beforeTimeout = createTime + 500000000 -- 500ms in nanoseconds
+  let assembler2 = cleanupFragments beforeTimeout assembler1
+  assertEqual "buffer still present before timeout" 1 (length (faBuffers assembler2))
+  -- Cleanup after timeout: buffer should be removed
+  let afterTimeout = createTime + 1500000000 -- 1500ms in nanoseconds (> 1000ms timeout)
+  let assembler3 = cleanupFragments afterTimeout assembler2
+  assertEqual "buffer removed after timeout" 0 (length (faBuffers assembler3))
+
+testFragmentTooLarge :: IO ()
+testFragmentTooLarge = do
+  putStrLn "Fragment too many fragments:"
+  let msgId = MessageId 1
+      -- maxFragmentCount is 255. With payload size 1, a 256-byte message needs 256 fragments.
+      tinyPayload = 1
+      bigMsg = BS.replicate (maxFragmentCount + 1) 0xFF
+  case fragmentMessage msgId bigMsg tinyPayload of
+    Left TooManyFragments -> putStrLn "  PASS: too many fragments returns TooManyFragments"
+    Right _ -> error "  FAIL: expected TooManyFragments error"
+
+-- --------------------------------------------------------------------
+-- Security: CRC32C, rate limiting, token validation
+-- --------------------------------------------------------------------
+
+testCrc32Roundtrip :: IO ()
+testCrc32Roundtrip = do
+  putStrLn "CRC32C append and validate roundtrip:"
+  let original = "hello, network!" :: BS.ByteString
+      withCrc = appendCrc32 original
+  assertEqual "crc adds 4 bytes" (BS.length original + crc32Size) (BS.length withCrc)
+  case validateAndStripCrc32 withCrc of
+    Nothing -> error "  FAIL: validateAndStripCrc32 returned Nothing on valid data"
+    Just stripped -> assertEqual "stripped matches original" original stripped
+
+testCrc32RejectCorrupt :: IO ()
+testCrc32RejectCorrupt = do
+  putStrLn "CRC32C rejects corrupted data:"
+  let original = "important data" :: BS.ByteString
+      withCrc = appendCrc32 original
+      -- Flip a bit in the payload area
+      corrupted = BS.cons (BS.index withCrc 0 + 1) (BS.tail withCrc)
+  case validateAndStripCrc32 corrupted of
+    Nothing -> putStrLn "  PASS: corrupted data rejected"
+    Just _ -> error "  FAIL: corrupted data should have been rejected"
+
+testRateLimiterAllow :: IO ()
+testRateLimiterAllow = do
+  putStrLn "Rate limiter allows up to max requests:"
+  let maxReqs = 3
+      now = 1000000000 :: MonoTime -- 1 second
+      rl0 = newRateLimiter maxReqs now
+      addrKey = 12345 :: Word64
+  -- Send maxReqs requests, all should be allowed
+  let (allowed1, rl1) = rateLimiterAllow addrKey now rl0
+  let (allowed2, rl2) = rateLimiterAllow addrKey now rl1
+  let (allowed3, _rl3) = rateLimiterAllow addrKey now rl2
+  assertEqual "request 1 allowed" True allowed1
+  assertEqual "request 2 allowed" True allowed2
+  assertEqual "request 3 allowed" True allowed3
+
+testRateLimiterDeny :: IO ()
+testRateLimiterDeny = do
+  putStrLn "Rate limiter denies after exceeding limit:"
+  let maxReqs = 2
+      now = 1000000000 :: MonoTime
+      rl0 = newRateLimiter maxReqs now
+      addrKey = 99999 :: Word64
+  -- Send maxReqs requests (allowed)
+  let (_, rl1) = rateLimiterAllow addrKey now rl0
+  let (_, rl2) = rateLimiterAllow addrKey now rl1
+  -- Next request should be denied
+  let (denied, _rl3) = rateLimiterAllow addrKey now rl2
+  assertEqual "excess request denied" False denied
+
+testTokenValidation :: IO ()
+testTokenValidation = do
+  putStrLn "Token validation accepts valid token:"
+  let now = 1000000000 :: MonoTime -- 1 second
+      expireMs = 30000.0 -- 30 seconds
+      clientId = 42 :: Word64
+      token = newConnectToken clientId expireMs "user-data" now
+      validator0 = newTokenValidator 60000.0 100
+  case validateToken token now validator0 of
+    (Right cid, _) -> assertEqual "returns client id" clientId cid
+    (Left e, _) -> error $ "  FAIL: valid token rejected: " ++ show e
+
+testTokenExpired :: IO ()
+testTokenExpired = do
+  putStrLn "Token validation rejects expired token:"
+  let createTime = 1000000000 :: MonoTime -- 1 second
+      expireMs = 5000.0 -- 5 seconds
+      clientId = 100 :: Word64
+      token = newConnectToken clientId expireMs "data" createTime
+      validator = newTokenValidator 60000.0 100
+      -- Validate well after expiry (10 seconds later = 10,000ms > 5000ms)
+      futureTime = createTime + 10000000000 -- 10 seconds in nanoseconds
+  case validateToken token futureTime validator of
+    (Left TokenExpired, _) -> putStrLn "  PASS: expired token rejected with TokenExpired"
+    (Left e, _) -> error $ "  FAIL: expected TokenExpired, got " ++ show e
+    (Right _, _) -> error "  FAIL: expected expired token to be rejected"
+
+testTokenReplayed :: IO ()
+testTokenReplayed = do
+  putStrLn "Token validation rejects replayed token:"
+  let now = 1000000000 :: MonoTime
+      expireMs = 30000.0
+      clientId = 77 :: Word64
+      token = newConnectToken clientId expireMs "data" now
+      validator0 = newTokenValidator 60000.0 100
+  -- First validation succeeds
+  case validateToken token now validator0 of
+    (Left e, _) -> error $ "  FAIL: first validation should succeed: " ++ show e
+    (Right _, validator1) ->
+      -- Second validation with same clientId should fail as replayed
+      case validateToken token now validator1 of
+        (Left TokenReplayed, _) -> putStrLn "  PASS: replayed token rejected with TokenReplayed"
+        (Left e, _) -> error $ "  FAIL: expected TokenReplayed, got " ++ show e
+        (Right _, _) -> error "  FAIL: expected replayed token to be rejected"

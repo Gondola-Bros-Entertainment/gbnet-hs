@@ -154,6 +154,14 @@ maxMtu = 65535
 maxChannelCount :: Int
 maxChannelCount = 8
 
+-- | Default maximum pending connection requests.
+defaultMaxPending :: Int
+defaultMaxPending = 256
+
+-- | Default rate limit for connection requests per second.
+defaultRateLimitPerSecond :: Int
+defaultRateLimitPerSecond = 10
+
 -- | Default delta baseline timeout in milliseconds.
 defaultDeltaBaselineTimeoutMs :: Double
 defaultDeltaBaselineTimeoutMs = 2000.0
@@ -251,8 +259,8 @@ defaultNetworkConfig =
       ncCongestionRecoveryTimeMs = defaultCongestionRecoveryTimeMs,
       ncDisconnectRetries = defaultDisconnectRetries,
       ncDisconnectRetryTimeoutMs = defaultDisconnectRetryTimeoutMs,
-      ncMaxPending = 256,
-      ncRateLimitPerSecond = 10,
+      ncMaxPending = defaultMaxPending,
+      ncRateLimitPerSecond = defaultRateLimitPerSecond,
       ncUseCwndCongestion = False,
       ncSimulation = Nothing,
       ncEnableConnectionMigration = True,
