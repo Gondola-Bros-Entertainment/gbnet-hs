@@ -22,11 +22,26 @@ import GBNet.Channel
     unreliableConfig,
   )
 import GBNet.Class (MonoTime (..))
+import GBNet.Config (defaultNetworkConfig)
+import qualified GBNet.Connection
+import GBNet.Connection
+  ( Connection (..),
+    newConnection,
+    sendMessage,
+    receiveIncomingPayload,
+    drainSendQueue,
+  )
+import qualified GBNet.Fragment
 import GBNet.Fragment
-  ( FragmentHeader (..),
+  ( FragmentAssembler (..),
+    FragmentHeader (..),
     deserializeFragmentHeader,
+    fragmentMessage,
+    newFragmentAssembler,
+    processFragment,
     serializeFragmentHeader,
   )
+import GBNet.Security (appendCrc32, validateAndStripCrc32)
 import GBNet.Packet
   ( PacketHeader (..),
     PacketType (..),
@@ -189,6 +204,18 @@ instance NFData Channel where
                           rnf td `seq`
                             rnf trt
 
+-- Connection (use rwhnf - deep eval is expensive and not needed for benchmarks)
+instance NFData Connection where rnf = rwhnf
+
+instance NFData GBNet.Connection.ConnectionError where rnf = rwhnf
+
+instance NFData GBNet.Connection.OutgoingPacket where rnf = rwhnf
+
+-- FragmentAssembler
+instance NFData FragmentAssembler where rnf = rwhnf
+
+instance NFData GBNet.Fragment.FragmentError where rnf = rwhnf
+
 --------------------------------------------------------------------------------
 -- Setup helpers
 --------------------------------------------------------------------------------
@@ -235,6 +262,22 @@ vec3Bytes = toBytes vec3Buffer
 -- | 64-byte payload for channel benchmarks.
 payload64 :: BS.ByteString
 payload64 = BS.replicate 64 0xAB
+
+-- | 1KB payload for fragment benchmarks.
+payload1k :: BS.ByteString
+payload1k = BS.replicate 1024 0xCD
+
+-- | 64-byte payload with CRC appended.
+payload64WithCrc :: BS.ByteString
+payload64WithCrc = appendCrc32 payload64
+
+-- | Build a fresh Connection for benchmarking.
+buildConnection :: Connection
+buildConnection = newConnection defaultNetworkConfig 0x12345678 (MonoTime 0)
+
+-- | MTU for fragmentation benchmarks.
+benchMtu :: Int
+benchMtu = 1200
 
 -- | Build a ReliableEndpoint with N in-flight sent packets.
 buildEndpointWithInFlight :: Int -> ReliableEndpoint
@@ -411,5 +454,35 @@ main =
             bench "vec3/storable" $ nf serialize v,
           env (pure (Transform (Vec3S 1.0 2.0 3.0) 45.0)) $ \t ->
             bench "transform/nested" $ nf serialize t
+        ],
+      -- Group 8: Connection operations
+      bgroup
+        "connection"
+        [ env (pure buildConnection) $ \conn ->
+            bench "sendMessage/64B" $
+              nf (sendMessage (ChannelId 0) payload64 (MonoTime 1000000)) conn,
+          env (pure buildConnection) $ \conn ->
+            bench "drainSendQueue" $
+              nf drainSendQueue conn
+        ],
+      -- Group 9: Fragmentation
+      bgroup
+        "fragment"
+        [ env (pure payload1k) $ \payload ->
+            bench "fragmentMessage/1KB" $
+              nf (fragmentMessage (MessageId 1) payload) benchMtu,
+          env (pure (newFragmentAssembler 5000.0 256)) $ \assembler ->
+            bench "processFragment/single" $
+              nf (processFragment payload64 (MonoTime 1000000)) assembler
+        ],
+      -- Group 10: Security (CRC32C)
+      bgroup
+        "security"
+        [ env (pure payload64) $ \payload ->
+            bench "crc32c/append/64B" $ nf appendCrc32 payload,
+          env (pure payload1k) $ \payload ->
+            bench "crc32c/append/1KB" $ nf appendCrc32 payload,
+          env (pure payload64WithCrc) $ \payload ->
+            bench "crc32c/validate/64B" $ nf validateAndStripCrc32 payload
         ]
     ]
