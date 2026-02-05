@@ -127,9 +127,9 @@ mkAlignmentBody :: [Type] -> Q Exp
 mkAlignmentBody [] = litE (integerL 1)
 mkAlignmentBody fieldTypes = do
   alignExps <- mapM mkFieldAlignment fieldTypes
-  return $ foldl1 (mkMaxApp) alignExps
+  return $ foldl1 mkMaxApp alignExps
   where
-    mkMaxApp a b = AppE (AppE (VarE 'max) a) b
+    mkMaxApp a = AppE (AppE (VarE 'max) a)
 
 -- | Generate alignment expression for a single field.
 mkFieldAlignment :: Type -> Q Exp
