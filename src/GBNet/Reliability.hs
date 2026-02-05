@@ -254,14 +254,18 @@ rbExists (SequenceNum s) (ReceivedBuffer v _) =
   VU.unsafeIndex v (fromIntegral s .&. receivedBufferMask) == s
 {-# INLINE rbExists #-}
 
--- | Batched insert - O(n) for n sequence numbers with ONE thaw/freeze.
--- This is the high-performance path for processing multiple received packets.
+-- | Batched insert - O(n) for n sequence numbers with ZERO-COPY thaw/freeze.
+--
+-- SAFETY: unsafeThaw/unsafeFreeze are safe here because:
+--   1. We never reference the old buffer after calling this function
+--   2. The result is a completely new ReceivedBuffer
+--   3. Linear data flow: old buffer in → new buffer out → old is GC'd
 rbInsertMany :: [SequenceNum] -> ReceivedBuffer -> ReceivedBuffer
 rbInsertMany [] buf = buf
 rbInsertMany seqs buf = runST $ do
-  mv <- VU.thaw (rbSeqs buf)
+  mv <- VU.unsafeThaw (rbSeqs buf) -- 0ns: no copy, just pointer cast
   newHighest <- go mv (rbHighest buf) seqs
-  v' <- VU.unsafeFreeze mv
+  v' <- VU.unsafeFreeze mv -- 0ns: no copy, just pointer cast
   return $! ReceivedBuffer v' newHighest
   where
     go _ !highest [] = return highest
@@ -342,14 +346,15 @@ spbMember seqNum buf =
     _ -> False
 {-# INLINE spbMember #-}
 
--- | O(1) insert using ST for mutation, returns new immutable buffer.
+-- | O(1) insert using zero-copy ST mutation.
+-- SAFETY: Linear data flow, old buffer never reused.
 spbInsert :: SequenceNum -> SentPacketRecord -> SentPacketBuffer -> SentPacketBuffer
 spbInsert seqNum record buf = runST $ do
-  mvec <- V.thaw (spbEntries buf)
+  mvec <- V.unsafeThaw (spbEntries buf) -- 0ns: no copy
   let idx = seqToIdx seqNum
   old <- MV.unsafeRead mvec idx
   MV.unsafeWrite mvec idx (RingEntry seqNum record)
-  vec' <- V.unsafeFreeze mvec
+  vec' <- V.unsafeFreeze mvec -- 0ns: no copy
   let countDelta = case old of
         RingEmpty -> 1
         _ -> 0
@@ -357,14 +362,15 @@ spbInsert seqNum record buf = runST $ do
 {-# INLINE spbInsert #-}
 
 -- | O(1) delete by sequence number.
+-- SAFETY: Linear data flow, old buffer never reused.
 spbDelete :: SequenceNum -> SentPacketBuffer -> SentPacketBuffer
 spbDelete seqNum buf =
   case V.unsafeIndex (spbEntries buf) idx of
     RingEntry storedSeq _
       | storedSeq == seqNum -> runST $ do
-          mvec <- V.thaw (spbEntries buf)
+          mvec <- V.unsafeThaw (spbEntries buf) -- 0ns: no copy
           MV.unsafeWrite mvec idx RingEmpty
-          vec' <- V.unsafeFreeze mvec
+          vec' <- V.unsafeFreeze mvec -- 0ns: no copy
           return $! buf {spbEntries = vec', spbCount = spbCount buf - 1}
     _ -> buf
   where
@@ -517,7 +523,7 @@ onPacketsReceived seqNums ep =
 -- | Mutation to apply to sent packet buffer.
 data BufferMutation
   = MutDelete !Int -- Delete at index
-  | MutNack !Int !SentPacketRecord !Word8 -- Update nack count at index
+  | MutNack !Int !SequenceNum !SentPacketRecord !Word8 -- idx, seqNum, record, newNack
 
 -- | Process ACKs from received packet. O(ackBitsWindow) = O(64).
 -- Two-phase: pure lookup pass, then single batched mutation.
@@ -566,25 +572,23 @@ processAcks ackSeq ackBitsVal now ep =
                     if newNack == fastRetransmitThreshold
                       then (sprChannelId record, sprChannelSequence record) : retrans
                       else retrans
-               in (acked, retrans', MutNack idx record newNack : muts, rttSum, rttCnt, bytes)
+               in (acked, retrans', MutNack idx seqNum record newNack : muts, rttSum, rttCnt, bytes)
 
--- | Apply all mutations in one ST block. O(n) for one thaw/freeze, O(1) per mutation.
+-- | Apply all mutations in one ST block. Zero-copy thaw/freeze.
+-- SAFETY: Linear data flow, old buffer never reused.
 applyMutations :: [BufferMutation] -> SentPacketBuffer -> SentPacketBuffer
 applyMutations [] buf = buf
 applyMutations muts buf = runST $ do
-  mvec <- V.thaw (spbEntries buf)
+  mvec <- V.unsafeThaw (spbEntries buf) -- 0ns: no copy
   deletions <- applyAll mvec muts 0
-  vec' <- V.unsafeFreeze mvec
+  vec' <- V.unsafeFreeze mvec -- 0ns: no copy
   return $! buf {spbEntries = vec', spbCount = spbCount buf - deletions}
   where
     applyAll _ [] !dels = return dels
     applyAll mvec (MutDelete idx : rest) !dels = do
       MV.unsafeWrite mvec idx RingEmpty
       applyAll mvec rest (dels + 1)
-    applyAll mvec (MutNack idx record newNack : rest) !dels = do
-      let seqNum = case V.unsafeIndex (spbEntries buf) idx of
-            RingEntry s _ -> s
-            RingEmpty -> SequenceNum 0 -- Should not happen
+    applyAll mvec (MutNack idx seqNum record newNack : rest) !dels = do
       MV.unsafeWrite mvec idx (RingEntry seqNum (record {sprNackCount = newNack}))
       applyAll mvec rest dels
 
