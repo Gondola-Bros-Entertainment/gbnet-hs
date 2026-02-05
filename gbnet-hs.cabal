@@ -28,6 +28,8 @@ library
     GBNet.Serialize.Class
     GBNet.Serialize.Reader
     GBNet.Serialize.TH
+    GBNet.Serialize.FastTH
+    GBNet.Serialize.FastSupport
     GBNet.Packet
     GBNet.Util
     GBNet.Reliability

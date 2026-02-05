@@ -33,7 +33,7 @@ import GBNet.Packet
     deserializeHeader,
     serializeHeader,
   )
-import GBNet.Types (MessageId (..))
+import GBNet.Types (ChannelId (..), MessageId (..), SequenceNum (..))
 import GBNet.Reliability
   ( ReliableEndpoint (..),
     SentPacketRecord (..),
@@ -59,12 +59,14 @@ import GBNet.Serialize.BitBuffer
   )
 import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..), deserializeM, runDeserialize)
 import GBNet.Serialize.TH (deriveNetworkSerialize)
-import GBNet.Types (ChannelId (..), SequenceNum (..))
+import GBNet.Serialize.FastTH (deriveStorable)
+import GBNet.Serialize.FastSupport (Storable, serialize, plusPtr, castPtr)
 
 --------------------------------------------------------------------------------
 -- TH-derived benchmark type (must precede use due to staging restriction)
 --------------------------------------------------------------------------------
 
+-- BitBuffer-based (old approach)
 data Vec3 = Vec3
   { vecX :: !Float,
     vecY :: !Float,
@@ -73,6 +75,18 @@ data Vec3 = Vec3
   deriving (Eq, Show)
 
 deriveNetworkSerialize ''Vec3
+
+-- Storable-based (new approach) - flat type
+data Vec3S = Vec3S !Float !Float !Float
+  deriving (Eq, Show)
+
+deriveStorable ''Vec3S
+
+-- Storable-based nested type - demonstrates composition
+data Transform = Transform !Vec3S !Float  -- position + rotation angle
+  deriving (Eq, Show)
+
+deriveStorable ''Transform
 
 --------------------------------------------------------------------------------
 -- NFData instances for criterion (force full evaluation)
@@ -100,6 +114,10 @@ instance NFData ChannelError where rnf = rwhnf
 instance NFData BitBuffer where rnf buf = rnf (toBytes buf)
 
 instance NFData Vec3 where rnf (Vec3 x y z) = rnf x `seq` rnf y `seq` rnf z
+
+instance NFData Vec3S where rnf (Vec3S x y z) = rnf x `seq` rnf y `seq` rnf z
+
+instance NFData Transform where rnf (Transform v r) = rnf v `seq` rnf r
 
 instance (NFData a) => NFData (ReadResult a) where
   rnf (ReadResult val buf) = rnf val `seq` rnf buf
@@ -383,5 +401,15 @@ main =
             bench "serialize" $ nf serializeFragmentHeader hdr,
           env (pure fragmentHeaderBytes) $ \bs ->
             bench "deserialize" $ nf deserializeFragmentHeader bs
+        ],
+      -- Group 7: Storable serialization (flat and nested)
+      bgroup
+        "storable"
+        [ env (pure (sampleVec3, empty)) $ \ ~(v, buf) ->
+            bench "vec3/bitbuffer" $ nf (\x -> toBytes (bitSerialize x buf)) v,
+          env (pure (Vec3S 1.0 (-2.5) 100.0)) $ \v ->
+            bench "vec3/storable" $ nf serialize v,
+          env (pure (Transform (Vec3S 1.0 2.0 3.0) 45.0)) $ \t ->
+            bench "transform/nested" $ nf serialize t
         ]
     ]

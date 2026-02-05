@@ -133,13 +133,11 @@ module GBNet
     deliverPackets,
     worldAdvanceTime,
 
-    -- * Serialization
-    BitSerialize (..),
-    BitDeserialize (..),
-    BitBuffer,
-    empty,
-    toBytes,
-    fromBytes,
+    -- * Serialization (Storable-based, zero-copy)
+    serialize,
+    deserialize,
+    deriveStorable,
+    Storable (..),
 
     -- * Statistics
     NetworkStats (..),
@@ -199,8 +197,8 @@ import GBNet.Replication.Interest (GridInterest, InterestManager (..), RadiusInt
 import qualified GBNet.Replication.Interest as Interest
 import GBNet.Replication.Interpolation (Interpolatable (..), SnapshotBuffer, newSnapshotBuffer, newSnapshotBufferWithConfig, pushSnapshot, sampleSnapshot, snapshotReady)
 import GBNet.Replication.Priority (PriorityAccumulator, accumulate, drainTop, getPriority, newPriorityAccumulator, register, unregister)
-import GBNet.Serialize.BitBuffer (BitBuffer, empty, fromBytes, toBytes)
-import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..))
+import GBNet.Serialize.FastSupport (Storable (..), deserialize, serialize)
+import GBNet.Serialize.FastTH (deriveStorable)
 import GBNet.Simulator (NetworkSimulator (..), newNetworkSimulator, simulatorPendingCount, simulatorProcessSend, simulatorReceiveReady)
 import GBNet.Socket (SocketError (..), UdpSocket)
 import GBNet.Stats (CongestionLevel (..), NetworkStats (..))

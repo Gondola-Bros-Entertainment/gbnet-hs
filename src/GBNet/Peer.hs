@@ -102,8 +102,7 @@ import GBNet.Packet
   )
 import GBNet.Reliability (elapsedMs)
 import GBNet.Security (RateLimiter, appendCrc32, newRateLimiter, rateLimiterAllow)
-import GBNet.Serialize.BitBuffer (ReadResult (..), empty, fromBytes, toBytes)
-import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..))
+import GBNet.Serialize.FastSupport (deserialize, serialize)
 import GBNet.Socket
   ( SocketError (..),
     UdpSocket,
@@ -898,17 +897,14 @@ removePending peerId peer = peer {npPending = Map.delete peerId (npPending peer)
 
 -- | Encode a Word64 salt to bytes.
 encodeSalt :: Word64 -> BS.ByteString
-encodeSalt salt = toBytes $ bitSerialize salt empty
+encodeSalt = serialize
 {-# INLINE encodeSalt #-}
 
 -- | Decode a Word64 salt from bytes.
 decodeSalt :: BS.ByteString -> Maybe Word64
-decodeSalt bs
-  | BS.length bs < 8 = Nothing
-  | otherwise =
-      case bitDeserialize (fromBytes bs) of
-        Left _ -> Nothing
-        Right result -> Just (readValue result)
+decodeSalt bs = case deserialize bs of
+  Left _ -> Nothing
+  Right v -> Just v
 {-# INLINE decodeSalt #-}
 
 -- | Deny reason codes.
