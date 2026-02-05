@@ -142,50 +142,46 @@ let config = defaultNetworkConfig
 
 ## Serialization
 
-### Bit-Level Encoding
-
-```haskell
-import GBNet
-
--- Serialize Word8 + Word8 + Word16 = 32 bits (4 bytes)
-let buf = bitSerialize (1 :: Word8)     -- 8 bits
-        $ bitSerialize (100 :: Word8)   -- 8 bits
-        $ bitSerialize (512 :: Word16)  -- 16 bits
-        $ empty
-
-let bytes = toBytes buf  -- Compact wire format
-```
-
-### Template Haskell Derive
+### Zero-Copy Storable Serialization
 
 ```haskell
 {-# LANGUAGE TemplateHaskell #-}
-import GBNet.Serialize.TH
+import GBNet
 
 data PlayerState = PlayerState
-  { health :: Word8
-  , x      :: Word16
-  , y      :: Word16
+  { psX :: !Float
+  , psY :: !Float
+  , psHealth :: !Word8
   } deriving (Eq, Show)
 
-deriveNetworkSerialize ''PlayerState
+deriveStorable ''PlayerState
 
--- Now PlayerState has BitSerialize/BitDeserialize instances
-let encoded = toBytes (bitSerialize myPlayer empty)
+-- Serialize (14ns, zero-copy)
+let bytes = serialize playerState
+
+-- Deserialize
+let Right player = deserialize bytes :: Either String PlayerState
 ```
 
-### Custom Bit Widths
+### Nested Types Just Work
 
 ```haskell
-{-# LANGUAGE DataKinds #-}
-import GBNet.Serialize.Class (BitWidth(..))
+data Vec3 = Vec3 !Float !Float !Float
+deriveStorable ''Vec3
 
-data CompactPlayer = CompactPlayer
-  { health    :: BitWidth 7 Word8   -- 7 bits instead of 8
-  , direction :: BitWidth 4 Word8   -- 4 bits instead of 8
-  }
--- Only 11 bits on the wire instead of 16
+data Transform = Transform !Vec3 !Float  -- position + rotation
+deriveStorable ''Transform
+
+-- Nested types compose via Storable
+let bytes = serialize (Transform pos angle)  -- still 14ns
 ```
+
+### Why Storable?
+
+- **17x faster** than bit-buffer approaches (14ns vs 267ns)
+- **Standard Haskell** — uses base `Storable` typeclass
+- **Composable** — nested types work automatically
+- **Pure API** — `serialize`/`deserialize` are pure functions
 
 ---
 
@@ -276,7 +272,8 @@ simulateLoss 0.1
 | `GBNet.Peer` | `NetPeer`, `peerTick`, connection management |
 | `GBNet.Congestion` | Dual-layer congestion control and backpressure |
 | `GBNet.TestNet` | Pure test network, `TestWorld` for multi-peer |
-| `GBNet.Serialize.*` | Bit-level serialization, TH derivation |
+| `GBNet.Serialize.FastTH` | `deriveStorable` TH for zero-copy serialization |
+| `GBNet.Serialize.FastSupport` | `serialize`/`deserialize` pure functions |
 
 ### Explicit Imports (for larger codebases)
 
@@ -402,19 +399,22 @@ cabal haddock                            # Generate docs
 
 Optimized for game networking:
 
-- **Zero-allocation packet headers** — direct memory writes via `poke`, 17ns serialize (~60M headers/sec)
+- **Zero-allocation serialization** — Storable-based `poke`/`peek`, 14ns for user types (~70M ops/sec)
+- **Zero-allocation packet headers** — direct memory writes, 17ns serialize
+- **Nested types same speed** — Storable composition has no overhead
 - **Strict fields** with bang patterns throughout
 - **GHC flags**: `-O2 -fspecialise-aggressively -fexpose-all-unfoldings`
 - **INLINE pragmas** on hot paths
-- **Byte-aligned fast paths** when bit position allows
-- **Hardware-accelerated CRC32C** via Google's C++ library (runtime dispatch: SSE4.2, ARMv8 CRC, software fallback)
+- **Hardware-accelerated CRC32C** via SSE4.2/ARMv8 CRC
 - **Zero-poll receive** — dedicated thread blocks on epoll/kqueue, delivers via STM TQueue
 
 ### Benchmarks
 
 ```
-packetheader/serialize      17.12 ns   (60M ops/sec)
-packetheader/deserialize    18.10 ns   (55M ops/sec)
+storable/vec3               14.26 ns   (70M ops/sec)  -- user types
+storable/transform/nested   14.23 ns   (70M ops/sec)  -- nested types
+packetheader/serialize      16.64 ns   (60M ops/sec)
+packetheader/deserialize    15.95 ns   (62M ops/sec)
 ```
 
 Run with `cabal bench --enable-benchmarks`.
@@ -424,9 +424,9 @@ Run with `cabal bench --enable-benchmarks`.
 ## Features
 
 ### Core Transport
-- [x] Bitpacked serialization with sub-byte encoding
-- [x] Template Haskell derive for records and enums
-- [x] Custom bit widths via `BitWidth n a`
+- [x] Zero-copy Storable serialization (14ns, 17x faster)
+- [x] Nested type composition via Storable typeclass
+- [x] Template Haskell `deriveStorable` for automatic instances
 - [x] Type-safe newtypes (`ChannelId`, `SequenceNum`, `MonoTime`, `MessageId`)
 - [x] Reliable/unreliable/sequenced delivery modes
 - [x] RTT estimation and adaptive retransmit
