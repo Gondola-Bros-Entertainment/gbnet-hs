@@ -22,12 +22,18 @@ import GBNet.Channel
     unreliableConfig,
   )
 import GBNet.Class (MonoTime (..))
+import GBNet.Fragment
+  ( FragmentHeader (..),
+    deserializeFragmentHeader,
+    serializeFragmentHeader,
+  )
 import GBNet.Packet
   ( PacketHeader (..),
     PacketType (..),
     deserializeHeader,
     serializeHeader,
   )
+import GBNet.Types (MessageId (..))
 import GBNet.Reliability
   ( ReliableEndpoint (..),
     SentPacketRecord (..),
@@ -77,7 +83,12 @@ instance NFData SequenceNum where rnf (SequenceNum w) = rnf w
 
 instance NFData ChannelId where rnf (ChannelId w) = rnf w
 
+instance NFData MessageId where rnf (MessageId w) = rnf w
+
 instance NFData MonoTime where rnf (MonoTime w) = rnf w
+
+instance NFData FragmentHeader where
+  rnf (FragmentHeader mid idx cnt) = rnf mid `seq` rnf idx `seq` rnf cnt
 
 instance NFData PacketType where rnf = rwhnf
 
@@ -181,6 +192,19 @@ sampleVec3 = Vec3 1.0 (-2.5) 100.0
 -- | Pre-serialized header bytes.
 headerBytes :: BS.ByteString
 headerBytes = serializeHeader sampleHeader
+
+-- | A sample fragment header for benchmarking.
+sampleFragmentHeader :: FragmentHeader
+sampleFragmentHeader =
+  FragmentHeader
+    { fhMessageId = MessageId 0xDEADBEEF,
+      fhFragmentIndex = 3,
+      fhFragmentCount = 10
+    }
+
+-- | Pre-serialized fragment header bytes.
+fragmentHeaderBytes :: BS.ByteString
+fragmentHeaderBytes = serializeFragmentHeader sampleFragmentHeader
 
 -- | Pre-serialized Vec3 buffer.
 vec3Buffer :: BitBuffer
@@ -351,5 +375,13 @@ main =
             bench "serialize" $ nf serializeHeader hdr,
           env (pure headerBytes) $ \bs ->
             bench "deserialize" $ nf deserializeHeader bs
+        ],
+      -- Group 6: Fragment Header (optimized poke-based serialization)
+      bgroup
+        "fragmentheader"
+        [ env (pure sampleFragmentHeader) $ \hdr ->
+            bench "serialize" $ nf serializeFragmentHeader hdr,
+          env (pure fragmentHeaderBytes) $ \bs ->
+            bench "deserialize" $ nf deserializeFragmentHeader bs
         ]
     ]

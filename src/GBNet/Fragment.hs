@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 -- |
 -- Module      : GBNet.Fragment
 -- Description : Message fragmentation, reassembly, and MTU discovery
@@ -44,8 +46,11 @@ where
 
 import Control.Monad (when)
 import Control.Monad.State.Strict (gets, modify', runState)
-import Data.Bits (shiftL, shiftR, (.&.))
+import Data.Bits (shiftL, shiftR, (.|.))
 import qualified Data.ByteString as BS
+import Data.ByteString.Internal (unsafeCreate)
+import qualified Data.ByteString.Unsafe as BSU
+import Foreign.Storable (pokeByteOff)
 import Data.List (minimumBy)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -93,34 +98,36 @@ data FragmentHeader = FragmentHeader
   deriving (Eq, Show)
 
 -- | Serialize fragment header to bytes.
+-- Uses zero-allocation direct memory writes.
 serializeFragmentHeader :: FragmentHeader -> BS.ByteString
-serializeFragmentHeader hdr =
-  let msgId = unMessageId (fhMessageId hdr)
-   in BS.pack
-        [ fromIntegral ((msgId `shiftR` 24) .&. 0xFF),
-          fromIntegral ((msgId `shiftR` 16) .&. 0xFF),
-          fromIntegral ((msgId `shiftR` 8) .&. 0xFF),
-          fromIntegral (msgId .&. 0xFF),
-          fhFragmentIndex hdr,
-          fhFragmentCount hdr
-        ]
+serializeFragmentHeader !hdr = unsafeCreate fragmentHeaderSize $ \ptr -> do
+  let !msgId = unMessageId (fhMessageId hdr)
+  pokeByteOff ptr 0 (fromIntegral (msgId `shiftR` 24) :: Word8)
+  pokeByteOff ptr 1 (fromIntegral (msgId `shiftR` 16) :: Word8)
+  pokeByteOff ptr 2 (fromIntegral (msgId `shiftR` 8) :: Word8)
+  pokeByteOff ptr 3 (fromIntegral msgId :: Word8)
+  pokeByteOff ptr 4 (fhFragmentIndex hdr)
+  pokeByteOff ptr 5 (fhFragmentCount hdr)
+{-# INLINE serializeFragmentHeader #-}
 
 -- | Deserialize fragment header from bytes.
+-- Uses direct memory access for speed.
 deserializeFragmentHeader :: BS.ByteString -> Maybe FragmentHeader
-deserializeFragmentHeader bs
+deserializeFragmentHeader !bs
   | BS.length bs < fragmentHeaderSize = Nothing
   | otherwise =
-      let b0 = fromIntegral (BS.index bs 0) :: Word32
-          b1 = fromIntegral (BS.index bs 1) :: Word32
-          b2 = fromIntegral (BS.index bs 2) :: Word32
-          b3 = fromIntegral (BS.index bs 3) :: Word32
-          msgId = MessageId $ (b0 `shiftL` 24) + (b1 `shiftL` 16) + (b2 `shiftL` 8) + b3
+      let !b0 = fromIntegral (BSU.unsafeIndex bs 0) :: Word32
+          !b1 = fromIntegral (BSU.unsafeIndex bs 1) :: Word32
+          !b2 = fromIntegral (BSU.unsafeIndex bs 2) :: Word32
+          !b3 = fromIntegral (BSU.unsafeIndex bs 3) :: Word32
+          !msgId = (b0 `shiftL` 24) .|. (b1 `shiftL` 16) .|. (b2 `shiftL` 8) .|. b3
        in Just
             FragmentHeader
-              { fhMessageId = msgId,
-                fhFragmentIndex = BS.index bs 4,
-                fhFragmentCount = BS.index bs 5
+              { fhMessageId = MessageId msgId,
+                fhFragmentIndex = BSU.unsafeIndex bs 4,
+                fhFragmentCount = BSU.unsafeIndex bs 5
               }
+{-# INLINE deserializeFragmentHeader #-}
 
 -- | Fragmentation errors.
 data FragmentError

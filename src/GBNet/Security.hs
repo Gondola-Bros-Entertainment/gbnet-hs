@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 -- |
 -- Module      : GBNet.Security
 -- Description : CRC32C integrity, rate limiting, and connect tokens
@@ -27,14 +29,17 @@ module GBNet.Security
   )
 where
 
-import Data.Bits (shiftL, shiftR, (.&.), (.|.))
+import Data.Bits (shiftL, shiftR, (.|.))
 import qualified Data.ByteString as BS
+import Data.ByteString.Internal (unsafeCreate)
+import qualified Data.ByteString.Unsafe as BSU
 import qualified Data.Digest.CRC32C as CRC
+import Data.Word (Word8, Word32, Word64)
+import Foreign.Storable (pokeByteOff)
 import Data.List (minimumBy)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Ord (comparing)
-import Data.Word (Word32, Word64)
 import GBNet.Reliability (MonoTime, elapsedMs)
 
 -- | CRC32 checksum size in bytes.
@@ -67,24 +72,26 @@ validateAndStripCrc32 dat
             else Nothing
 
 -- | Convert Word32 to little-endian bytes.
+-- Uses zero-allocation direct memory writes.
 word32ToLEBytes :: Word32 -> BS.ByteString
-word32ToLEBytes w =
-  BS.pack
-    [ fromIntegral (w .&. 0xFF),
-      fromIntegral ((w `shiftR` 8) .&. 0xFF),
-      fromIntegral ((w `shiftR` 16) .&. 0xFF),
-      fromIntegral ((w `shiftR` 24) .&. 0xFF)
-    ]
+word32ToLEBytes !w = unsafeCreate crc32Size $ \ptr -> do
+  pokeByteOff ptr 0 (fromIntegral w :: Word8)
+  pokeByteOff ptr 1 (fromIntegral (w `shiftR` 8) :: Word8)
+  pokeByteOff ptr 2 (fromIntegral (w `shiftR` 16) :: Word8)
+  pokeByteOff ptr 3 (fromIntegral (w `shiftR` 24) :: Word8)
+{-# INLINE word32ToLEBytes #-}
 
 -- | Convert little-endian bytes to Word32.
+-- Uses direct memory access for speed.
 -- Caller must ensure at least 4 bytes; 'validateAndStripCrc32' guarantees this.
 word32FromLEBytes :: BS.ByteString -> Word32
-word32FromLEBytes bs =
-  let b0 = fromIntegral (BS.index bs 0) :: Word32
-      b1 = fromIntegral (BS.index bs 1) :: Word32
-      b2 = fromIntegral (BS.index bs 2) :: Word32
-      b3 = fromIntegral (BS.index bs 3) :: Word32
+word32FromLEBytes !bs =
+  let !b0 = fromIntegral (BSU.unsafeIndex bs 0) :: Word32
+      !b1 = fromIntegral (BSU.unsafeIndex bs 1) :: Word32
+      !b2 = fromIntegral (BSU.unsafeIndex bs 2) :: Word32
+      !b3 = fromIntegral (BSU.unsafeIndex bs 3) :: Word32
    in b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24)
+{-# INLINE word32FromLEBytes #-}
 
 -- | Cleanup interval — sweep stale entries every 5 seconds.
 cleanupIntervalMs :: Double
