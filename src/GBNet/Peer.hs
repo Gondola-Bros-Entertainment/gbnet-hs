@@ -78,7 +78,6 @@ import qualified Data.Sequence as Seq
 import Data.Word (Word64, Word8)
 import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime (..))
 import GBNet.Config (NetworkConfig (..))
-import GBNet.Util (nextRandom)
 import GBNet.Connection
   ( Connection,
     ConnectionError (..),
@@ -113,6 +112,7 @@ import GBNet.Socket
   )
 import GBNet.Stats (NetworkStats)
 import GBNet.Types (ChannelId (..), SequenceNum (..))
+import GBNet.Util (nextRandom)
 import Network.Socket (PortNumber, SockAddr (..))
 
 -- | Peer identifier wrapping a socket address.
@@ -941,7 +941,9 @@ sockAddrToKey addr = case addr of
   SockAddrInet port host ->
     fnvMix (fnvMix fnvOffsetBasis (fromIntegral host)) (fromIntegral (portToWord port))
   SockAddrInet6 port _ (h1, h2, h3, h4) _ ->
-    foldl' fnvMix fnvOffsetBasis
+    foldl'
+      fnvMix
+      fnvOffsetBasis
       [ fromIntegral (portToWord port),
         fromIntegral h1,
         fromIntegral h2,

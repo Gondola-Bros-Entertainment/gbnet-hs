@@ -9,6 +9,7 @@ module Main where
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import Data.Int (Int16, Int32, Int64, Int8)
+import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Channel
@@ -40,14 +41,14 @@ import GBNet.Packet
 import GBNet.Peer
 import GBNet.Reliability
 import GBNet.Replication.Delta
-import GBNet.Security
-import GBNet.Simulator
 import GBNet.Replication.Interest
 import GBNet.Replication.Interpolation
 import GBNet.Replication.Priority
+import GBNet.Security
 import GBNet.Serialize.BitBuffer
 import GBNet.Serialize.Class
 import GBNet.Serialize.TH
+import GBNet.Simulator
 import GBNet.Socket (UdpSocket (..))
 import GBNet.Stats (CongestionLevel (..), defaultSocketStats)
 import GBNet.TestNet
@@ -1778,7 +1779,7 @@ instance NetworkDelta TestDeltaState where
       (if a1 /= a2 then Just a1 else Nothing)
       (if b1 /= b2 then Just b1 else Nothing)
   apply (TestDeltaState a b) (TestDeltaDelta ma mb) =
-    TestDeltaState (maybe a id ma) (maybe b id mb)
+    TestDeltaState (fromMaybe a ma) (fromMaybe b mb)
 
 testDeltaEncodeDecodeTrivial :: IO ()
 testDeltaEncodeDecodeTrivial = do
@@ -1955,9 +1956,12 @@ testChannelReliableOrderedDelivery = do
   -- Read all received messages
   let (received, _ch4) = channelReceive ch3
   assertEqual "received 3 messages" 3 (length received)
-  assertEqual "order: msg-0 first" payload0 (received !! 0)
-  assertEqual "order: msg-1 second" payload1 (received !! 1)
-  assertEqual "order: msg-2 third" payload2 (received !! 2)
+  case received of
+    [r0, r1, r2] -> do
+      assertEqual "order: msg-0 first" payload0 r0
+      assertEqual "order: msg-1 second" payload1 r1
+      assertEqual "order: msg-2 third" payload2 r2
+    _ -> error "FAIL: expected exactly 3 messages"
 
 testChannelReliableSequencedDropOld :: IO ()
 testChannelReliableSequencedDropOld = do
@@ -1982,7 +1986,7 @@ testChannelRetransmit = do
       sendTime = 0 :: MonoTime
       payload = "reliable-msg"
       rto = 200.0 :: Double -- RTO in milliseconds
-  -- Send a reliable message
+      -- Send a reliable message
   case channelSend payload sendTime ch0 of
     Left e -> error $ "  FAIL: send failed: " ++ show e
     Right (_, ch1) -> do

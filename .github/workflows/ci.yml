@@ -43,7 +43,7 @@ jobs:
             dist-newstyle
           key: ${{ runner.os }}-ghc-9.6.7-${{ hashFiles('gbnet-hs.cabal') }}
           restore-keys: ${{ runner.os }}-ghc-9.6.7-
-      - run: cabal test
+      - run: cabal test --enable-tests
 
   warnings:
     name: Warnings

@@ -392,7 +392,8 @@ cwSlowStartRestart rtoMs now cw =
 data BandwidthTracker = BandwidthTracker
   { btWindow :: !(Seq (MonoTime, Int)),
     btWindowDurationMs :: !Double,
-    btTotalBytes :: !Int -- ^ Cached running total of bytes in window
+    -- | Cached running total of bytes in window
+    btTotalBytes :: !Int
   }
   deriving (Show)
 
