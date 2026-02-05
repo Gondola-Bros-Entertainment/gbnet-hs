@@ -29,16 +29,14 @@ sequenceGreaterThan (SequenceNum s1) (SequenceNum s2) =
 -- | Computes the signed difference between two sequence numbers,
 -- accounting for Word16 wraparound.
 sequenceDiff :: SequenceNum -> SequenceNum -> Int32
-sequenceDiff (SequenceNum s1) (SequenceNum s2) =
-  let half = fromIntegral sequenceHalfRange :: Int32
-      full = half * 2
-      diff = fromIntegral s1 - fromIntegral s2 :: Int32
-   in if diff > half
-        then diff - full
-        else
-          if diff < negate half
-            then diff + full
-            else diff
+sequenceDiff (SequenceNum s1) (SequenceNum s2)
+  | diff > half = diff - full
+  | diff < -half = diff + full
+  | otherwise = diff
+  where
+    half = fromIntegral sequenceHalfRange :: Int32
+    full = half * 2
+    diff = fromIntegral s1 - fromIntegral s2 :: Int32
 {-# INLINE sequenceDiff #-}
 
 -- | LCG constants.

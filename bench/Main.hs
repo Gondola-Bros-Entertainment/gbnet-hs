@@ -24,14 +24,13 @@ import GBNet.Channel
   )
 import GBNet.Class (MonoTime (..))
 import GBNet.Config (defaultNetworkConfig)
-import qualified GBNet.Connection
 import GBNet.Connection
   ( Connection (..),
     drainSendQueue,
     newConnection,
     sendMessage,
   )
-import qualified GBNet.Fragment
+import qualified GBNet.Connection
 import GBNet.Fragment
   ( FragmentAssembler (..),
     FragmentHeader (..),
@@ -41,6 +40,7 @@ import GBNet.Fragment
     processFragment,
     serializeFragmentHeader,
   )
+import qualified GBNet.Fragment
 import GBNet.Packet
   ( PacketHeader (..),
     PacketType (..),
@@ -53,8 +53,8 @@ import GBNet.Reliability
     SequenceBuffer (..),
     newReliableEndpoint,
     newSequenceBuffer,
-    onPacketReceived,
     onPacketSent,
+    onPacketsReceived,
     processAcks,
     sbExists,
     sbInsert,
@@ -85,14 +85,11 @@ deriveStorable ''Transform
 -- NFData instances for criterion (force full evaluation)
 --------------------------------------------------------------------------------
 
--- Primitives / newtypes
-instance NFData SequenceNum where rnf (SequenceNum w) = rnf w
-
-instance NFData ChannelId where rnf (ChannelId w) = rnf w
+-- Note: SequenceNum, ChannelId have NFData derived in GBNet.Types
 
 instance NFData MessageId where rnf (MessageId w) = rnf w
 
-instance NFData MonoTime where rnf (MonoTime w) = rnf w
+-- Note: MonoTime NFData is derived in GBNet.Class
 
 instance NFData FragmentHeader where
   rnf (FragmentHeader mid idx cnt) = rnf mid `seq` rnf idx `seq` rnf cnt
@@ -112,9 +109,7 @@ instance NFData PacketHeader where
   rnf (PacketHeader pt sn ak abf) = rnf pt `seq` rnf sn `seq` rnf ak `seq` rnf abf
 
 -- Reliability
-instance NFData SentPacketRecord where
-  rnf (SentPacketRecord ci cs st sz nc) =
-    rnf ci `seq` rnf cs `seq` rnf st `seq` rnf sz `seq` rnf nc
+-- Note: SentPacketRecord NFData is defined in GBNet.Reliability
 
 instance (NFData a) => NFData (SequenceBuffer a) where
   rnf sb = rnf (sbEntries sb) `seq` rnf (sbSequence sb) `seq` rnf (sbSize sb)
@@ -273,26 +268,15 @@ main =
     [ -- Group 1: Reliability (ACK processing)
       bgroup
         "reliability"
-        [ env (pure (newReliableEndpoint 256)) $ \ep ->
-            bench "onPacketReceived/sequential" $
-              nf
-                ( \e ->
-                    foldl'
-                      (\acc i -> onPacketReceived (SequenceNum i) acc)
-                      e
-                      [0 .. 99]
-                )
-                ep,
+        [ env (pure (newReliableEndpoint 256, map SequenceNum [0 .. 99])) $ \ ~(ep, seqs) ->
+            bench "onPacketsReceived/100-sequential" $
+              nf (onPacketsReceived seqs) ep,
+          env (pure (newReliableEndpoint 256, map (\i -> SequenceNum (i * 3)) [0 .. 99])) $ \ ~(ep, seqs) ->
+            bench "onPacketsReceived/100-gaps" $
+              nf (onPacketsReceived seqs) ep,
           env (pure (newReliableEndpoint 256)) $ \ep ->
-            bench "onPacketReceived/gaps" $
-              nf
-                ( \e ->
-                    foldl'
-                      (\acc i -> onPacketReceived (SequenceNum (i * 3)) acc)
-                      e
-                      [0 .. 99]
-                )
-                ep,
+            bench "onPacketsReceived/single" $
+              nf (onPacketsReceived [SequenceNum 42]) ep,
           env (pure (buildEndpointWithInFlight 10)) $ \ep ->
             bench "processAcks/10-inflight" $
               nf

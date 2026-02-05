@@ -381,8 +381,8 @@ testAckBitsNoFalseAck = do
   putStrLn "ACK bits no false ack:"
   let ep0 = newReliableEndpoint 256
   -- Receive packet 0, then packet 2 (skip 1)
-  let ep1 = onPacketReceived 0 ep0
-  let ep2 = onPacketReceived 2 ep1
+  let ep1 = onPacketsReceived [0] ep0
+  let ep2 = onPacketsReceived [2] ep1
   let (ackVal, ackBitsVal) = getAckInfo ep2
   assertEqual "remote_sequence = 2" 2 ackVal
   -- bit 0 = ack-1 = seq 1 (NOT received)
@@ -399,7 +399,8 @@ testProcessAcksReturnsChannelInfo = do
   let ep2 = onPacketSent 11 now (ChannelId 3) 7 200 ep1
   -- ACK packet 11 directly, packet 10 via ack_bits (bit 0 = seq 10)
   let ackTime = 1050000000 :: MonoTime -- 1.05 seconds
-  let ((acked, _fastRetransmit), _ep3) = processAcks 11 1 ackTime ep2
+  let (ackResult, _ep3) = processAcks 11 1 ackTime ep2
+      acked = arAcked ackResult
   assertEqual "2 acked" 2 (length acked)
   assertEqual "contains (3,7)" True ((ChannelId 3, 7) `elem` acked)
   assertEqual "contains (2,5)" True ((ChannelId 2, 5) `elem` acked)
@@ -430,7 +431,8 @@ testFastRetransmit = do
   -- ACK 2: ack=2, ack_bits=0. seq 0 diff=2, bit 1 not set -> nack again
   let (_, ep3) = processAcks 2 0 ackTime ep2
   -- ACK 3: ack=3, ack_bits=0. seq 0 diff=3, bit 2 not set -> nack = 3, triggers fast retransmit
-  let ((_, fastRetransmit), _ep4) = processAcks 3 0 ackTime ep3
+  let (ackResult4, _ep4) = processAcks 3 0 ackTime ep3
+      fastRetransmit = arFastRetransmit ackResult4
   assertEqual "fast retransmit triggered" True (not (null fastRetransmit))
   assertEqual "retransmit is (0,0)" True ((ChannelId 0, SequenceNum 0) `elem` fastRetransmit)
 

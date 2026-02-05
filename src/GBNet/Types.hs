@@ -20,6 +20,7 @@ module GBNet.Types
   )
 where
 
+import Control.DeepSeq (NFData)
 import Data.Word (Word16, Word32, Word8)
 import Foreign.Storable (Storable (..))
 
@@ -27,7 +28,7 @@ import Foreign.Storable (Storable (..))
 -- Not a quantity — no 'Num' instance. Construct via @ChannelId 0@.
 newtype ChannelId = ChannelId {unChannelId :: Word8}
   deriving stock (Eq, Ord, Show)
-  deriving newtype (Bounded, Storable)
+  deriving newtype (Bounded, NFData, Storable)
 
 -- | Convert a 'ChannelId' to 'Int' for IntMap indexing.
 channelIdToInt :: ChannelId -> Int
@@ -38,7 +39,7 @@ channelIdToInt = fromIntegral . unChannelId
 -- Derives 'Num' because @seq + 1@ is the canonical operation.
 newtype SequenceNum = SequenceNum {unSequenceNum :: Word16}
   deriving stock (Eq, Ord, Show)
-  deriving newtype (Num, Bounded, Enum, Real, Integral, Storable)
+  deriving newtype (Bounded, Enum, Integral, NFData, Num, Real, Storable)
 
 -- | Fragment message identifier.
 -- Derives 'Num' for increment patterns in fragmentation.

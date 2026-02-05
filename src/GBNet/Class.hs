@@ -21,6 +21,7 @@ module GBNet.Class
   )
 where
 
+import Control.DeepSeq (NFData)
 import Control.Monad.State.Strict (StateT (..))
 import Control.Monad.Trans.Class (lift)
 import Data.ByteString (ByteString)
@@ -32,7 +33,7 @@ import Network.Socket (SockAddr)
 -- Derives 'Num' because arithmetic on timestamps is pervasive.
 newtype MonoTime = MonoTime {unMonoTime :: Word64}
   deriving stock (Eq, Ord, Show)
-  deriving newtype (Num, Bounded, Enum, Real, Integral)
+  deriving newtype (Bounded, Enum, Integral, NFData, Num, Real)
 
 -- | Network errors.
 data NetError

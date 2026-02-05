@@ -387,7 +387,7 @@ processIncomingHeader header now = execState $ do
   -- Record received packet for ACK generation
   modify' $ \c ->
     c
-      { connReliability = Rel.onPacketReceived (sequenceNum header) (connReliability c),
+      { connReliability = Rel.onPacketsReceived [sequenceNum header] (connReliability c),
         connPendingAck = True
       }
 
@@ -401,7 +401,8 @@ processIncomingHeader header now = execState $ do
   rel <- gets connReliability
   let ackBits64 = fromIntegral (ackBitfield header) :: Word64
       (ackResult, rel') = Rel.processAcks (ack header) ackBits64 now rel
-      (ackedPairs, fastRetransmits) = ackResult
+      ackedPairs = Rel.arAcked ackResult
+      fastRetransmits = Rel.arFastRetransmit ackResult
   modify' $ \c -> c {connReliability = rel'}
 
   -- Feed ack/loss info to cwnd
@@ -434,34 +435,30 @@ updateConnecting :: MonoTime -> Connection -> Either ConnectionError Connection
 updateConnecting now conn =
   case connRequestTime conn of
     Nothing -> Right conn
-    Just reqTime ->
-      let elapsed = elapsedMs reqTime now
-          timeoutMs = ncConnectionRequestTimeoutMs (connConfig conn)
-       in if elapsed > timeoutMs
-            then
-              let retries = connRetryCount conn + 1
-                  maxRetries = ncConnectionRequestMaxRetries (connConfig conn)
-               in if retries > maxRetries
-                    then Left ErrTimeout
-                    else
-                      Right $
-                        sendConnectionRequest
-                          conn
-                            { connRetryCount = retries,
-                              connRequestTime = Just now
-                            }
-            else Right conn
+    Just reqTime
+      | elapsed <= timeoutMs -> Right conn
+      | retries > maxRetries -> Left ErrTimeout
+      | otherwise ->
+          Right $
+            sendConnectionRequest
+              conn
+                { connRetryCount = retries,
+                  connRequestTime = Just now
+                }
+      where
+        elapsed = elapsedMs reqTime now
+        timeoutMs = ncConnectionRequestTimeoutMs (connConfig conn)
+        retries = connRetryCount conn + 1
+        maxRetries = ncConnectionRequestMaxRetries (connConfig conn)
 
 -- | Update while connected.
 updateConnected :: MonoTime -> Connection -> Either ConnectionError Connection
-updateConnected now conn = do
-  -- Check timeout
-  let timeSinceRecv = elapsedMs (connLastRecvTime conn) now
-      timeoutMs = ncConnectionTimeoutMs (connConfig conn)
-  if timeSinceRecv > timeoutMs
-    then Left ErrTimeout
-    else
-      Right $ execState (updateConnectedS now) conn
+updateConnected now conn
+  | timeSinceRecv > timeoutMs = Left ErrTimeout
+  | otherwise = Right $ execState (updateConnectedS now) conn
+  where
+    timeSinceRecv = elapsedMs (connLastRecvTime conn) now
+    timeoutMs = ncConnectionTimeoutMs (connConfig conn)
 
 -- | State-based connected update (after timeout check passes).
 updateConnectedS :: MonoTime -> State Connection ()
@@ -620,31 +617,29 @@ updateDisconnecting :: MonoTime -> Connection -> Either ConnectionError Connecti
 updateDisconnecting now conn =
   case connDisconnectTime conn of
     Nothing -> Right conn
-    Just discTime ->
-      let elapsed = elapsedMs discTime now
-          timeoutMs = ncDisconnectRetryTimeoutMs (connConfig conn)
-       in if elapsed > timeoutMs
-            then
-              let retries = connDisconnectRetries conn
-                  maxRetries = ncDisconnectRetries (connConfig conn)
-               in if retries >= maxRetries
-                    then Right $ resetConnection conn {connState = Disconnected}
-                    else
-                      let header = createHeaderInternal conn
-                          pkt =
-                            OutgoingPacket
-                              { opHeader = header,
-                                opType = Disconnect,
-                                opPayload = BS.singleton (disconnectReasonCode ReasonRequested)
-                              }
-                       in Right
-                            conn
-                              { connDisconnectRetries = retries + 1,
-                                connDisconnectTime = Just now,
-                                connSendQueue = connSendQueue conn Seq.|> pkt,
-                                connLocalSeq = connLocalSeq conn + 1
-                              }
-            else Right conn
+    Just discTime
+      | elapsed <= timeoutMs -> Right conn
+      | retries >= maxRetries -> Right $ resetConnection conn {connState = Disconnected}
+      | otherwise ->
+          let header = createHeaderInternal conn
+              pkt =
+                OutgoingPacket
+                  { opHeader = header,
+                    opType = Disconnect,
+                    opPayload = BS.singleton (disconnectReasonCode ReasonRequested)
+                  }
+           in Right
+                conn
+                  { connDisconnectRetries = retries + 1,
+                    connDisconnectTime = Just now,
+                    connSendQueue = connSendQueue conn Seq.|> pkt,
+                    connLocalSeq = connLocalSeq conn + 1
+                  }
+      where
+        elapsed = elapsedMs discTime now
+        timeoutMs = ncDisconnectRetryTimeoutMs (connConfig conn)
+        retries = connDisconnectRetries conn
+        maxRetries = ncDisconnectRetries (connConfig conn)
 
 -- | Reset connection state.
 resetConnection :: Connection -> Connection

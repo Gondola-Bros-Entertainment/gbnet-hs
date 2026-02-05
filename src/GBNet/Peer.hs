@@ -542,63 +542,64 @@ handleConnectionRequestS :: PeerId -> MonoTime -> State NetPeer [PeerEvent]
 handleConnectionRequestS peerId now = do
   conns <- gets npConnections
   pending <- gets npPending
-  if Map.member peerId conns
-    then do
+  case (Map.member peerId conns, Map.lookup peerId pending) of
+    (True, _) -> do
       -- Already connected, resend accept
       modify' $ queueControlPacket ConnectionAccepted BS.empty peerId
       pure []
-    else case Map.lookup peerId pending of
-      Just p -> do
-        -- Already pending, resend challenge with stored salt
-        let saltPayload = encodeSalt (pcServerSalt p)
-        modify' $ queueControlPacket ConnectionChallenge saltPayload peerId
-        pure []
-      Nothing -> do
-        -- Check rate limit
-        rl <- gets npRateLimiter
-        let addrKey = sockAddrToKey (unPeerId peerId)
-            (allowed, rl') = rateLimiterAllow addrKey now rl
-        modify' $ \peer -> peer {npRateLimiter = rl'}
-        if not allowed
-          then do
-            modify' $ \peer -> peer {npRateLimitDrops = npRateLimitDrops peer + 1}
-            pure []
-          else do
-            peer <- get
-            let pendingSize = Map.size (npPending peer)
-                connSize = Map.size (npConnections peer)
-                maxClients = ncMaxClients (npConfig peer)
-            if pendingSize >= maxClients
-              then do
-                modify' $ \p -> p {npRateLimitDrops = npRateLimitDrops p + 1}
-                pure []
-              else
-                if connSize >= maxClients
-                  then do
-                    let reason = encodeDenyReason denyReasonServerFull
-                    modify' $ queueControlPacket ConnectionDenied reason peerId
-                    pure []
-                  else do
-                    -- Create pending connection and send challenge with salt
-                    rng <- gets npRngState
-                    let (salt, rng') = nextRandom rng
-                        newPending =
-                          PendingConnection
-                            { pcDirection = Inbound,
-                              pcServerSalt = salt,
-                              pcClientSalt = 0,
-                              pcCreatedAt = now,
-                              pcRetryCount = 0,
-                              pcLastRetry = now
-                            }
-                    modify' $ \p ->
-                      p
-                        { npPending = Map.insert peerId newPending (npPending p),
-                          npRngState = rng'
-                        }
-                    let saltPayload = encodeSalt salt
-                    modify' $ queueControlPacket ConnectionChallenge saltPayload peerId
-                    pure []
+    (_, Just p) -> do
+      -- Already pending, resend challenge with stored salt
+      let saltPayload = encodeSalt (pcServerSalt p)
+      modify' $ queueControlPacket ConnectionChallenge saltPayload peerId
+      pure []
+    (False, Nothing) ->
+      handleNewConnectionRequest peerId now
+
+-- | Handle a genuinely new connection request after checking existing state.
+handleNewConnectionRequest :: PeerId -> MonoTime -> State NetPeer [PeerEvent]
+handleNewConnectionRequest peerId now = do
+  -- Check rate limit
+  rl <- gets npRateLimiter
+  let addrKey = sockAddrToKey (unPeerId peerId)
+      (allowed, rl') = rateLimiterAllow addrKey now rl
+  modify' $ \peer -> peer {npRateLimiter = rl'}
+  peer <- get
+  let pendingSize = Map.size (npPending peer)
+      connSize = Map.size (npConnections peer)
+      maxClients = ncMaxClients (npConfig peer)
+  case () of
+    _
+      | not allowed -> do
+          modify' $ \p -> p {npRateLimitDrops = npRateLimitDrops p + 1}
+          pure []
+      | pendingSize >= maxClients -> do
+          modify' $ \p -> p {npRateLimitDrops = npRateLimitDrops p + 1}
+          pure []
+      | connSize >= maxClients -> do
+          let reason = encodeDenyReason denyReasonServerFull
+          modify' $ queueControlPacket ConnectionDenied reason peerId
+          pure []
+      | otherwise -> do
+          -- Create pending connection and send challenge with salt
+          rng <- gets npRngState
+          let (salt, rng') = nextRandom rng
+              newPending =
+                PendingConnection
+                  { pcDirection = Inbound,
+                    pcServerSalt = salt,
+                    pcClientSalt = 0,
+                    pcCreatedAt = now,
+                    pcRetryCount = 0,
+                    pcLastRetry = now
+                  }
+          modify' $ \p ->
+            p
+              { npPending = Map.insert peerId newPending (npPending p),
+                npRngState = rng'
+              }
+          let saltPayload = encodeSalt salt
+          modify' $ queueControlPacket ConnectionChallenge saltPayload peerId
+          pure []
 
 -- | Handle connection challenge (we're outbound, received their challenge) (State version).
 handleConnectionChallengeS :: PeerId -> Packet -> MonoTime -> State NetPeer [PeerEvent]
@@ -670,12 +671,12 @@ handleConnectionAcceptedS peerId now = do
 handleDisconnectS :: PeerId -> State NetPeer [PeerEvent]
 handleDisconnectS peerId = do
   conns <- gets npConnections
-  if Map.member peerId conns
-    then do
+  case Map.member peerId conns of
+    True -> do
       modify' $ \peer ->
         cleanupPeer peerId peer {npConnections = Map.delete peerId (npConnections peer)}
       pure [PeerDisconnected peerId ReasonRequested]
-    else do
+    False -> do
       modify' (removePending peerId)
       pure []
 

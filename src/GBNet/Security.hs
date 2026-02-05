@@ -120,18 +120,18 @@ newRateLimiter maxReqs now =
 -- | Check if a request should be allowed. Returns (allowed, updatedLimiter).
 -- Automatically prunes stale entries when the cleanup interval has elapsed.
 rateLimiterAllow :: Word64 -> MonoTime -> RateLimiter -> (Bool, RateLimiter)
-rateLimiterAllow addrKey now rl =
-  let -- Periodic sweep of all entries
-      rl' = maybeCleanup now rl
-      window = rlWindowMs rl'
-      timestamps = Map.findWithDefault [] addrKey (rlRequests rl')
-      recent = filter (\t -> elapsedMs t now < window) timestamps
-   in if length recent >= rlMaxRequestsPerSecond rl'
-        then (False, rl' {rlRequests = Map.insert addrKey recent (rlRequests rl')})
-        else
-          ( True,
-            rl' {rlRequests = Map.insert addrKey (now : recent) (rlRequests rl')}
-          )
+rateLimiterAllow addrKey now rl
+  | recentCount >= rlMaxRequestsPerSecond rl' = (False, rl' {rlRequests = Map.insert addrKey recent (rlRequests rl')})
+  | otherwise = (True, rl' {rlRequests = Map.insert addrKey (now : recent) (rlRequests rl')})
+  where
+    rl' = maybeCleanup now rl
+    window = rlWindowMs rl'
+    timestamps = Map.findWithDefault [] addrKey (rlRequests rl')
+    -- Filter and count in single pass
+    (recentCount, recent) = foldr countRecent (0, []) timestamps
+    countRecent t (n, acc)
+      | elapsedMs t now < window = (n + 1, t : acc)
+      | otherwise = (n, acc)
 
 -- | Sweep stale entries if enough time has passed since last cleanup.
 maybeCleanup :: MonoTime -> RateLimiter -> RateLimiter
