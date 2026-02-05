@@ -30,18 +30,6 @@ import Data.ByteString.Internal (unsafeCreate)
 import qualified Data.ByteString.Unsafe as BSU
 import Data.Word (Word16, Word32, Word8)
 import Foreign.Storable (pokeByteOff)
-import GBNet.Serialize.BitBuffer
-  ( BitReader (..),
-    readBitsM,
-    writeBits,
-  )
-import GBNet.Serialize.Class
-  ( BitDeserialize (..),
-    BitSerialize (..),
-    deserializeM,
-    packetTypeBitWidth,
-    runDeserialize,
-  )
 import GBNet.Types (SequenceNum (..))
 
 -- | Header size in bits (4 + 16 + 16 + 32 = 68).
@@ -69,17 +57,6 @@ data PacketType
     ConnectionResponse
   deriving (Eq, Show, Enum, Bounded)
 
-instance BitSerialize PacketType where
-  bitSerialize pt = writeBits (fromIntegral (fromEnum pt)) packetTypeBitWidth
-
-instance BitDeserialize PacketType where
-  bitDeserialize = runDeserialize $ do
-    val <- readBitsM packetTypeBitWidth
-    let tag = fromIntegral val :: Int
-    if tag > fromEnum (maxBound :: PacketType)
-      then BitReader $ \_ -> Left $ "PacketType: invalid tag " ++ show tag
-      else pure $ toEnum tag
-
 -- | Packet header (68 bits on wire).
 data PacketHeader = PacketHeader
   { -- | 4 bits
@@ -92,27 +69,6 @@ data PacketHeader = PacketHeader
     ackBitfield :: !Word32
   }
   deriving (Eq, Show)
-
-instance BitSerialize PacketHeader where
-  bitSerialize hdr =
-    bitSerialize (ackBitfield hdr)
-      . bitSerialize (ack hdr)
-      . bitSerialize (sequenceNum hdr)
-      . bitSerialize (packetType hdr)
-
-instance BitDeserialize PacketHeader where
-  bitDeserialize = runDeserialize $ do
-    pt <- deserializeM
-    sn <- deserializeM
-    ak <- deserializeM
-    abf <- deserializeM
-    pure
-      PacketHeader
-        { packetType = pt,
-          sequenceNum = sn,
-          ack = ak,
-          ackBitfield = abf
-        }
 
 -- | Header size in bytes (68 bits = 9 bytes, rounded up).
 packetHeaderByteSize :: Int
@@ -130,7 +86,7 @@ packetTypeBitShift :: Int
 packetTypeBitShift = 4
 
 -- | Serialize a packet header to bytes.
--- Uses optimized direct memory writes (23x faster than BitBuffer).
+-- Uses optimized direct memory writes.
 --
 -- Wire format (68 bits, MSB-first):
 --   Byte 0:     [type:4][seq_hi:4]
@@ -167,7 +123,7 @@ serializeHeader !hdr = unsafeCreate packetHeaderByteSize $ \ptr -> do
 {-# INLINE serializeHeader #-}
 
 -- | Deserialize a packet header from bytes.
--- Uses optimized direct memory access (4.6x faster than BitBuffer).
+-- Uses optimized direct memory access.
 deserializeHeader :: BS.ByteString -> Either String PacketHeader
 deserializeHeader !bs
   | BS.length bs < packetHeaderByteSize = Left "Header too short"

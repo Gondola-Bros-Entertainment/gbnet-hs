@@ -8,9 +8,6 @@ module Main where
 
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
-import Data.Int (Int16, Int32, Int64, Int8)
-import Data.Maybe (fromMaybe)
-import qualified Data.Text as T
 import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Channel
 import GBNet.Class ()
@@ -45,9 +42,8 @@ import GBNet.Replication.Interest
 import GBNet.Replication.Interpolation
 import GBNet.Replication.Priority
 import GBNet.Security
-import GBNet.Serialize.BitBuffer
-import GBNet.Serialize.Class
-import GBNet.Serialize.TH
+import GBNet.Serialize.FastSupport (deserialize, serialize)
+import GBNet.Serialize.FastTH (deriveStorable)
 import GBNet.Simulator
 import GBNet.Socket (UdpSocket (..))
 import GBNet.Stats (CongestionLevel (..), defaultSocketStats)
@@ -56,92 +52,65 @@ import GBNet.Types (ChannelId (..), MessageId (..), SequenceNum (..))
 import GBNet.Util
 import Network.Socket (SockAddr (..), tupleToHostAddress)
 import qualified Network.Socket as NS
-import Test.QuickCheck (Arbitrary (..), choose, elements, listOf, quickCheck, withMaxSuccess)
+import Test.QuickCheck (Arbitrary (..), quickCheck, withMaxSuccess)
 
--- TH-derived test types (must be before main due to TH staging restriction)
+--------------------------------------------------------------------------------
+-- TH-derived test types (Storable)
+--------------------------------------------------------------------------------
+
 data Vec3 = Vec3
-  { vecX :: Float,
-    vecY :: Float,
-    vecZ :: Float
+  { vecX :: !Float,
+    vecY :: !Float,
+    vecZ :: !Float
   }
   deriving (Eq, Show)
 
-deriveNetworkSerialize ''Vec3
+deriveStorable ''Vec3
 
-data Color = Red | Green | Blue | Yellow deriving (Eq, Show)
+instance Arbitrary Vec3 where
+  arbitrary = Vec3 <$> arbitrary <*> arbitrary <*> arbitrary
 
-deriveNetworkSerialize ''Color
+--------------------------------------------------------------------------------
+-- Delta test types (Storable-based)
+--------------------------------------------------------------------------------
 
-data GameEvent
-  = PlayerJoin Word8
-  | PlayerLeave Word8
-  | ChatMessage Word8 Word16
+-- Simple test type for delta compression: a pair of Word8 values.
+data TestDeltaState = TestDeltaState !Word8 !Word8
   deriving (Eq, Show)
 
-deriveNetworkSerialize ''GameEvent
+deriveStorable ''TestDeltaState
 
-data SimpleRecord = SimpleRecord
-  { srFlag :: Bool,
-    srValue :: Word16
-  }
+data TestDeltaDelta = TestDeltaDelta !Word8 !Word8 !Word8 !Word8
+  -- Flags + values: hasA, hasB, valA, valB
   deriving (Eq, Show)
 
-deriveNetworkSerialize ''SimpleRecord
+deriveStorable ''TestDeltaDelta
 
--- Test type using BitWidth for custom bit-width fields.
--- A compact player state: 7-bit health (0-127), 4-bit direction (0-15).
-data CompactPlayer = CompactPlayer
-  { cpHealth :: BitWidth 7 Word8,
-    cpDirection :: BitWidth 4 Word8
-  }
-  deriving (Eq, Show)
+instance NetworkDelta TestDeltaState where
+  type Delta TestDeltaState = TestDeltaDelta
+  diff (TestDeltaState a1 b1) (TestDeltaState a2 b2) =
+    TestDeltaDelta
+      (if a1 /= a2 then 1 else 0)
+      (if b1 /= b2 then 1 else 0)
+      a1
+      b1
+  apply (TestDeltaState a b) (TestDeltaDelta hasA hasB valA valB) =
+    TestDeltaState
+      (if hasA /= 0 then valA else a)
+      (if hasB /= 0 then valB else b)
 
-deriveNetworkSerialize ''CompactPlayer
+--------------------------------------------------------------------------------
+-- Main
+--------------------------------------------------------------------------------
 
 main :: IO ()
 main = do
-  putStrLn "=== GB-Net Haskell Serialization Tests ==="
+  putStrLn "=== GB-Net Haskell Tests ==="
   putStrLn ""
 
-  -- Primitive types
-  testBoolRoundTrip
-  testWord8RoundTrip
-  testWord16RoundTrip
-  testMultiField
-  testBitPacking
-  testMonadicReader
-  testSignedIntegers
-  testFloatingPoint
-
-  -- Packet types
-  testPacketType
+  -- Storable serialization
+  testStorableRoundTrip
   testPacketHeaderRoundTrip
-  testPacketHeaderMonadic
-  testFastSerializationRoundTrip
-
-  -- Collection types
-  testMaybeRoundTrip
-  testListRoundTrip
-  testTextRoundTrip
-  testTupleRoundTrip
-
-  -- Phase 1: Measure mode + debug
-  testSerializedSize
-  testToBitString
-
-  -- Phase 2: Fast paths (verified via existing tests passing)
-  testFastPathAligned
-
-  -- Phase 3: TH derive
-  testTHRecord
-  testTHEnum
-  testTHEnumWithPayloads
-
-  -- Phase 4: Serialization fixes
-  testFastPathAfterNonAligned
-  testDeserializeBoundsCheck
-  testTextUnicode
-  testBitWidthRoundTrip
 
   -- Reliability module
   testSequenceGreaterThan
@@ -194,7 +163,7 @@ main = do
   testSnapshotInterpolation
   testSnapshotOutOfOrder
 
-  -- Property-based: Serialization roundtrips
+  -- Property-based tests
   testPropertyRoundTrips
 
   -- Adversarial: Malformed packet handling
@@ -245,9 +214,9 @@ main = do
   putStrLn ""
   putStrLn "All tests passed!"
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Helpers
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 assertEqual :: (Eq a, Show a) => String -> a -> a -> IO ()
 assertEqual name expected actual =
@@ -262,243 +231,23 @@ assertEqual name expected actual =
           ++ " got "
           ++ show actual
 
--- | Helper to run a BitReader and assert the result.
-assertDeserialize :: (Eq a, Show a) => String -> a -> BitReader a -> BitBuffer -> IO ()
-assertDeserialize name expected reader buf =
-  case runBitReader reader buf of
-    Left err -> error $ "  FAIL: " ++ name ++ " deserialization error: " ++ err
-    Right (val, _) -> assertEqual name expected val
+--------------------------------------------------------------------------------
+-- Storable serialization tests
+--------------------------------------------------------------------------------
 
--- --------------------------------------------------------------------
--- Primitive tests
--- --------------------------------------------------------------------
-
-testBoolRoundTrip :: IO ()
-testBoolRoundTrip = do
-  putStrLn "Bool round-trip:"
-  let buf = writeBit False $ writeBit True empty
-  let reader = do
-        v1 <- readBitM
-        v2 <- readBitM
-        pure (v1, v2)
-  assertDeserialize "Bool (True, False)" (True, False) reader buf
-
-testWord8RoundTrip :: IO ()
-testWord8RoundTrip = do
-  putStrLn "Word8 round-trip:"
-  let buf = bitSerialize (42 :: Word8) empty
-  assertDeserialize "Word8 42" (42 :: Word8) deserializeM buf
-
-testWord16RoundTrip :: IO ()
-testWord16RoundTrip = do
-  putStrLn "Word16 round-trip:"
-  let buf = bitSerialize (1234 :: Word16) empty
-  assertDeserialize "Word16 1234" (1234 :: Word16) deserializeM buf
-
-testMultiField :: IO ()
-testMultiField = do
-  putStrLn "Multi-field serialization:"
-  let buf =
-        bitSerialize (99 :: Word8) $
-          bitSerialize (5000 :: Word16) $
-            bitSerialize
-              True
-              empty
-  let reader = do
-        v1 <- deserializeM :: BitReader Bool
-        v2 <- deserializeM :: BitReader Word16
-        v3 <- deserializeM :: BitReader Word8
-        pure (v1, v2, v3)
-  assertDeserialize "multi-field" (True, 5000 :: Word16, 99 :: Word8) reader buf
-
-testBitPacking :: IO ()
-testBitPacking = do
-  putStrLn "Bit-level packing:"
-  let buf =
-        writeBits 512 10 $
-          writeBits 768 10 $
-            writeBits 100 7 $
-              writeBits
-                1
-                1
-                empty
-  assertEqual "bit position = 28" 28 (bitPosition buf)
-  let reader = do
-        mv <- readBitsM 1
-        hp <- readBitsM 7
-        y <- readBitsM 10
-        x <- readBitsM 10
-        pure (mv, hp, y, x)
-  assertDeserialize "bit packing" (1, 100, 768, 512) reader buf
-
-testMonadicReader :: IO ()
-testMonadicReader = do
-  putStrLn "Monadic reader:"
-  let buf =
-        bitSerialize (99 :: Word8) $
-          bitSerialize (5000 :: Word16) $
-            bitSerialize
-              True
-              empty
-  let reader = do
-        v1 <- deserializeM :: BitReader Bool
-        v2 <- deserializeM :: BitReader Word16
-        v3 <- deserializeM :: BitReader Word8
-        pure (v1, v2, v3)
-  assertDeserialize "monadic multi-field" (True, 5000 :: Word16, 99 :: Word8) reader buf
-
--- --------------------------------------------------------------------
--- Signed integer tests
--- --------------------------------------------------------------------
-
-testSignedIntegers :: IO ()
-testSignedIntegers = do
-  putStrLn "Signed integer round-trips:"
-
-  -- Int8: range -128 to 127
-  let buf8 =
-        bitSerialize (-1 :: Int8) $
-          bitSerialize (127 :: Int8) $
-            bitSerialize
-              (-128 :: Int8)
-              empty
-  let reader8 = do
-        a <- deserializeM :: BitReader Int8
-        b <- deserializeM :: BitReader Int8
-        c <- deserializeM :: BitReader Int8
-        pure (a, b, c)
-  assertDeserialize "Int8 boundary" (-128, 127, -1 :: Int8) reader8 buf8
-
-  -- Int16
-  let buf16 =
-        bitSerialize (-1000 :: Int16) $
-          bitSerialize
-            (32767 :: Int16)
-            empty
-  let reader16 = do
-        a <- deserializeM :: BitReader Int16
-        b <- deserializeM :: BitReader Int16
-        pure (a, b)
-  assertDeserialize "Int16 boundary" (32767, -1000 :: Int16) reader16 buf16
-
-  -- Int32
-  let buf32 = bitSerialize (-100000 :: Int32) empty
-  assertDeserialize "Int32 -100000" (-100000 :: Int32) deserializeM buf32
-
-  -- Int64
-  let buf64 = bitSerialize (-9999999999 :: Int64) empty
-  assertDeserialize "Int64 -9999999999" (-9999999999 :: Int64) deserializeM buf64
-
--- --------------------------------------------------------------------
--- Floating-point tests
--- --------------------------------------------------------------------
-
-testFloatingPoint :: IO ()
-testFloatingPoint = do
-  putStrLn "Floating-point round-trips:"
-
-  -- Float
-  let bufF =
-        bitSerialize (3.14159 :: Float) $
-          bitSerialize
-            (-0.0 :: Float)
-            empty
-  let readerF = do
-        a <- deserializeM :: BitReader Float
-        b <- deserializeM :: BitReader Float
-        pure (a, b)
-  assertDeserialize "Float pair" (-0.0, 3.14159 :: Float) readerF bufF
-
-  -- Double
-  let bufD = bitSerialize (2.718281828459045 :: Double) empty
-  assertDeserialize "Double e" (2.718281828459045 :: Double) deserializeM bufD
-
-  -- Infinity
-  let bufInf = bitSerialize (1.0 / 0.0 :: Float) empty
-  case runBitReader (deserializeM :: BitReader Float) bufInf of
-    Left err -> error $ "  FAIL: Float Infinity: " ++ err
-    Right (a, _) ->
-      if isInfinite a
-        then putStrLn "  PASS: Float Infinity"
-        else error $ "  FAIL: Float Infinity, got " ++ show a
-
--- --------------------------------------------------------------------
--- Packet type tests
--- --------------------------------------------------------------------
-
-testPacketType :: IO ()
-testPacketType = do
-  putStrLn "PacketType round-trips:"
-  let allTypes =
-        [ ConnectionRequest,
-          ConnectionAccepted,
-          ConnectionDenied,
-          Payload,
-          Disconnect,
-          Keepalive
-        ]
-  let buf = foldl (flip bitSerialize) empty allTypes
-  let reader = mapM (\_ -> deserializeM :: BitReader PacketType) allTypes
-  case runBitReader reader buf of
-    Left err -> error err
-    Right (results, _) ->
-      mapM_
-        ( \(expected, actual) ->
-            assertEqual ("PacketType " ++ show expected) expected actual
-        )
-        (zip allTypes results)
+testStorableRoundTrip :: IO ()
+testStorableRoundTrip = do
+  putStrLn "Storable round-trip:"
+  let v = Vec3 1.0 (-2.5) 100.0
+      bytes = serialize v
+  assertEqual "Vec3 size" 12 (BS.length bytes)
+  case deserialize bytes :: Either String Vec3 of
+    Left err -> error $ "  FAIL: deserialize Vec3: " ++ err
+    Right v' -> assertEqual "Vec3 roundtrip" v v'
 
 testPacketHeaderRoundTrip :: IO ()
 testPacketHeaderRoundTrip = do
-  putStrLn "PacketHeader round-trip:"
-  let hdr =
-        PacketHeader
-          { packetType = Payload,
-            sequenceNum = 42,
-            ack = 40,
-            ackBitfield = 0xDEADBEEF
-          }
-  let buf = bitSerialize hdr empty
-  assertEqual "header bit size" packetHeaderBitSize (bitPosition buf)
-  case runBitReader (deserializeM :: BitReader PacketHeader) buf of
-    Left err -> error err
-    Right (hdr', _) -> do
-      assertEqual "packetType" (packetType hdr) (packetType hdr')
-      assertEqual "sequenceNum" (sequenceNum hdr) (sequenceNum hdr')
-      assertEqual "ack" (ack hdr) (ack hdr')
-      assertEqual "ackBitfield" (ackBitfield hdr) (ackBitfield hdr')
-
-testPacketHeaderMonadic :: IO ()
-testPacketHeaderMonadic = do
-  putStrLn "PacketHeader monadic round-trip:"
-  let hdr =
-        PacketHeader
-          { packetType = ConnectionRequest,
-            sequenceNum = 65535,
-            ack = 0,
-            ackBitfield = 0xFFFFFFFF
-          }
-  let buf = bitSerialize (99 :: Word8) $ bitSerialize hdr empty
-  let reader = do
-        h <- deserializeM :: BitReader PacketHeader
-        trailing <- deserializeM :: BitReader Word8
-        pure (h, trailing)
-  case runBitReader reader buf of
-    Left err -> error $ "Monadic header read failed: " ++ err
-    Right ((h, trailing), _) -> do
-      assertEqual "monadic packetType" ConnectionRequest (packetType h)
-      assertEqual "monadic sequenceNum" 65535 (sequenceNum h)
-      assertEqual "monadic ack" 0 (ack h)
-      assertEqual "monadic ackBitfield" (0xFFFFFFFF :: Word32) (ackBitfield h)
-      assertEqual "monadic trailing" (99 :: Word8) trailing
-
--- --------------------------------------------------------------------
--- Fast serialization tests
--- --------------------------------------------------------------------
-
-testFastSerializationRoundTrip :: IO ()
-testFastSerializationRoundTrip = do
-  putStrLn "Fast serialization roundtrip:"
+  putStrLn "PacketHeader roundtrip:"
   let headers =
         [ PacketHeader Payload (SequenceNum 42) (SequenceNum 40) 0xDEADBEEF,
           PacketHeader ConnectionRequest (SequenceNum 0) (SequenceNum 0) 0,
@@ -518,261 +267,9 @@ testFastSerializationRoundTrip = do
           assertEqual "roundtrip ack" (ack hdr) (ack hdr')
           assertEqual "roundtrip ackBitfield" (ackBitfield hdr) (ackBitfield hdr')
 
--- --------------------------------------------------------------------
--- Collection type tests
--- --------------------------------------------------------------------
-
-testMaybeRoundTrip :: IO ()
-testMaybeRoundTrip = do
-  putStrLn "Maybe round-trips:"
-  let bufN = bitSerialize (Nothing :: Maybe Word8) empty
-  assertDeserialize "Nothing" (Nothing :: Maybe Word8) deserializeM bufN
-
-  let bufJ = bitSerialize (Just (42 :: Word8)) empty
-  assertDeserialize "Just 42" (Just 42 :: Maybe Word8) deserializeM bufJ
-
-  let bufNested = bitSerialize (Just (Just True) :: Maybe (Maybe Bool)) empty
-  assertDeserialize "Just (Just True)" (Just (Just True) :: Maybe (Maybe Bool)) deserializeM bufNested
-
-testListRoundTrip :: IO ()
-testListRoundTrip = do
-  putStrLn "List round-trips:"
-  let bufEmpty = bitSerialize ([] :: [Word8]) empty
-  assertDeserialize "empty list" ([] :: [Word8]) deserializeM bufEmpty
-
-  let xs = [10, 20, 30] :: [Word16]
-  let bufList = bitSerialize xs empty
-  assertDeserialize "list [10,20,30]" xs deserializeM bufList
-
-testTextRoundTrip :: IO ()
-testTextRoundTrip = do
-  putStrLn "Text round-trips:"
-
-  -- Empty text
-  let bufEmpty = bitSerialize (T.empty :: T.Text) empty
-  assertDeserialize "empty Text" T.empty deserializeM bufEmpty
-
-  -- ASCII
-  let bufHello = bitSerialize ("hello" :: T.Text) empty
-  assertDeserialize "Text hello" ("hello" :: T.Text) deserializeM bufHello
-
-  -- Unicode (multi-byte UTF-8)
-  let bufUni = bitSerialize ("café" :: T.Text) empty
-  assertDeserialize "Text café" ("café" :: T.Text) deserializeM bufUni
-
-  -- Emoji (4-byte UTF-8)
-  let bufEmoji = bitSerialize ("\x1F680" :: T.Text) empty
-  assertDeserialize "Text rocket emoji" ("\x1F680" :: T.Text) deserializeM bufEmoji
-
-testTupleRoundTrip :: IO ()
-testTupleRoundTrip = do
-  putStrLn "Tuple round-trips:"
-  let buf2 = bitSerialize (True, 42 :: Word8) empty
-  assertDeserialize "2-tuple" (True, 42 :: Word8) deserializeM buf2
-
-  let buf3 = bitSerialize (False, 1000 :: Word16, -5 :: Int8) empty
-  assertDeserialize "3-tuple" (False, 1000 :: Word16, -5 :: Int8) deserializeM buf3
-
-  let buf4 = bitSerialize (True, 255 :: Word8, 3.14 :: Float, -100 :: Int16) empty
-  assertDeserialize "4-tuple" (True, 255 :: Word8, 3.14 :: Float, -100 :: Int16) deserializeM buf4
-
--- --------------------------------------------------------------------
--- Phase 1: Measure mode + debug tests
--- --------------------------------------------------------------------
-
-testSerializedSize :: IO ()
-testSerializedSize = do
-  putStrLn "Serialized size measurement:"
-  assertEqual "Bool = 1 bit" 1 (serializedSizeBits (bitSerialize True))
-  assertEqual "Word8 = 8 bits" 8 (serializedSizeBits (bitSerialize (42 :: Word8)))
-  assertEqual "Word16 = 16 bits" 16 (serializedSizeBits (bitSerialize (0 :: Word16)))
-  assertEqual "Word32 = 32 bits" 32 (serializedSizeBits (bitSerialize (0 :: Word32)))
-  assertEqual "Word64 = 64 bits" 64 (serializedSizeBits (bitSerialize (0 :: Word64)))
-  assertEqual "Word8 = 1 byte" 1 (serializedSizeBytes (bitSerialize (42 :: Word8)))
-  assertEqual "Bool = 1 byte (rounded)" 1 (serializedSizeBytes (bitSerialize True))
-  assertEqual "9 bits = 2 bytes" 2 (serializedSizeBytes (writeBits 0 9))
-  -- PacketHeader should be 68 bits = 9 bytes
-  let hdr = PacketHeader Payload 0 0 0
-  assertEqual "PacketHeader = 68 bits" 68 (serializedSizeBits (bitSerialize hdr))
-  assertEqual "PacketHeader = 9 bytes" 9 (serializedSizeBytes (bitSerialize hdr))
-
-testToBitString :: IO ()
-testToBitString = do
-  putStrLn "toBitString debug output:"
-  -- Single bit
-  let buf1 = writeBit True empty
-  assertEqual "single 1" "1" (toBitString buf1)
-  -- Single zero bit
-  let buf0 = writeBit False empty
-  assertEqual "single 0" "0" (toBitString buf0)
-  -- Full byte: 0xFF = 11111111
-  let bufFF = writeBits 0xFF 8 empty
-  assertEqual "0xFF" "11111111" (toBitString bufFF)
-  -- 0x00 = 00000000
-  let buf00 = writeBits 0x00 8 empty
-  assertEqual "0x00" "00000000" (toBitString buf00)
-  -- Multi-byte: 0xAB = 10101011, then 3 more bits of value 5 (101)
-  let bufMixed = writeBits 5 3 $ writeBits 0xAB 8 empty
-  assertEqual "0xAB + 3 bits" "10101011 101" (toBitString bufMixed)
-  -- Empty buffer
-  assertEqual "empty" "" (toBitString empty)
-
--- --------------------------------------------------------------------
--- Phase 2: Fast path tests
--- --------------------------------------------------------------------
-
-testFastPathAligned :: IO ()
-testFastPathAligned = do
-  putStrLn "Fast path (byte-aligned) round-trips:"
-  -- Write aligned bytes and read them back
-  let buf = writeBits 0xDEADBEEF 32 $ writeBits 0xCAFE 16 $ writeBits 0x42 8 empty
-  let reader = do
-        a <- readBitsM 8
-        b <- readBitsM 16
-        c <- readBitsM 32
-        pure (a, b, c)
-  assertDeserialize "aligned 8+16+32" (0x42, 0xCAFE, 0xDEADBEEF) reader buf
-
-  -- Verify fast path produces same result as bit-by-bit for Word64
-  let buf64 = writeBits 0x0123456789ABCDEF 64 empty
-  assertDeserialize "aligned 64-bit" (0x0123456789ABCDEF :: Word64) (readBitsM 64) buf64
-
-  -- Mixed: non-aligned write followed by aligned
-  let bufMixed = writeBits 0xFF 8 $ writeBit True empty
-  let readerMixed = do
-        b <- readBitM
-        v <- readBitsM 8
-        pure (b, v)
-  assertDeserialize "non-aligned then aligned" (True, 0xFF) readerMixed bufMixed
-
--- --------------------------------------------------------------------
--- Phase 3: TH derive tests
--- --------------------------------------------------------------------
-
-testTHRecord :: IO ()
-testTHRecord = do
-  putStrLn "TH derive record round-trips:"
-  let v = Vec3 {vecX = 1.0, vecY = -2.5, vecZ = 100.0}
-  let buf = bitSerialize v empty
-  assertDeserialize "Vec3" v deserializeM buf
-
-  let sr = SimpleRecord {srFlag = True, srValue = 12345}
-  let bufSR = bitSerialize sr empty
-  assertDeserialize "SimpleRecord" sr deserializeM bufSR
-
-testTHEnum :: IO ()
-testTHEnum = do
-  putStrLn "TH derive enum round-trips:"
-  let colors = [Red, Green, Blue, Yellow]
-  let buf = foldl (flip bitSerialize) empty colors
-  let reader = mapM (\_ -> deserializeM :: BitReader Color) colors
-  case runBitReader reader buf of
-    Left err -> error err
-    Right (results, _) ->
-      mapM_
-        ( \(expected, actual) ->
-            assertEqual ("Color " ++ show expected) expected actual
-        )
-        (zip colors results)
-
-testTHEnumWithPayloads :: IO ()
-testTHEnumWithPayloads = do
-  putStrLn "TH derive enum with payloads:"
-  let events = [PlayerJoin 1, PlayerLeave 2, ChatMessage 3 1000]
-  let buf = foldl (flip bitSerialize) empty events
-  let reader = mapM (\_ -> deserializeM :: BitReader GameEvent) events
-  case runBitReader reader buf of
-    Left err -> error err
-    Right (results, _) ->
-      mapM_
-        ( \(expected, actual) ->
-            assertEqual ("GameEvent " ++ show expected) expected actual
-        )
-        (zip events results)
-
--- --------------------------------------------------------------------
--- Phase 4: Serialization fix tests
--- --------------------------------------------------------------------
-
--- | Fix 1: Writing non-aligned bits then aligned bytes should preserve
--- all data. The old code truncated the buffer in the fast path.
-testFastPathAfterNonAligned :: IO ()
-testFastPathAfterNonAligned = do
-  putStrLn "Fast path after non-aligned write:"
-  -- Write 1 bit (non-aligned), then 7 bits to fill the byte,
-  -- then 16 aligned bits via fast path
-  let buf = writeBits 0xBEEF 16 $ writeBits 0x7F 7 $ writeBit True empty
-  let reader = do
-        b <- readBitM
-        v7 <- readBitsM 7
-        v16 <- readBitsM 16
-        pure (b, v7, v16)
-  assertDeserialize "1+7+16 bits" (True, 0x7F, 0xBEEF) reader buf
-
-  -- Write 8 aligned bits, then 8 more aligned (fast path overwrote the first 8 before fix)
-  let buf2 = writeBits 0xCD 8 $ writeBits 0xAB 8 empty
-  let reader2 = do
-        a <- readBitsM 8
-        b <- readBitsM 8
-        pure (a, b)
-  assertDeserialize "8+8 aligned" (0xAB, 0xCD) reader2 buf2
-
--- | Fix 2: Deserializing a buffer with a huge length prefix should
--- fail gracefully instead of attempting unbounded allocation.
-testDeserializeBoundsCheck :: IO ()
-testDeserializeBoundsCheck = do
-  putStrLn "Deserialization bounds checking:"
-  -- Craft a buffer with a 16-bit length of 65535 but no actual data.
-  -- The deserializer should fail with a buffer underflow, not hang.
-  let buf = writeBits 65535 16 empty
-  case runBitReader (deserializeM :: BitReader [Word8]) buf of
-    Left _ -> putStrLn "  PASS: huge list length rejected"
-    Right _ -> error "  FAIL: should have rejected list with length 65535 and no data"
-
-  case runBitReader (deserializeM :: BitReader T.Text) buf of
-    Left _ -> putStrLn "  PASS: huge Text length rejected"
-    Right _ -> error "  FAIL: should have rejected Text with length 65535 and no data"
-
--- | Text handles full Unicode correctly.
-testTextUnicode :: IO ()
-testTextUnicode = do
-  putStrLn "Text Unicode handling:"
-  -- CJK characters (3-byte UTF-8)
-  let cjk = "\x4E16\x754C" :: T.Text -- 世界
-  let bufCjk = bitSerialize cjk empty
-  assertDeserialize "Text CJK" cjk deserializeM bufCjk
-
-  -- Mixed ASCII and multi-byte
-  let mixed = "hello \x1F680 world" :: T.Text
-  let bufMixed = bitSerialize mixed empty
-  assertDeserialize "Text mixed Unicode" mixed deserializeM bufMixed
-
--- | Fix 4: BitWidth newtype for custom bit-width fields.
-testBitWidthRoundTrip :: IO ()
-testBitWidthRoundTrip = do
-  putStrLn "BitWidth round-trips:"
-
-  -- Direct BitWidth usage: 7 bits for a value 0-127
-  let bw7 = BitWidth 100 :: BitWidth 7 Word8
-  let buf7 = bitSerialize bw7 empty
-  -- Should use exactly 7 bits
-  assertEqual "BitWidth 7 = 7 bits" 7 (bitPosition buf7)
-  assertDeserialize "BitWidth 7 Word8" bw7 deserializeM buf7
-
-  -- TH-derived struct with BitWidth fields
-  let player =
-        CompactPlayer
-          { cpHealth = BitWidth 100,
-            cpDirection = BitWidth 12
-          }
-  let bufP = bitSerialize player empty
-  -- 7 + 4 = 11 bits total
-  assertEqual "CompactPlayer = 11 bits" 11 (bitPosition bufP)
-  assertDeserialize "CompactPlayer" player deserializeM bufP
-
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Reliability module tests
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testSequenceGreaterThan :: IO ()
 testSequenceGreaterThan = do
@@ -927,7 +424,6 @@ testFastRetransmit = do
   -- Send packets 0-4
   let ep1 = foldl (\e i -> onPacketSent i now (ChannelId 0) i 100 e) ep0 [0 .. 4]
   -- ACK packets 1,2,3,4 but NOT 0 — seq 0 should accumulate nacks
-  -- Each ack where 0 is in range but not covered increments nack
   let ackTime = 1050000000 :: MonoTime
   -- ACK 1: ack=1, ack_bits=0 (no bits). seq 0 is older, diff=1, bit 0 not set -> nack 0 once
   let (_, ep2) = processAcks 1 0 ackTime ep1
@@ -938,9 +434,9 @@ testFastRetransmit = do
   assertEqual "fast retransmit triggered" True (not (null fastRetransmit))
   assertEqual "retransmit is (0,0)" True ((ChannelId 0, SequenceNum 0) `elem` fastRetransmit)
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Congestion control tests
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testBinaryCongestionModeTransition :: IO ()
 testBinaryCongestionModeTransition = do
@@ -1042,16 +538,15 @@ testBatchAndUnbatch = do
     Nothing -> error "  FAIL: unbatch returned Nothing"
     Just result -> assertEqual "round-trip" msgs result
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Integration: TestNet peer lifecycle
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 -- Helper to create SockAddr for tests
 testAddr :: Word16 -> SockAddr
 testAddr port = SockAddrInet (fromIntegral port) (tupleToHostAddress (127, 0, 0, 1))
 
 -- | Create a dummy UdpSocket for testing pure peer operations.
--- The socket is real (to satisfy strict fields) but never used for I/O.
 newTestUdpSocket :: IO UdpSocket
 newTestUdpSocket = do
   sock <- NS.socket NS.AF_INET NS.Datagram NS.defaultProtocol
@@ -1171,9 +666,9 @@ testPeerMaxClients = do
   assertEqual "sends connection requests" True (not (null (prOutgoing result)))
   putStrLn "  PASS: Max clients config"
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Full TestNet polymorphic lifecycle
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 -- | Run peerTick for a peer inside TestWorld, returning events and updated world.
 tickPeerInWorld ::
@@ -1190,7 +685,6 @@ stepWorld :: MonoTime -> TestWorld -> TestWorld
 stepWorld ms world = worldAdvanceTime (twGlobalTime world + ms * 1000000) world
 
 -- | Register both peers in the world at the given start time.
--- Both addresses must be registered so deliverPackets can route between them.
 initWorld :: MonoTime -> SockAddr -> SockAddr -> TestWorld
 initWorld startTime addr1 addr2 =
   let w0 = worldAdvanceTime startTime newTestWorld
@@ -1205,7 +699,6 @@ testTestNetHandshake = do
   let serverAddr = testAddr 7000
       clientAddr = testAddr 8000
       config = defaultNetworkConfig
-      -- Use different RNG seeds (via init time) to avoid salt collision
       startTime = 1000000000 :: MonoTime -- 1 second
   let serverPeer = newPeerState sock serverAddr config 100000000
       clientPeer0 = newPeerState sock clientAddr config 200000000
@@ -1318,9 +811,9 @@ testTestNetMessageRoundTrip = do
 
   putStrLn "  PASS: Message round-trip via TestNet"
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Replication: Interest management
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testRadiusInterestRelevant :: IO ()
 testRadiusInterestRelevant = do
@@ -1354,9 +847,9 @@ testGridInterestRelevant = do
   -- Far cell (more than 1 cell apart)
   assertEqual "far cell" False (relevant interest (350.0, 50.0, 0.0) (50.0, 50.0, 0.0))
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Replication: Priority accumulator
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testPriorityAccumulate :: IO ()
 testPriorityAccumulate = do
@@ -1405,9 +898,9 @@ testPriorityUnregister = do
   let acc1 = unregister "x" acc0
   assertEqual "empty after unregister" True (priorityIsEmpty acc1)
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Replication: Snapshot interpolation
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testSnapshotPushAndReady :: IO ()
 testSnapshotPushAndReady = do
@@ -1450,98 +943,26 @@ testSnapshotOutOfOrder = do
   let buf2 = pushSnapshot 50.0 2.0 buf1 -- Out of order, should be dropped
   assertEqual "out-of-order dropped" 1 (snapshotCount buf2)
 
--- --------------------------------------------------------------------
--- Property-based: Serialization roundtrips (QuickCheck)
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Property-based tests (QuickCheck)
+--------------------------------------------------------------------------------
 
--- | Roundtrip property: deserialize(serialize(x)) == x
-propRoundTrip :: (BitSerialize a, BitDeserialize a, Eq a) => a -> Bool
-propRoundTrip x =
-  case bitDeserialize (bitSerialize x empty) of
-    Right (ReadResult y _) -> x == y
+-- | Storable roundtrip property for Vec3
+propStorableRoundTrip :: Vec3 -> Bool
+propStorableRoundTrip v =
+  case deserialize (serialize v) of
+    Right v' -> v == v'
     Left _ -> False
 
 testPropertyRoundTrips :: IO ()
 testPropertyRoundTrips = do
   putStrLn "Property-based roundtrip tests:"
-  putStr "  Bool: "
-  quickCheck (withMaxSuccess 100 (propRoundTrip :: Bool -> Bool))
-  putStr "  Word8: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Word8 -> Bool))
-  putStr "  Word16: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Word16 -> Bool))
-  putStr "  Word32: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Word32 -> Bool))
-  putStr "  Word64: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Word64 -> Bool))
-  putStr "  Int8: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Int8 -> Bool))
-  putStr "  Int16: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Int16 -> Bool))
-  putStr "  Int32: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Int32 -> Bool))
-  putStr "  Int64: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Int64 -> Bool))
-  putStr "  Float: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Float -> Bool))
-  putStr "  Double: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Double -> Bool))
-  putStr "  Maybe Word16: "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: Maybe Word16 -> Bool))
-  putStr "  [Word8]: "
-  quickCheck (withMaxSuccess 100 (propRoundTripSmallList :: [Word8] -> Bool))
-  putStr "  Text: "
-  quickCheck (withMaxSuccess 100 propRoundTripText)
-  putStr "  (Word8, Word16): "
-  quickCheck (withMaxSuccess 200 (propRoundTrip :: (Word8, Word16) -> Bool))
-  putStr "  Vec3: "
-  quickCheck (withMaxSuccess 200 propRoundTripVec3)
-  putStr "  Color enum: "
-  quickCheck (withMaxSuccess 200 propRoundTripColor)
-  putStr "  GameEvent sum: "
-  quickCheck (withMaxSuccess 200 propRoundTripGameEvent)
+  putStr "  Vec3 Storable: "
+  quickCheck (withMaxSuccess 200 propStorableRoundTrip)
 
--- | Limit list size to avoid huge buffers.
-propRoundTripSmallList :: [Word8] -> Bool
-propRoundTripSmallList xs = propRoundTrip (take 50 xs)
-
-propRoundTripText :: TestText -> Bool
-propRoundTripText (TestText t) = propRoundTrip (T.take 100 t)
-
-propRoundTripVec3 :: Vec3 -> Bool
-propRoundTripVec3 = propRoundTrip
-
-propRoundTripColor :: Color -> Bool
-propRoundTripColor = propRoundTrip
-
-propRoundTripGameEvent :: GameEvent -> Bool
-propRoundTripGameEvent = propRoundTrip
-
--- Arbitrary instances for TH-derived types
-
-instance Arbitrary Vec3 where
-  arbitrary = Vec3 <$> arbitrary <*> arbitrary <*> arbitrary
-
-instance Arbitrary Color where
-  arbitrary = elements [Red, Green, Blue, Yellow]
-
-instance Arbitrary GameEvent where
-  arbitrary = do
-    tag <- choose (0 :: Int, 2)
-    case tag of
-      0 -> PlayerJoin <$> arbitrary
-      1 -> PlayerLeave <$> arbitrary
-      _ -> ChatMessage <$> arbitrary <*> arbitrary
-
--- Wrapper to avoid orphan instance for Text
-newtype TestText = TestText T.Text deriving (Eq, Show)
-
-instance Arbitrary TestText where
-  arbitrary = TestText . T.pack <$> listOf (choose ('\x20', '\x7E'))
-
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Adversarial: Malformed packet handling
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testTruncatedPacket :: IO ()
 testTruncatedPacket = do
@@ -1595,9 +1016,9 @@ testEmptyPacket = do
   assertEqual "no events from empty" True (null (prEvents result))
   putStrLn "  PASS: empty packet handled gracefully"
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Integration: Connection migration
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testConnectionMigration :: IO ()
 testConnectionMigration = do
@@ -1645,15 +1066,12 @@ testConnectionMigration = do
       newClientPid = peerIdFromAddr newClientAddr
 
   -- Get a valid packet from the connected client
-  -- We need to generate a data packet through peerProcess
   let clientResult = peerProcess (startTime + 50000000) [] sp2
-      -- Server sends keepalive/ack packets; use those as migration source
       outgoing = prOutgoing clientResult
 
   case outgoing of
     [] -> do
       -- No outgoing packets, craft a minimal valid one by re-processing
-      -- The migration test verifies the mechanism exists and is wired up
       assertEqual "migration config enabled" True (ncEnableConnectionMigration config)
       putStrLn "  PASS: Migration enabled (no packets to migrate with)"
     (firstPkt : _) -> do
@@ -1672,14 +1090,13 @@ testConnectionMigration = do
           putStrLn "  PASS: Connection migration"
         else do
           -- Packet may have been rejected for other reasons (CRC, sequence distance)
-          -- Verify the mechanism is at least wired up
           assertEqual "migration config enabled" True (ncEnableConnectionMigration config)
           assertEqual "server still has connection" 1 (peerCount (prPeer result))
           putStrLn "  PASS: Migration wired up (packet not matched)"
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Connection state machine tests
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testConnectionStateMachine :: IO ()
 testConnectionStateMachine = do
@@ -1744,9 +1161,9 @@ testConnectionSendReceive = do
     Left other -> error $ "  FAIL: expected ErrInvalidChannel, got " ++ show other
     Right _ -> error "  FAIL: send on invalid channel should fail"
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Config validation tests
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testValidateConfigValid :: IO ()
 testValidateConfigValid = do
@@ -1769,44 +1186,9 @@ testValidateConfigErrors = do
   let cfgZeroChannels = defaultNetworkConfig {ncMaxChannels = 0}
   assertEqual "channels = 0" (Left InvalidChannelCount) (validateConfig cfgZeroChannels)
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Delta encode/decode tests
--- --------------------------------------------------------------------
-
--- Simple test type for delta compression: a pair of Word8 values.
--- We serialize as two Word8s and delta as two Maybe Word8s.
-data TestDeltaState = TestDeltaState !Word8 !Word8
-  deriving (Eq, Show)
-
-instance BitSerialize TestDeltaState where
-  bitSerialize (TestDeltaState a b) = bitSerialize b . bitSerialize a
-
-instance BitDeserialize TestDeltaState where
-  bitDeserialize buf = do
-    ra <- bitDeserialize buf
-    rb <- bitDeserialize (readBuffer ra)
-    pure (ReadResult (TestDeltaState (readValue ra) (readValue rb)) (readBuffer rb))
-
-data TestDeltaDelta = TestDeltaDelta !(Maybe Word8) !(Maybe Word8)
-  deriving (Eq, Show)
-
-instance BitSerialize TestDeltaDelta where
-  bitSerialize (TestDeltaDelta ma mb) = bitSerialize mb . bitSerialize ma
-
-instance BitDeserialize TestDeltaDelta where
-  bitDeserialize buf = do
-    ra <- bitDeserialize buf
-    rb <- bitDeserialize (readBuffer ra)
-    pure (ReadResult (TestDeltaDelta (readValue ra) (readValue rb)) (readBuffer rb))
-
-instance NetworkDelta TestDeltaState where
-  type Delta TestDeltaState = TestDeltaDelta
-  diff (TestDeltaState a1 b1) (TestDeltaState a2 b2) =
-    TestDeltaDelta
-      (if a1 /= a2 then Just a1 else Nothing)
-      (if b1 /= b2 then Just b1 else Nothing)
-  apply (TestDeltaState a b) (TestDeltaDelta ma mb) =
-    TestDeltaState (fromMaybe a ma) (fromMaybe b mb)
+--------------------------------------------------------------------------------
 
 testDeltaEncodeDecodeTrivial :: IO ()
 testDeltaEncodeDecodeTrivial = do
@@ -1850,9 +1232,9 @@ testDeltaEncodeDecodeTrivial = do
   let tracker4 = deltaReset tracker2
   assertEqual "confirmed seq after reset" Nothing (deltaConfirmedSeq tracker4)
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Simulator tests
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testSimulatorBasic :: IO ()
 testSimulatorBasic = do
@@ -1905,9 +1287,9 @@ testSimulatorBasic = do
       assertEqual "received addr" testAddr' addr
     _ -> error "  FAIL: unexpected late result"
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Channel: delivery modes, errors, retransmit
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testChannelSendBufferFull :: IO ()
 testChannelSendBufferFull = do
@@ -2032,15 +1414,14 @@ testChannelRetransmit = do
           assertEqual "retransmitted data" payload (cmData (head retransAfter))
           assertEqual "retransmit count incremented" 1 (chTotalRetransmits ch4)
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Fragment: split, reassemble, header roundtrip, cleanup, too-large
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testFragmentSplitReassemble :: IO ()
 testFragmentSplitReassemble = do
   putStrLn "Fragment split and reassemble:"
   let msgId = MessageId 42
-      -- Create a message larger than maxFragmentPayload
       maxPayload = 100
       msgData = BS.replicate 250 0xAB
       expectedFragCount = (BS.length msgData + maxPayload - 1) `div` maxPayload -- 3
@@ -2085,7 +1466,6 @@ testFragmentCleanupExpiry = do
   putStrLn "Fragment cleanup removes expired buffers:"
   let timeoutMs = 1000.0
       assembler0 = newFragmentAssembler timeoutMs (1024 * 1024)
-      -- Create a fragment that starts a buffer but does not complete
       header =
         FragmentHeader
           { fhMessageId = MessageId 99,
@@ -2110,16 +1490,15 @@ testFragmentTooLarge :: IO ()
 testFragmentTooLarge = do
   putStrLn "Fragment too many fragments:"
   let msgId = MessageId 1
-      -- maxFragmentCount is 255. With payload size 1, a 256-byte message needs 256 fragments.
       tinyPayload = 1
       bigMsg = BS.replicate (maxFragmentCount + 1) 0xFF
   case fragmentMessage msgId bigMsg tinyPayload of
     Left TooManyFragments -> putStrLn "  PASS: too many fragments returns TooManyFragments"
     Right _ -> error "  FAIL: expected TooManyFragments error"
 
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Security: CRC32C, rate limiting, token validation
--- --------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 testCrc32Roundtrip :: IO ()
 testCrc32Roundtrip = do

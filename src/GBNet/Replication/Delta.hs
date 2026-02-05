@@ -46,19 +46,9 @@ import Data.Int (Int32)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word16)
+import Foreign.Storable (Storable (..))
 import GBNet.Reliability (MonoTime, elapsedMs)
-import GBNet.Serialize.BitBuffer
-  ( ReadResult (..),
-    empty,
-    fromBytes,
-    readBits,
-    toBytes,
-    writeBits,
-  )
-import GBNet.Serialize.Class
-  ( BitDeserialize (..),
-    BitSerialize (..),
-  )
+import GBNet.Serialize.FastSupport (deserialize, serialize)
 
 -- | Sequence number used to identify baseline snapshots on the wire.
 type BaselineSeq = Word16
@@ -71,9 +61,9 @@ noBaseline = maxBound
 baselineSeqDiff :: BaselineSeq -> BaselineSeq -> Int32
 baselineSeqDiff s1 s2 = fromIntegral (s1 - s2 :: Word16)
 
--- | Wire header size for baseline sequence.
-baselineSeqBits :: Int
-baselineSeqBits = 16
+-- | Wire header size for baseline sequence (bytes).
+baselineSeqSize :: Int
+baselineSeqSize = 2
 
 -- | Typeclass for delta-compressed network types.
 --
@@ -136,20 +126,20 @@ newDeltaTracker maxPending =
 -- Returns encoded bytes containing @[baseline_seq: u16][delta_payload]@.
 -- Stores the snapshot as pending until ACK'd.
 deltaEncode ::
-  (NetworkDelta a, BitSerialize a, BitSerialize (Delta a)) =>
+  (NetworkDelta a, Storable a, Storable (Delta a)) =>
   BaselineSeq ->
   a ->
   DeltaTracker a ->
   (BS.ByteString, DeltaTracker a)
 deltaEncode seq' current tracker =
   let -- Encode based on whether we have a confirmed baseline
-      buf = case dtConfirmed tracker of
+      encoded = case dtConfirmed tracker of
         Just (baseSeq, baseline) ->
           let delta = diff current baseline
-           in bitSerialize delta $ writeBits (fromIntegral baseSeq) baselineSeqBits empty
+           in serialize baseSeq <> serialize delta
         Nothing ->
           -- No baseline - write sentinel + full state
-          bitSerialize current $ writeBits (fromIntegral noBaseline) baselineSeqBits empty
+          serialize noBaseline <> serialize current
 
       -- Store pending snapshot
       pending = dtPending tracker
@@ -159,7 +149,7 @@ deltaEncode seq' current tracker =
           else pending Seq.|> (seq', current)
 
       tracker' = tracker {dtPending = pending'}
-   in (toBytes buf, tracker')
+   in (encoded, tracker')
 
 -- | Called when a sequence is ACK'd.
 --
@@ -254,18 +244,24 @@ baselineIsEmpty = Seq.null . bmSnapshots
 --
 -- Requires access to the baseline manager to look up the referenced baseline.
 deltaDecode ::
-  (NetworkDelta a, BitDeserialize a, BitDeserialize (Delta a)) =>
+  (NetworkDelta a, Storable a, Storable (Delta a)) =>
   BS.ByteString ->
   BaselineManager a ->
   Either String a
-deltaDecode dat baselines = do
-  result <- readBits baselineSeqBits (fromBytes dat)
-  let baseSeq = fromIntegral (readValue result) :: BaselineSeq
-      buf' = readBuffer result
-  if baseSeq == noBaseline
-    then readValue <$> bitDeserialize buf'
-    else do
-      baseline <-
-        maybe (Left $ "Missing baseline for seq " ++ show baseSeq) Right $
-          getBaseline baseSeq baselines
-      apply baseline . readValue <$> bitDeserialize buf'
+deltaDecode dat baselines
+  | BS.length dat < baselineSeqSize = Left "Delta payload too short"
+  | otherwise = deserialize headerBytes >>= decodeWithBaseline
+  where
+    headerBytes = BS.take baselineSeqSize dat
+    payloadBytes = BS.drop baselineSeqSize dat
+
+    decodeWithBaseline baseSeq
+      | baseSeq == noBaseline = deserialize payloadBytes
+      | otherwise = do
+          baseline <- lookupBaseline baseSeq
+          delta <- deserialize payloadBytes
+          pure $ apply baseline delta
+
+    lookupBaseline baseSeq =
+      maybe (Left $ "Missing baseline for seq " ++ show baseSeq) Right $
+        getBaseline baseSeq baselines

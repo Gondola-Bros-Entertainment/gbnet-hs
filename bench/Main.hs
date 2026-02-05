@@ -8,6 +8,7 @@ import Criterion.Main
 import qualified Data.ByteString as BS
 import Data.List (foldl')
 import Data.Word (Word16, Word32, Word64)
+import Foreign.Storable (Storable (..))
 import GBNet.Channel
   ( Channel (..),
     ChannelConfig (..),
@@ -26,10 +27,9 @@ import GBNet.Config (defaultNetworkConfig)
 import qualified GBNet.Connection
 import GBNet.Connection
   ( Connection (..),
+    drainSendQueue,
     newConnection,
     sendMessage,
-    receiveIncomingPayload,
-    drainSendQueue,
   )
 import qualified GBNet.Fragment
 import GBNet.Fragment
@@ -41,14 +41,12 @@ import GBNet.Fragment
     processFragment,
     serializeFragmentHeader,
   )
-import GBNet.Security (appendCrc32, validateAndStripCrc32)
 import GBNet.Packet
   ( PacketHeader (..),
     PacketType (..),
     deserializeHeader,
     serializeHeader,
   )
-import GBNet.Types (ChannelId (..), MessageId (..), SequenceNum (..))
 import GBNet.Reliability
   ( ReliableEndpoint (..),
     SentPacketRecord (..),
@@ -62,43 +60,23 @@ import GBNet.Reliability
     sbInsert,
     updateRtt,
   )
-import GBNet.Serialize.BitBuffer
-  ( BitBuffer,
-    BitReader,
-    ReadResult (..),
-    empty,
-    fromBytes,
-    readBits,
-    toBytes,
-    writeBits,
-  )
-import GBNet.Serialize.Class (BitDeserialize (..), BitSerialize (..), deserializeM, runDeserialize)
-import GBNet.Serialize.TH (deriveNetworkSerialize)
+import GBNet.Security (appendCrc32, validateAndStripCrc32)
+import GBNet.Serialize.FastSupport (castPtr, plusPtr, serialize)
 import GBNet.Serialize.FastTH (deriveStorable)
-import GBNet.Serialize.FastSupport (Storable, serialize, plusPtr, castPtr)
+import GBNet.Types (ChannelId (..), MessageId (..), SequenceNum (..))
 
 --------------------------------------------------------------------------------
--- TH-derived benchmark type (must precede use due to staging restriction)
+-- TH-derived benchmark types
 --------------------------------------------------------------------------------
 
--- BitBuffer-based (old approach)
-data Vec3 = Vec3
-  { vecX :: !Float,
-    vecY :: !Float,
-    vecZ :: !Float
-  }
-  deriving (Eq, Show)
-
-deriveNetworkSerialize ''Vec3
-
--- Storable-based (new approach) - flat type
+-- Storable-based serialization
 data Vec3S = Vec3S !Float !Float !Float
   deriving (Eq, Show)
 
 deriveStorable ''Vec3S
 
--- Storable-based nested type - demonstrates composition
-data Transform = Transform !Vec3S !Float  -- position + rotation angle
+-- Nested type - demonstrates composition
+data Transform = Transform !Vec3S !Float -- position + rotation angle
   deriving (Eq, Show)
 
 deriveStorable ''Transform
@@ -125,17 +103,9 @@ instance NFData DeliveryMode where rnf = rwhnf
 
 instance NFData ChannelError where rnf = rwhnf
 
--- Serialization
-instance NFData BitBuffer where rnf buf = rnf (toBytes buf)
-
-instance NFData Vec3 where rnf (Vec3 x y z) = rnf x `seq` rnf y `seq` rnf z
-
 instance NFData Vec3S where rnf (Vec3S x y z) = rnf x `seq` rnf y `seq` rnf z
 
 instance NFData Transform where rnf (Transform v r) = rnf v `seq` rnf r
-
-instance (NFData a) => NFData (ReadResult a) where
-  rnf (ReadResult val buf) = rnf val `seq` rnf buf
 
 -- Packet
 instance NFData PacketHeader where
@@ -204,7 +174,7 @@ instance NFData Channel where
                           rnf td `seq`
                             rnf trt
 
--- Connection (use rwhnf - deep eval is expensive and not needed for benchmarks)
+-- Connection (use rwhnf - deep eval is expensive)
 instance NFData Connection where rnf = rwhnf
 
 instance NFData GBNet.Connection.ConnectionError where rnf = rwhnf
@@ -230,10 +200,6 @@ sampleHeader =
       ackBitfield = 0xDEADBEEF
     }
 
--- | A sample Vec3 for benchmarking.
-sampleVec3 :: Vec3
-sampleVec3 = Vec3 1.0 (-2.5) 100.0
-
 -- | Pre-serialized header bytes.
 headerBytes :: BS.ByteString
 headerBytes = serializeHeader sampleHeader
@@ -250,14 +216,6 @@ sampleFragmentHeader =
 -- | Pre-serialized fragment header bytes.
 fragmentHeaderBytes :: BS.ByteString
 fragmentHeaderBytes = serializeFragmentHeader sampleFragmentHeader
-
--- | Pre-serialized Vec3 buffer.
-vec3Buffer :: BitBuffer
-vec3Buffer = bitSerialize sampleVec3 empty
-
--- | Vec3 as ByteString.
-vec3Bytes :: BS.ByteString
-vec3Bytes = toBytes vec3Buffer
 
 -- | 64-byte payload for channel benchmarks.
 payload64 :: BS.ByteString
@@ -294,11 +252,6 @@ buildSequenceBuffer :: Int -> SequenceBuffer ()
 buildSequenceBuffer n =
   foldl' (\buf i -> sbInsert (SequenceNum (fromIntegral i)) () buf) (newSequenceBuffer 256) [0 .. n - 1]
 
--- | Build a ReliableEndpoint that has received N sequential packets.
-buildEndpointWithReceived :: Int -> ReliableEndpoint
-buildEndpointWithReceived n =
-  foldl' (\ep i -> onPacketReceived (SequenceNum (fromIntegral i)) ep) (newReliableEndpoint 256) [0 .. n - 1]
-
 -- | Build a Channel pre-loaded with N pending reliable messages.
 buildChannelWithPending :: Int -> Channel
 buildChannelWithPending n =
@@ -317,29 +270,7 @@ buildChannelWithPending n =
 main :: IO ()
 main =
   defaultMain
-    [ -- Group 1: BitBuffer (serialize/deserialize)
-      bgroup
-        "bitbuffer"
-        [ env (pure empty) $ \buf ->
-            bench "writeBits/aligned-64" $ nf (writeBits 0xDEADBEEFCAFEBABE 64) buf,
-          env (pure empty) $ \buf ->
-            bench "writeBits/unaligned-7" $ nf (writeBits 42 7) buf,
-          env (pure (sampleHeader, empty)) $ \ ~(hdr, buf) ->
-            bench "header/serialize" $ nf (\h -> toBytes (bitSerialize h buf)) hdr,
-          env (pure headerBytes) $ \bs ->
-            bench "header/deserialize" $ nf deserializeHeader bs,
-          env (pure (sampleVec3, empty)) $ \ ~(v, buf) ->
-            bench "record/serialize" $ nf (\x -> toBytes (bitSerialize x buf)) v,
-          env (pure vec3Bytes) $ \bs ->
-            bench "record/deserialize" $
-              nf
-                ( \b ->
-                    let buf = fromBytes b
-                     in runDeserialize (deserializeM :: BitReader Vec3) buf
-                )
-                bs
-        ],
-      -- Group 2: Reliability (ACK processing)
+    [ -- Group 1: Reliability (ACK processing)
       bgroup
         "reliability"
         [ env (pure (newReliableEndpoint 256)) $ \ep ->
@@ -376,7 +307,7 @@ main =
             bench "updateRtt" $
               nf (updateRtt 25.0 . updateRtt 30.0) ep
         ],
-      -- Group 3: SequenceBuffer
+      -- Group 2: SequenceBuffer
       bgroup
         "sequencebuffer"
         [ env (pure (newSequenceBuffer 256 :: SequenceBuffer ())) $ \buf ->
@@ -406,7 +337,7 @@ main =
             bench "sbExists/miss" $
               whnf (sbExists (SequenceNum 200)) buf
         ],
-      -- Group 4: Channel (message pipeline)
+      -- Group 3: Channel (message pipeline)
       bgroup
         "channel"
         [ env (pure (newChannel (ChannelId 0) defaultChannelConfig)) $ \ch ->
@@ -429,7 +360,7 @@ main =
             bench "getRetransmitMessages/50-pending" $
               nf (\(c, t) -> getRetransmitMessages t 100.0 c) (ch, now)
         ],
-      -- Group 5: Packet Header (optimized poke-based serialization)
+      -- Group 4: Packet Header
       bgroup
         "packetheader"
         [ env (pure sampleHeader) $ \hdr ->
@@ -437,7 +368,7 @@ main =
           env (pure headerBytes) $ \bs ->
             bench "deserialize" $ nf deserializeHeader bs
         ],
-      -- Group 6: Fragment Header (optimized poke-based serialization)
+      -- Group 5: Fragment Header
       bgroup
         "fragmentheader"
         [ env (pure sampleFragmentHeader) $ \hdr ->
@@ -445,17 +376,15 @@ main =
           env (pure fragmentHeaderBytes) $ \bs ->
             bench "deserialize" $ nf deserializeFragmentHeader bs
         ],
-      -- Group 7: Storable serialization (flat and nested)
+      -- Group 6: Storable serialization (flat and nested)
       bgroup
         "storable"
-        [ env (pure (sampleVec3, empty)) $ \ ~(v, buf) ->
-            bench "vec3/bitbuffer" $ nf (\x -> toBytes (bitSerialize x buf)) v,
-          env (pure (Vec3S 1.0 (-2.5) 100.0)) $ \v ->
-            bench "vec3/storable" $ nf serialize v,
+        [ env (pure (Vec3S 1.0 (-2.5) 100.0)) $ \v ->
+            bench "vec3" $ nf serialize v,
           env (pure (Transform (Vec3S 1.0 2.0 3.0) 45.0)) $ \t ->
             bench "transform/nested" $ nf serialize t
         ],
-      -- Group 8: Connection operations
+      -- Group 7: Connection operations
       bgroup
         "connection"
         [ env (pure buildConnection) $ \conn ->
@@ -465,7 +394,7 @@ main =
             bench "drainSendQueue" $
               nf drainSendQueue conn
         ],
-      -- Group 9: Fragmentation
+      -- Group 8: Fragmentation
       bgroup
         "fragment"
         [ env (pure payload1k) $ \payload ->
@@ -475,7 +404,7 @@ main =
             bench "processFragment/single" $
               nf (processFragment payload64 (MonoTime 1000000)) assembler
         ],
-      -- Group 10: Security (CRC32C)
+      -- Group 9: Security (CRC32C)
       bgroup
         "security"
         [ env (pure payload64) $ \payload ->

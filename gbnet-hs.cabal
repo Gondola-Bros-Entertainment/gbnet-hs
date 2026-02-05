@@ -24,10 +24,6 @@ extra-doc-files:
 library
   exposed-modules:
     GBNet
-    GBNet.Serialize.BitBuffer
-    GBNet.Serialize.Class
-    GBNet.Serialize.Reader
-    GBNet.Serialize.TH
     GBNet.Serialize.FastTH
     GBNet.Serialize.FastSupport
     GBNet.Packet
