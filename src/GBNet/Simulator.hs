@@ -1,3 +1,12 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 -- |
 -- Module      : GBNet.Simulator
 -- Description : Network condition simulator for testing
@@ -11,6 +20,7 @@ module GBNet.Simulator
     simulatorProcessSend,
     simulatorReceiveReady,
     simulatorPendingCount,
+    simulatorConfig,
 
     -- * Delayed packet
     DelayedPacket (..),
@@ -18,7 +28,7 @@ module GBNet.Simulator
 where
 
 import Control.Monad (when)
-import Control.Monad.State.Strict (State, gets, modify', runState)
+import Control.Monad.State.Strict (State, runState)
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
@@ -29,6 +39,10 @@ import GBNet.Class (MonoTime (..))
 import GBNet.Config (SimulationConfig (..))
 import GBNet.Reliability (elapsedMs)
 import GBNet.Util (nextRandom)
+import Optics ((&), (.~))
+import Optics.State (use)
+import Optics.State.Operators ((.=), (%=))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Maximum extra delay (ms) applied to out-of-order packets.
 outOfOrderMaxDelayMs :: Double
@@ -50,6 +64,8 @@ data DelayedPacket = DelayedPacket
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''DelayedPacket
+
 -- | Network condition simulator.
 data NetworkSimulator = NetworkSimulator
   { nsConfig :: !SimulationConfig,
@@ -59,6 +75,8 @@ data NetworkSimulator = NetworkSimulator
     nsRngState :: !Word64 -- Simple LCG RNG state
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''NetworkSimulator
 
 -- | Create a new network simulator.
 newNetworkSimulator :: SimulationConfig -> MonoTime -> NetworkSimulator
@@ -85,7 +103,7 @@ simulatorProcessSend dat addr now =
     r2 <- nextRandomS
     r3 <- nextRandomS
     r4 <- nextRandomS
-    config <- gets nsConfig
+    config <- use #nsConfig
 
     let lost = checkLoss config r1
     if lost
@@ -113,12 +131,12 @@ checkBandwidthS packetSize now config
   | simBandwidthLimitBytesPerSec config <= 0 = pure False
   | otherwise = do
       refillTokensS now
-      tokens <- gets nsTokenBucketTokens
+      tokens <- use #nsTokenBucketTokens
       let needed = fromIntegral packetSize
       if tokens < needed
         then pure True
         else do
-          modify' $ \s -> s {nsTokenBucketTokens = tokens - needed}
+          #nsTokenBucketTokens .= (tokens - needed)
           pure False
 
 -- | Calculate total delay including latency, jitter, and out-of-order reordering.
@@ -142,7 +160,7 @@ scheduleOrDeliverS dat addr deliverAt totalDelayMs
   | totalDelayMs < immediateDeliveryThresholdMs = pure [(dat, addr)]
   | otherwise = do
       let delayed = DelayedPacket {dpData = dat, dpAddr = addr, dpDeliverAt = deliverAt}
-      modify' $ \s -> s {nsDelayedPackets = nsDelayedPackets s Seq.|> delayed}
+      #nsDelayedPackets %= (Seq.|> delayed)
       pure []
 
 -- | Maybe schedule a duplicate packet with extra jitter.
@@ -153,7 +171,7 @@ scheduleDuplicateS dat addr now baseDelayMs config = do
   when (dupChance > 0.0 && randomDouble r < dupChance) $ do
     let dupDeliverAt = now + round ((baseDelayMs + randomDouble r * duplicateJitterMs) * 1e6)
         dupPacket = DelayedPacket {dpData = dat, dpAddr = addr, dpDeliverAt = dupDeliverAt}
-    modify' $ \s -> s {nsDelayedPackets = nsDelayedPackets s Seq.|> dupPacket}
+    #nsDelayedPackets %= (Seq.|> dupPacket)
 
 -- | Retrieve packets ready for delivery.
 -- Scans all delayed packets since they may not be sorted by delivery time.
@@ -161,31 +179,37 @@ simulatorReceiveReady :: MonoTime -> NetworkSimulator -> ([(BS.ByteString, Word6
 simulatorReceiveReady now sim =
   let (ready, notReady) = Seq.partition (\pkt -> dpDeliverAt pkt <= now) (nsDelayedPackets sim)
       results = map (\pkt -> (dpData pkt, dpAddr pkt)) (toList ready)
-   in (results, sim {nsDelayedPackets = notReady})
+   in (results, sim & #nsDelayedPackets .~ notReady)
 
 -- | Get count of pending delayed packets.
 simulatorPendingCount :: NetworkSimulator -> Int
 simulatorPendingCount = Seq.length . nsDelayedPackets
 
+-- | Get the simulation configuration.
+simulatorConfig :: NetworkSimulator -> SimulationConfig
+simulatorConfig = nsConfig
+{-# INLINE simulatorConfig #-}
+
 -- | Refill token bucket based on elapsed time (State version).
 refillTokensS :: MonoTime -> State NetworkSimulator ()
-refillTokensS now = modify' $ \sim ->
-  let elapsedSecs = elapsedMs (nsLastTokenRefill sim) now / 1000.0
-      refillRate = fromIntegral (simBandwidthLimitBytesPerSec (nsConfig sim))
-      newTokens = nsTokenBucketTokens sim + elapsedSecs * refillRate
+refillTokensS now = do
+  sim <- use #nsLastTokenRefill
+  config <- use #nsConfig
+  tokens <- use #nsTokenBucketTokens
+  let elapsedSecs = elapsedMs sim now / 1000.0
+      refillRate = fromIntegral (simBandwidthLimitBytesPerSec config)
+      newTokens = tokens + elapsedSecs * refillRate
       maxTokens = refillRate -- Cap at 1 second worth
       cappedTokens = min newTokens maxTokens
-   in sim
-        { nsTokenBucketTokens = cappedTokens,
-          nsLastTokenRefill = now
-        }
+  #nsTokenBucketTokens .= cappedTokens
+  #nsLastTokenRefill .= now
 
 -- | Stateful wrapper around the shared 'nextRandom' from GBNet.Util.
 nextRandomS :: State NetworkSimulator Word64
 nextRandomS = do
-  s <- gets nsRngState
+  s <- use #nsRngState
   let (output, next) = nextRandom s
-  modify' $ \sim -> sim {nsRngState = next}
+  #nsRngState .= next
   pure output
 
 -- | Convert random Word64 to double in [0, 1).

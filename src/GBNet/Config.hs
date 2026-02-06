@@ -1,3 +1,11 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 -- |
 -- Module      : GBNet.Config
 -- Description : Network configuration constants and structures
@@ -56,6 +64,7 @@ where
 
 import Data.Word (Word16, Word32, Word8)
 import GBNet.Channel (ChannelConfig, defaultChannelConfig)
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- Constants
 
@@ -326,3 +335,6 @@ defaultSimulationConfig =
       simOutOfOrderChance = 0.0,
       simBandwidthLimitBytesPerSec = 0
     }
+
+makeFieldLabelsNoPrefix ''NetworkConfig
+makeFieldLabelsNoPrefix ''SimulationConfig

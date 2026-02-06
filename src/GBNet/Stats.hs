@@ -1,3 +1,11 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 -- |
 -- Module      : GBNet.Stats
 -- Description : Network statistics tracking
@@ -31,6 +39,7 @@ where
 
 import Data.Word (Word64)
 import GBNet.Reliability (MonoTime)
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Connection quality assessment.
 data ConnectionQuality
@@ -175,3 +184,8 @@ defaultSocketStats =
       ssLastSendTime = Nothing,
       ssLastReceiveTime = Nothing
     }
+
+makeFieldLabelsNoPrefix ''NetworkStats
+makeFieldLabelsNoPrefix ''ChannelStats
+makeFieldLabelsNoPrefix ''ReliabilityStats
+makeFieldLabelsNoPrefix ''SocketStats

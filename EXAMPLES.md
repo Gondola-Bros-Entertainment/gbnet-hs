@@ -202,8 +202,8 @@ All serialization uses the high-performance Storable API:
 ```haskell
 {-# LANGUAGE TemplateHaskell #-}
 
-import GBNet.Serialize.FastTH (deriveStorable)
-import GBNet.Serialize.FastSupport (serialize, deserialize)
+import GBNet.Serialize.TH (deriveStorable)
+import GBNet.Serialize (serialize, deserialize)
 import GBNet.Packet
 
 import Data.Word (Word8, Word16, Word32)
@@ -246,12 +246,10 @@ sizeOf player  -- 6
 
 -- Deserialize (pure)
 case deserialize bytes of
-  Nothing -> putStrLn "Invalid data"
-  Just snapshot -> print snapshot
-  -- PlayerSnapshot {psAlive = True, psHealth = BitWidth {unBitWidth = 100}, ...}
+  Left err -> putStrLn $ "Invalid data: " ++ err
+  Right snapshot -> print snapshot
 ```
 
-Compare to a naive approach using full-width types: `Bool` (8 bits as
 The Storable approach gives C-level performance (~14ns) with automatic
 memory layout. For custom game types, use `deriveStorable`:
 
@@ -286,8 +284,8 @@ let bytes = serializeHeader header
 
 -- Deserialize (~16ns)
 case deserializeHeader bytes of
-  Nothing -> putStrLn "Invalid header"
-  Just hdr -> print (sequenceNum hdr)  -- 42
+  Left err -> putStrLn $ "Invalid header: " ++ err
+  Right hdr -> print (sequenceNum hdr)  -- 42
 ```
 
 ---

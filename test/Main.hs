@@ -42,8 +42,8 @@ import GBNet.Replication.Interest
 import GBNet.Replication.Interpolation
 import GBNet.Replication.Priority
 import GBNet.Security
-import GBNet.Serialize.FastSupport (deserialize, serialize)
-import GBNet.Serialize.FastTH (deriveStorable)
+import GBNet.Serialize (deserialize, serialize)
+import GBNet.Serialize.TH (deriveStorable)
 import GBNet.Simulator
 import GBNet.Socket (UdpSocket (..))
 import GBNet.Stats (CongestionLevel (..), defaultSocketStats)

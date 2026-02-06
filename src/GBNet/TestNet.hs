@@ -1,5 +1,14 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- |
 -- Module      : GBNet.TestNet
@@ -36,7 +45,7 @@ module GBNet.TestNet
   )
 where
 
-import Control.Monad.State.Strict (MonadState, State, get, gets, modify', put, runState)
+import Control.Monad.State.Strict (MonadState, State, get, runState)
 import Data.ByteString (ByteString)
 import Data.Foldable (toList)
 import Data.List (partition)
@@ -46,6 +55,10 @@ import qualified Data.Sequence as Seq
 import Data.Word (Word64)
 import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime (..), NetError (..))
 import Network.Socket (SockAddr)
+import Optics ((&), (.~), (%~), (%))
+import Optics.State (use)
+import Optics.State.Operators ((.=), (%=))
+import Optics.TH (makeFieldLabelsNoPrefix)
 import System.Random (StdGen, mkStdGen, randomR)
 
 -- | A packet in transit.
@@ -56,6 +69,8 @@ data InFlightPacket = InFlightPacket
     ifpDeliverAt :: !MonoTime -- When this packet should be delivered
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''InFlightPacket
 
 -- | Nanoseconds per millisecond.
 nsPerMs :: Word64
@@ -68,6 +83,8 @@ data TestNetConfig = TestNetConfig
     tncJitterNs :: !Word64 -- Random jitter range in nanoseconds
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''TestNetConfig
 
 -- | Default test config (no latency, no loss).
 defaultTestNetConfig :: TestNetConfig
@@ -89,6 +106,8 @@ data TestNetState = TestNetState
     tnsClosed :: !Bool
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''TestNetState
 
 -- | Create initial test network state.
 initialTestNetState :: SockAddr -> TestNetState
@@ -112,7 +131,7 @@ runTestNet :: TestNet a -> TestNetState -> (a, TestNetState)
 runTestNet (TestNet m) = runState m
 
 instance MonadTime TestNet where
-  getMonoTime = gets tnsCurrentTime
+  getMonoTime = use #tnsCurrentTime
 
 instance MonadNetwork TestNet where
   netSend toAddr bytes = do
@@ -124,11 +143,9 @@ instance MonadNetwork TestNet where
             (shouldDrop, rng') = randomR (0.0, 1.0) (tnsRng st) :: (Double, StdGen)
         if shouldDrop < tncLossRate cfg
           then do
-            -- Packet lost
-            put st {tnsRng = rng'}
+            #tnsRng .= rng'
             pure (Right ())
           else do
-            -- Calculate delivery time
             let (jitter, rng'') = randomR (0, tncJitterNs cfg) rng'
                 deliverAt = tnsCurrentTime st + MonoTime (tncLatencyNs cfg) + MonoTime jitter
                 pkt =
@@ -138,18 +155,19 @@ instance MonadNetwork TestNet where
                       ifpData = bytes,
                       ifpDeliverAt = deliverAt
                     }
-            put st {tnsInFlight = tnsInFlight st Seq.|> pkt, tnsRng = rng''}
+            #tnsInFlight %= (Seq.|> pkt)
+            #tnsRng .= rng''
             pure (Right ())
 
   netRecv = do
-    st <- get
-    case Seq.viewl (tnsInbox st) of
+    inbox <- use #tnsInbox
+    case Seq.viewl inbox of
       Seq.EmptyL -> pure Nothing
       (bytes, from) Seq.:< rest -> do
-        put st {tnsInbox = rest}
+        #tnsInbox .= rest
         pure (Just (bytes, from))
 
-  netClose = modify' $ \st -> st {tnsClosed = True}
+  netClose = #tnsClosed .= True
 
 -- | Advance time and deliver packets that are ready.
 advanceTime :: MonoTime -> TestNet ()
@@ -161,26 +179,21 @@ advanceTime newTime = do
       delivered =
         (\p -> (ifpData p, ifpFrom p))
           <$> Seq.filter (\p -> ifpTo p == tnsLocalAddr st) ready
-  put
-    st
-      { tnsCurrentTime = newTime,
-        tnsInFlight = stillInFlight,
-        tnsInbox = tnsInbox st Seq.>< delivered
-      }
+  #tnsCurrentTime .= newTime
+  #tnsInFlight .= stillInFlight
+  #tnsInbox %= (Seq.>< delivered)
 
 -- | Configure simulated one-way latency (in milliseconds).
 simulateLatency :: Word64 -> TestNet ()
-simulateLatency ms = modify' $ \st ->
-  st {tnsConfig = (tnsConfig st) {tncLatencyNs = ms * nsPerMs}}
+simulateLatency ms = #tnsConfig % #tncLatencyNs .= ms * nsPerMs
 
 -- | Configure simulated packet loss.
 simulateLoss :: Double -> TestNet ()
-simulateLoss rate = modify' $ \st ->
-  st {tnsConfig = (tnsConfig st) {tncLossRate = rate}}
+simulateLoss rate = #tnsConfig % #tncLossRate .= rate
 
 -- | Get all packets currently in flight (for debugging/testing).
 getPendingPackets :: TestNet [InFlightPacket]
-getPendingPackets = gets (toList . tnsInFlight)
+getPendingPackets = toList <$> use #tnsInFlight
 
 -- -----------------------------------------------------------------------------
 -- Multi-peer world simulation
@@ -195,6 +208,8 @@ data TestWorld = TestWorld
     twGlobalTime :: !MonoTime
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''TestWorld
 
 -- | Create a new test world with no peers.
 newTestWorld :: TestWorld
@@ -214,7 +229,7 @@ runPeerInWorld addr action world =
           addr
           (twPeers world)
       (result, peerState') = runTestNet action peerState
-      world' = world {twPeers = Map.insert addr peerState' (twPeers world)}
+      world' = world & #twPeers %~ Map.insert addr peerState'
    in (result, world')
 
 -- | Deliver all ready packets between peers.
@@ -231,34 +246,32 @@ deliverPackets world =
       -- Partition into ready and not ready
       (ready, notReady) = partition (\p -> ifpDeliverAt p <= time) allPackets
       -- Clear all peer outFlight, then redistribute
-      clearedPeers = Map.map (\ps -> ps {tnsInFlight = Seq.empty}) (twPeers world)
+      clearedPeers = Map.map (\ps -> ps & #tnsInFlight .~ Seq.empty) (twPeers world)
       -- Put not-ready packets back to their senders
       peersWithPending = foldr putBackPending clearedPeers notReady
       -- Deliver ready packets to their destinations
       peersWithDelivered = foldr deliverOne peersWithPending ready
-   in world {twPeers = peersWithDelivered}
+   in world & #twPeers .~ peersWithDelivered
   where
     putBackPending pkt =
       Map.adjust
-        (\ps -> ps {tnsInFlight = tnsInFlight ps Seq.|> pkt})
+        (\ps -> ps & #tnsInFlight %~ (Seq.|> pkt))
         (ifpFrom pkt)
 
     deliverOne pkt =
       Map.adjust
-        ( \ps ->
-            ps {tnsInbox = tnsInbox ps Seq.|> (ifpData pkt, ifpFrom pkt)}
-        )
+        (\ps -> ps & #tnsInbox %~ (Seq.|> (ifpData pkt, ifpFrom pkt)))
         (ifpTo pkt)
 
 -- | Advance time for all peers in the world.
 worldAdvanceTime :: MonoTime -> TestWorld -> TestWorld
 worldAdvanceTime newTime world =
-  let world' = world {twGlobalTime = newTime}
+  let world' = world & #twGlobalTime .~ newTime
       updatedPeers =
         Map.map
-          (\ps -> ps {tnsCurrentTime = newTime})
+          (\ps -> ps & #tnsCurrentTime .~ newTime)
           (twPeers world')
-   in deliverPackets world' {twPeers = updatedPeers}
+   in deliverPackets (world' & #twPeers .~ updatedPeers)
 
 -- | Get a peer's state from the world (for inspection in tests).
 worldGetPeerState :: SockAddr -> TestWorld -> Maybe TestNetState

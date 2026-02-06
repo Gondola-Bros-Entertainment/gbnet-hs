@@ -1,3 +1,12 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 -- |
 -- Module      : GBNet.Channel
 -- Description : Channel-based message delivery with multiple reliability modes
@@ -51,6 +60,8 @@ import Data.Word (Word64, Word8)
 import GBNet.Reliability (MonoTime, elapsedMs)
 import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Util (sequenceGreaterThan)
+import Optics ((&), (.~), (%~))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Delivery mode for channel messages.
 data DeliveryMode
@@ -162,6 +173,10 @@ data Channel = Channel
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''ChannelConfig
+makeFieldLabelsNoPrefix ''ChannelMessage
+makeFieldLabelsNoPrefix ''Channel
+
 -- | Create a new channel with the given configuration.
 newChannel :: ChannelId -> ChannelConfig -> Channel
 newChannel channelId config =
@@ -207,11 +222,9 @@ channelSend payload now ch
         then Map.deleteMin (chSendBuffer ch)
         else chSendBuffer ch
     ch' =
-      ch
-        { chLocalSequence = seqNum + 1,
-          chSendBuffer = Map.insert seqNum msg sendBuf,
-          chTotalSent = chTotalSent ch + 1
-        }
+      ch & #chLocalSequence .~ (seqNum + 1)
+         & #chSendBuffer .~ Map.insert seqNum msg sendBuf
+         & #chTotalSent %~ (+ 1)
 
 -- | Get the next outgoing message that hasn't been sent yet.
 getOutgoingMessage :: Channel -> Maybe (ChannelMessage, Channel)
@@ -221,18 +234,18 @@ getOutgoingMessage ch =
     Just (seqNum, msg)
       | cmAcked msg ->
           -- Already acked, remove and try next
-          getOutgoingMessage (ch {chSendBuffer = Map.delete seqNum (chSendBuffer ch)})
+          getOutgoingMessage (ch & #chSendBuffer %~ Map.delete seqNum)
       | cmRetryCount msg == 0 ->
           -- First send
           if cmReliable msg
             then
               -- Reliable: keep in buffer for retransmit
-              let msg' = msg {cmRetryCount = 1}
-                  ch' = ch {chSendBuffer = Map.insert seqNum msg' (chSendBuffer ch)}
+              let msg' = msg & #cmRetryCount .~ 1
+                  ch' = ch & #chSendBuffer %~ Map.insert seqNum msg'
                in Just (msg, ch')
             else
               -- Unreliable: remove from buffer immediately (fire and forget)
-              let ch' = ch {chSendBuffer = Map.delete seqNum (chSendBuffer ch)}
+              let ch' = ch & #chSendBuffer %~ Map.delete seqNum
                in Just (msg, ch')
       | otherwise -> Nothing -- Already sent, waiting for ack or retransmit
 
@@ -250,19 +263,15 @@ getRetransmitMessages now rtoMs ch
       | cmRetryCount msg > maxRetries =
           -- Give up on this message
           ( acc,
-            c
-              { chSendBuffer = Map.delete seqNum (chSendBuffer c),
-                chTotalDropped = chTotalDropped c + 1
-              }
+            c & #chSendBuffer %~ Map.delete seqNum
+              & #chTotalDropped %~ (+ 1)
           )
       | elapsedMs (cmSendTime msg) now >= rtoMs =
           -- Needs retransmit
-          let msg' = msg {cmSendTime = now, cmRetryCount = cmRetryCount msg + 1}
+          let msg' = msg & #cmSendTime .~ now & #cmRetryCount %~ (+ 1)
               c' =
-                c
-                  { chSendBuffer = Map.insert seqNum msg' (chSendBuffer c),
-                    chTotalRetransmits = chTotalRetransmits c + 1
-                  }
+                c & #chSendBuffer %~ Map.insert seqNum msg'
+                  & #chTotalRetransmits %~ (+ 1)
            in (msg : acc, c')
       | otherwise = (acc, c)
 
@@ -271,63 +280,51 @@ onMessageReceived :: SequenceNum -> BS.ByteString -> MonoTime -> Channel -> Chan
 onMessageReceived seqNum payload now ch =
   case ccDeliveryMode (chConfig ch) of
     Unreliable ->
-      ch
-        { chReceiveBuffer = chReceiveBuffer ch |> payload,
-          chTotalReceived = chTotalReceived ch + 1
-        }
+      ch & #chReceiveBuffer %~ (|> payload)
+         & #chTotalReceived %~ (+ 1)
     UnreliableSequenced ->
       if sequenceGreaterThan seqNum (chRemoteSequence ch)
         then
-          ch
-            { chReceiveBuffer = chReceiveBuffer ch |> payload,
-              chRemoteSequence = seqNum,
-              chTotalReceived = chTotalReceived ch + 1
-            }
-        else ch {chTotalDropped = chTotalDropped ch + 1}
+          ch & #chReceiveBuffer %~ (|> payload)
+             & #chRemoteSequence .~ seqNum
+             & #chTotalReceived %~ (+ 1)
+        else ch & #chTotalDropped %~ (+ 1)
     ReliableUnordered ->
-      ch
-        { chReceiveBuffer = chReceiveBuffer ch |> payload,
-          chPendingAck = seqNum : chPendingAck ch,
-          chTotalReceived = chTotalReceived ch + 1
-        }
+      ch & #chReceiveBuffer %~ (|> payload)
+         & #chPendingAck %~ (seqNum :)
+         & #chTotalReceived %~ (+ 1)
     ReliableOrdered ->
-      let ch' = ch {chPendingAck = seqNum : chPendingAck ch}
+      let ch' = ch & #chPendingAck %~ (seqNum :)
        in if seqNum == chOrderedExpected ch'
             then deliverOrdered payload ch'
             else bufferOrdered seqNum payload now ch'
     ReliableSequenced ->
       if sequenceGreaterThan seqNum (chRemoteSequence ch)
         then
-          ch
-            { chReceiveBuffer = chReceiveBuffer ch |> payload,
-              chPendingAck = seqNum : chPendingAck ch,
-              chRemoteSequence = seqNum,
-              chTotalReceived = chTotalReceived ch + 1
-            }
+          ch & #chReceiveBuffer %~ (|> payload)
+             & #chPendingAck %~ (seqNum :)
+             & #chRemoteSequence .~ seqNum
+             & #chTotalReceived %~ (+ 1)
         else
-          ch
-            { chPendingAck = seqNum : chPendingAck ch,
-              chTotalDropped = chTotalDropped ch + 1
-            }
+          ch & #chPendingAck %~ (seqNum :)
+             & #chTotalDropped %~ (+ 1)
 
 -- | Deliver message and flush any buffered consecutive messages.
 deliverOrdered :: BS.ByteString -> Channel -> Channel
 deliverOrdered payload ch =
   let ch' =
-        ch
-          { chReceiveBuffer = chReceiveBuffer ch |> payload,
-            chOrderedExpected = chOrderedExpected ch + 1,
-            chTotalReceived = chTotalReceived ch + 1
-          }
+        ch & #chReceiveBuffer %~ (|> payload)
+           & #chOrderedExpected %~ (+ 1)
+           & #chTotalReceived %~ (+ 1)
    in flushOrderedBuffer ch'
 
 -- | Buffer an out-of-order message for later delivery.
 bufferOrdered :: SequenceNum -> BS.ByteString -> MonoTime -> Channel -> Channel
 bufferOrdered seqNum payload now ch
   | Map.size (chOrderedReceiveBuffer ch) >= ccMaxOrderedBufferSize (chConfig ch) =
-      ch {chTotalDropped = chTotalDropped ch + 1}
+      ch & #chTotalDropped %~ (+ 1)
   | otherwise =
-      ch {chOrderedReceiveBuffer = Map.insert seqNum (payload, now) (chOrderedReceiveBuffer ch)}
+      ch & #chOrderedReceiveBuffer %~ Map.insert seqNum (payload, now)
 
 -- | Flush consecutive messages from the ordered buffer.
 flushOrderedBuffer :: Channel -> Channel
@@ -336,26 +333,24 @@ flushOrderedBuffer ch =
     Nothing -> ch
     Just (payload, _) ->
       let ch' =
-            ch
-              { chOrderedReceiveBuffer = Map.delete (chOrderedExpected ch) (chOrderedReceiveBuffer ch),
-                chReceiveBuffer = chReceiveBuffer ch |> payload,
-                chOrderedExpected = chOrderedExpected ch + 1,
-                chTotalReceived = chTotalReceived ch + 1
-              }
+            ch & #chOrderedReceiveBuffer %~ Map.delete (chOrderedExpected ch)
+               & #chReceiveBuffer %~ (|> payload)
+               & #chOrderedExpected %~ (+ 1)
+               & #chTotalReceived %~ (+ 1)
        in flushOrderedBuffer ch'
 
 -- | Acknowledge a message by sequence number.
 acknowledgeMessage :: SequenceNum -> Channel -> Channel
 acknowledgeMessage seqNum ch =
-  ch {chSendBuffer = Map.adjust (\msg -> msg {cmAcked = True}) seqNum (chSendBuffer ch)}
+  ch & #chSendBuffer %~ Map.adjust (\msg -> msg & #cmAcked .~ True) seqNum
 
 -- | Take all received messages from the channel.
 channelReceive :: Channel -> ([BS.ByteString], Channel)
-channelReceive ch = (toList (chReceiveBuffer ch), ch {chReceiveBuffer = Seq.empty})
+channelReceive ch = (toList (chReceiveBuffer ch), ch & #chReceiveBuffer .~ Seq.empty)
 
 -- | Take pending ack sequence numbers.
 takePendingAcks :: Channel -> ([SequenceNum], Channel)
-takePendingAcks ch = (chPendingAck ch, ch {chPendingAck = []})
+takePendingAcks ch = (chPendingAck ch, ch & #chPendingAck .~ [])
 
 -- | Update channel state (flush old ordered messages, clean up acked).
 channelUpdate :: MonoTime -> Channel -> Channel
@@ -364,7 +359,7 @@ channelUpdate now = flushTimedOutOrdered now . cleanupAcked
 -- | Remove acked messages from send buffer.
 cleanupAcked :: Channel -> Channel
 cleanupAcked ch =
-  ch {chSendBuffer = Map.filter (not . cmAcked) (chSendBuffer ch)}
+  ch & #chSendBuffer %~ Map.filter (not . cmAcked)
 
 -- | Flush ordered messages that have timed out waiting.
 flushTimedOutOrdered :: MonoTime -> Channel -> Channel
@@ -381,12 +376,10 @@ flushTimedOutOrdered now ch
                   newExpected = case Map.lookupMax toFlush of
                     Nothing -> chOrderedExpected ch
                     Just (maxSeq, _) -> maxSeq + 1
-               in ch
-                    { chOrderedReceiveBuffer = toKeep,
-                      chReceiveBuffer = chReceiveBuffer ch <> Seq.fromList payloads,
-                      chOrderedExpected = newExpected,
-                      chTotalReceived = chTotalReceived ch + fromIntegral (length payloads)
-                    }
+               in ch & #chOrderedReceiveBuffer .~ toKeep
+                     & #chReceiveBuffer %~ (<> Seq.fromList payloads)
+                     & #chOrderedExpected .~ newExpected
+                     & #chTotalReceived %~ (+ fromIntegral (length payloads))
   where
     timedOut timeout (_, arriveTime) = elapsedMs arriveTime now >= timeout
 

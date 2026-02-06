@@ -1,3 +1,12 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 -- |
 -- Module      : GBNet.Connection
 -- Description : Connection state machine for reliable UDP
@@ -16,14 +25,17 @@ module GBNet.Connection
     -- * Outgoing packet
     OutgoingPacket (..),
 
-    -- * Connection
-    Connection (..),
+    -- * Connection (opaque)
+    Connection,
     newConnection,
 
     -- * State queries
     connectionState,
     isConnected,
     connectionStats,
+    connRemoteSeq,
+    connLocalSeq,
+    connClientSalt,
 
     -- * Operations
     connect,
@@ -58,7 +70,7 @@ module GBNet.Connection
 where
 
 import Control.Monad (when)
-import Control.Monad.State.Strict (State, execState, gets, modify')
+import Control.Monad.State.Strict (State, execState, modify')
 import Data.Bits (shiftR, (.&.))
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
@@ -105,7 +117,10 @@ import GBNet.Stats
     defaultNetworkStats,
   )
 import GBNet.Types (ChannelId (..), SequenceNum (..), channelIdToInt)
-import GBNet.Util (sequenceGreaterThan)
+import Optics ((&), (.~), (%~), (%))
+import Optics.State (use)
+import Optics.State.Operators ((.=), (%=))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Bandwidth tracking window duration in milliseconds.
 bandwidthWindowMs :: Double
@@ -168,6 +183,8 @@ data OutgoingPacket = OutgoingPacket
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''OutgoingPacket
+
 -- | A single peer connection managing handshake, channels, reliability, and congestion.
 data Connection = Connection
   { connConfig :: !NetworkConfig,
@@ -183,7 +200,6 @@ data Connection = Connection
     connRetryCount :: !Int,
     -- Sequences
     connLocalSeq :: !SequenceNum,
-    connRemoteSeq :: !SequenceNum,
     -- Subsystems
     connReliability :: !ReliableEndpoint,
     connChannels :: !(IntMap Channel),
@@ -205,9 +221,11 @@ data Connection = Connection
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''Connection
+
 -- | Modify a single channel by index, leaving others unchanged.
 modifyChannel :: Int -> (Channel -> Channel) -> Connection -> Connection
-modifyChannel idx f conn = conn {connChannels = IntMap.adjust f idx (connChannels conn)}
+modifyChannel idx f conn = conn & #connChannels %~ IntMap.adjust f idx
 {-# INLINE modifyChannel #-}
 
 -- | Create a new connection.
@@ -243,7 +261,6 @@ newConnection config clientSalt now =
           connRequestTime = Nothing,
           connRetryCount = 0,
           connLocalSeq = 0,
-          connRemoteSeq = 0,
           connReliability = Rel.newReliableEndpoint (ncPacketBufferSize config),
           connChannels = channels,
           connChannelPriority = priorityOrder,
@@ -273,6 +290,11 @@ isConnected conn = connState conn == Connected
 connectionStats :: Connection -> NetworkStats
 connectionStats = connStats
 
+-- | Get remote sequence number (delegates to reliability layer).
+connRemoteSeq :: Connection -> SequenceNum
+connRemoteSeq = Rel.reRemoteSequence . connReliability
+{-# INLINE connRemoteSeq #-}
+
 -- | Get number of channels.
 channelCount :: Connection -> Word8
 channelCount = fromIntegral . IntMap.size . connChannels
@@ -283,12 +305,10 @@ connect now conn
   | connState conn /= Disconnected = Left ErrAlreadyConnected
   | otherwise =
       Right $
-        sendConnectionRequest
-          conn
-            { connState = Connecting,
-              connRequestTime = Just now,
-              connRetryCount = 0
-            }
+        sendConnectionRequest $
+          conn & #connState .~ Connecting
+               & #connRequestTime .~ Just now
+               & #connRetryCount .~ 0
 
 -- | Initiate disconnect.
 disconnect :: DisconnectReason -> MonoTime -> Connection -> Connection
@@ -302,13 +322,11 @@ disconnect reason now conn
                 opType = Disconnect,
                 opPayload = BS.singleton (disconnectReasonCode reason)
               }
-       in conn
-            { connState = Disconnecting,
-              connDisconnectTime = Just now,
-              connDisconnectRetries = 0,
-              connSendQueue = connSendQueue conn Seq.|> pkt,
-              connLocalSeq = connLocalSeq conn + 1
-            }
+       in conn & #connState .~ Disconnecting
+               & #connDisconnectTime .~ Just now
+               & #connDisconnectRetries .~ 0
+               & #connSendQueue %~ (Seq.|> pkt)
+               & #connLocalSeq %~ (+ 1)
 
 -- | Send a message on a channel.
 sendMessage :: ChannelId -> BS.ByteString -> MonoTime -> Connection -> Either ConnectionError Connection
@@ -349,7 +367,7 @@ receiveIncomingPayload channelId chSeq payload now conn =
 createHeader :: Connection -> (PacketHeader, Connection)
 createHeader conn =
   let header = createHeaderInternal conn
-   in (header, conn {connLocalSeq = connLocalSeq conn + 1})
+   in (header, conn & #connLocalSeq %~ (+ 1))
 
 -- | Internal header creation without state update.
 createHeaderInternal :: Connection -> PacketHeader
@@ -379,35 +397,26 @@ sendConnectionRequest conn =
             opType = ConnectionRequest,
             opPayload = BS.empty
           }
-   in conn {connSendQueue = connSendQueue conn Seq.|> pkt}
+   in conn & #connSendQueue %~ (Seq.|> pkt)
 
 -- | Process incoming packet header for reliability.
 processIncomingHeader :: PacketHeader -> MonoTime -> Connection -> Connection
 processIncomingHeader header now = execState $ do
   -- Record received packet for ACK generation
-  modify' $ \c ->
-    c
-      { connReliability = Rel.onPacketsReceived [sequenceNum header] (connReliability c),
-        connPendingAck = True
-      }
-
-  -- Update remote sequence if newer
-  remoteSeq <- gets connRemoteSeq
-  when (sequenceGreaterThan (sequenceNum header) remoteSeq) $
-    modify' $
-      \c -> c {connRemoteSeq = sequenceNum header}
+  #connReliability %= Rel.onPacketsReceived [sequenceNum header]
+  #connPendingAck .= True
 
   -- Process ACKs (extend 32-bit wire format to 64-bit)
-  rel <- gets connReliability
+  rel <- use #connReliability
   let ackBits64 = fromIntegral (ackBitfield header) :: Word64
       (ackResult, rel') = Rel.processAcks (ack header) ackBits64 now rel
       ackedPairs = Rel.arAcked ackResult
       fastRetransmits = Rel.arFastRetransmit ackResult
-  modify' $ \c -> c {connReliability = rel'}
+  #connReliability .= rel'
 
   -- Feed ack/loss info to cwnd
-  cw <- gets connCwnd
-  cfg <- gets connConfig
+  cw <- use #connCwnd
+  cfg <- use #connConfig
   case cw of
     Just cwVal -> do
       let hasLoss = not (null fastRetransmits)
@@ -416,7 +425,7 @@ processIncomingHeader header now = execState $ do
             | hasLoss = cwOnLoss cwVal
             | ackedBytes > 0 = cwOnAck ackedBytes cwVal
             | otherwise = cwVal
-      modify' $ \c -> c {connCwnd = Just cwVal'}
+      #connCwnd .= Just cwVal'
     Nothing -> pure ()
 
   -- Acknowledge messages on channels
@@ -440,11 +449,9 @@ updateConnecting now conn =
       | retries > maxRetries -> Left ErrTimeout
       | otherwise ->
           Right $
-            sendConnectionRequest
-              conn
-                { connRetryCount = retries,
-                  connRequestTime = Just now
-                }
+            sendConnectionRequest $
+              conn & #connRetryCount .~ retries
+                   & #connRequestTime .~ Just now
       where
         elapsed = elapsedMs reqTime now
         timeoutMs = ncConnectionRequestTimeoutMs (connConfig conn)
@@ -464,24 +471,24 @@ updateConnected now conn
 updateConnectedS :: MonoTime -> State Connection ()
 updateConnectedS now = do
   -- Update congestion
-  stats <- gets connStats
-  cfg <- gets connConfig
-  cong <- gets connCongestion
+  stats <- use #connStats
+  cfg <- use #connConfig
+  cong <- use #connCongestion
   let cong' = ccRefillBudget (ncMtu cfg) $ ccUpdate (nsPacketLoss stats) (nsRtt stats) now cong
-  modify' $ \c -> c {connCongestion = cong'}
+  #connCongestion .= cong'
 
   -- Update cwnd pacing and check for slow start restart
-  cw <- gets connCwnd
-  rel <- gets connReliability
+  cw <- use #connCwnd
+  rel <- use #connReliability
   case cw of
     Just cwVal -> do
       let rto = Rel.rtoMs rel
           cwPaced = cwUpdatePacing rto $ cwSlowStartRestart rto now cwVal
-      modify' $ \c -> c {connCwnd = Just cwPaced}
+      #connCwnd .= Just cwPaced
     Nothing -> pure ()
 
   -- Send keepalive if needed
-  lastSend <- gets connLastSendTime
+  lastSend <- use #connLastSendTime
   let timeSinceSend = elapsedMs lastSend now
       keepaliveMs = ncKeepaliveIntervalMs cfg
   when (timeSinceSend > keepaliveMs) $
@@ -491,43 +498,37 @@ updateConnectedS now = do
   modify' (processChannelOutput now)
 
   -- Update channels
-  modify' $ \c -> c {connChannels = IntMap.map (Channel.channelUpdate now) (connChannels c)}
+  #connChannels %= IntMap.map (Channel.channelUpdate now)
 
   -- Send AckOnly if needed
-  pending <- gets connPendingAck
-  dataSent <- gets connDataSentThisTick
+  pending <- use #connPendingAck
+  dataSent <- use #connDataSentThisTick
   when (pending && not dataSent) $
     modify' sendAckOnly
 
   -- Compute congestion level (worst of binary and window-based)
-  congFinal <- gets connCongestion
-  cwFinal <- gets connCwnd
+  congFinal <- use #connCongestion
+  cwFinal <- use #connCwnd
   let binaryLevel = ccCongestionLevel congFinal
       windowLevel = maybe CongestionNone cwCongestionLevel cwFinal
       congLevel = max binaryLevel windowLevel
 
   -- Update stats
-  rel' <- gets connReliability
-  bwUp <- gets connBandwidthUp
-  bwDown <- gets connBandwidthDown
-  modify' $ \c ->
-    c
-      { connStats =
-          (connStats c)
-            { nsRtt = realToFrac (Rel.srttMs rel'),
-              nsPacketLoss = Rel.packetLossPercent rel',
-              nsBandwidthUp = realToFrac (btBytesPerSecond bwUp),
-              nsBandwidthDown = realToFrac (btBytesPerSecond bwDown),
-              nsConnectionQuality = assessConnectionQuality (realToFrac (Rel.srttMs rel')) (Rel.packetLossPercent rel' * 100),
-              nsCongestionLevel = congLevel
-            },
-        connPendingAck = False
-      }
+  rel' <- use #connReliability
+  bwUp <- use #connBandwidthUp
+  bwDown <- use #connBandwidthDown
+  #connStats % #nsRtt .= realToFrac (Rel.srttMs rel')
+  #connStats % #nsPacketLoss .= Rel.packetLossPercent rel'
+  #connStats % #nsBandwidthUp .= realToFrac (btBytesPerSecond bwUp)
+  #connStats % #nsBandwidthDown .= realToFrac (btBytesPerSecond bwDown)
+  #connStats % #nsConnectionQuality .= assessConnectionQuality (realToFrac (Rel.srttMs rel')) (Rel.packetLossPercent rel' * 100)
+  #connStats % #nsCongestionLevel .= congLevel
+  #connPendingAck .= False
 
 -- | Process outgoing messages from channels.
 processChannelOutput :: MonoTime -> Connection -> Connection
 processChannelOutput now conn =
-  let conn' = conn {connDataSentThisTick = False}
+  let conn' = conn & #connDataSentThisTick .~ False
    in foldl' (processChannelIdx now) conn' (connChannelPriority conn')
 
 processChannelIdx :: MonoTime -> Connection -> Int -> Connection
@@ -580,15 +581,13 @@ processChannelMessages now conn chIdx =
                             (connReliability conn)
                         else connReliability conn
                     conn' =
-                      conn
-                        { connChannels = IntMap.insert chIdx channel' (connChannels conn),
-                          connSendQueue = connSendQueue conn Seq.|> pkt,
-                          connLocalSeq = connLocalSeq conn + 1,
-                          connCongestion = cong',
-                          connCwnd = cwnd',
-                          connReliability = rel',
-                          connDataSentThisTick = True
-                        }
+                      conn & #connChannels %~ IntMap.insert chIdx channel'
+                           & #connSendQueue %~ (Seq.|> pkt)
+                           & #connLocalSeq %~ (+ 1)
+                           & #connCongestion .~ cong'
+                           & #connCwnd .~ cwnd'
+                           & #connReliability .~ rel'
+                           & #connDataSentThisTick .~ True
                  in processChannelMessages now conn' chIdx
 
 -- | Enqueue an empty keepalive/ack-only packet.
@@ -607,10 +606,8 @@ enqueueEmptyPacket conn =
             opType = Keepalive,
             opPayload = BS.empty
           }
-   in conn
-        { connSendQueue = connSendQueue conn Seq.|> pkt,
-          connLocalSeq = connLocalSeq conn + 1
-        }
+   in conn & #connSendQueue %~ (Seq.|> pkt)
+           & #connLocalSeq %~ (+ 1)
 
 -- | Update while disconnecting.
 updateDisconnecting :: MonoTime -> Connection -> Either ConnectionError Connection
@@ -619,7 +616,7 @@ updateDisconnecting now conn =
     Nothing -> Right conn
     Just discTime
       | elapsed <= timeoutMs -> Right conn
-      | retries >= maxRetries -> Right $ resetConnection conn {connState = Disconnected}
+      | retries >= maxRetries -> Right $ resetConnection $ conn & #connState .~ Disconnected
       | otherwise ->
           let header = createHeaderInternal conn
               pkt =
@@ -628,13 +625,11 @@ updateDisconnecting now conn =
                     opType = Disconnect,
                     opPayload = BS.singleton (disconnectReasonCode ReasonRequested)
                   }
-           in Right
-                conn
-                  { connDisconnectRetries = retries + 1,
-                    connDisconnectTime = Just now,
-                    connSendQueue = connSendQueue conn Seq.|> pkt,
-                    connLocalSeq = connLocalSeq conn + 1
-                  }
+           in Right $
+                conn & #connDisconnectRetries .~ retries + 1
+                     & #connDisconnectTime .~ Just now
+                     & #connSendQueue %~ (Seq.|> pkt)
+                     & #connLocalSeq %~ (+ 1)
       where
         elapsed = elapsedMs discTime now
         timeoutMs = ncDisconnectRetryTimeoutMs (connConfig conn)
@@ -649,7 +644,6 @@ resetConnection conn =
         { connStartTime = Nothing,
           connRequestTime = Nothing,
           connLocalSeq = 0,
-          connRemoteSeq = 0,
           connSendQueue = Seq.empty,
           connDisconnectTime = Nothing,
           connDisconnectRetries = 0,
@@ -669,56 +663,39 @@ resetConnection conn =
 -- | Drain send queue.
 drainSendQueue :: Connection -> ([OutgoingPacket], Connection)
 drainSendQueue conn =
-  (toList (connSendQueue conn), conn {connSendQueue = Seq.empty})
+  (toList (connSendQueue conn), conn & #connSendQueue .~ Seq.empty)
 
 -- | Update last receive time.
 touchRecvTime :: MonoTime -> Connection -> Connection
-touchRecvTime now conn = conn {connLastRecvTime = now}
+touchRecvTime now conn = conn & #connLastRecvTime .~ now
 {-# INLINE touchRecvTime #-}
 
 -- | Update last send time.
 touchSendTime :: MonoTime -> Connection -> Connection
-touchSendTime now conn = conn {connLastSendTime = now}
+touchSendTime now conn = conn & #connLastSendTime .~ now
 {-# INLINE touchSendTime #-}
 
 -- | Mark connection as established (Connected state).
 -- Used after handshake completes.
 markConnected :: MonoTime -> Connection -> Connection
 markConnected now conn =
-  conn
-    { connState = Connected,
-      connStartTime = Just now,
-      connLocalSeq = 0,
-      connRemoteSeq = 0
-    }
+  conn & #connState .~ Connected
+       & #connStartTime .~ Just now
+       & #connLocalSeq .~ 0
 
 -- | Record bytes sent for bandwidth tracking.
 recordBytesSent :: Int -> MonoTime -> Connection -> Connection
 recordBytesSent bytes now conn =
   let bw = btRecord bytes now (connBandwidthUp conn)
-      stats = connStats conn
-      stats' =
-        stats
-          { nsPacketsSent = nsPacketsSent stats + 1,
-            nsBytesSent = nsBytesSent stats + fromIntegral bytes
-          }
-   in conn
-        { connBandwidthUp = bw,
-          connStats = stats',
-          connLastSendTime = now
-        }
+   in conn & #connBandwidthUp .~ bw
+           & #connStats % #nsPacketsSent %~ (+ 1)
+           & #connStats % #nsBytesSent %~ (+ fromIntegral bytes)
+           & #connLastSendTime .~ now
 
 -- | Record bytes received for bandwidth tracking.
 recordBytesReceived :: Int -> MonoTime -> Connection -> Connection
 recordBytesReceived bytes now conn =
   let bw = btRecord bytes now (connBandwidthDown conn)
-      stats = connStats conn
-      stats' =
-        stats
-          { nsPacketsReceived = nsPacketsReceived stats + 1,
-            nsBytesReceived = nsBytesReceived stats + fromIntegral bytes
-          }
-   in conn
-        { connBandwidthDown = bw,
-          connStats = stats'
-        }
+   in conn & #connBandwidthDown .~ bw
+           & #connStats % #nsPacketsReceived %~ (+ 1)
+           & #connStats % #nsBytesReceived %~ (+ fromIntegral bytes)

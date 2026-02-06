@@ -1,4 +1,12 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- |
 -- Module      : GBNet.Security
@@ -34,13 +42,15 @@ import qualified Data.ByteString as BS
 import Data.ByteString.Internal (unsafeCreate)
 import qualified Data.ByteString.Unsafe as BSU
 import qualified Data.Digest.CRC32C as CRC
-import Data.Word (Word8, Word32, Word64)
-import Foreign.Storable (pokeByteOff)
 import Data.List (minimumBy)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Ord (comparing)
+import Data.Word (Word32, Word64, Word8)
+import Foreign.Storable (pokeByteOff)
 import GBNet.Reliability (MonoTime, elapsedMs)
+import Optics ((&), (.~), (%~))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | CRC32 checksum size in bytes.
 crc32Size :: Int
@@ -107,6 +117,8 @@ data RateLimiter = RateLimiter
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''RateLimiter
+
 -- | Create a new rate limiter.
 newRateLimiter :: Int -> MonoTime -> RateLimiter
 newRateLimiter maxReqs now =
@@ -121,8 +133,8 @@ newRateLimiter maxReqs now =
 -- Automatically prunes stale entries when the cleanup interval has elapsed.
 rateLimiterAllow :: Word64 -> MonoTime -> RateLimiter -> (Bool, RateLimiter)
 rateLimiterAllow addrKey now rl
-  | recentCount >= rlMaxRequestsPerSecond rl' = (False, rl' {rlRequests = Map.insert addrKey recent (rlRequests rl')})
-  | otherwise = (True, rl' {rlRequests = Map.insert addrKey (now : recent) (rlRequests rl')})
+  | recentCount >= rlMaxRequestsPerSecond rl' = (False, rl' & #rlRequests %~ Map.insert addrKey recent)
+  | otherwise = (True, rl' & #rlRequests %~ Map.insert addrKey (now : recent))
   where
     rl' = maybeCleanup now rl
     window = rlWindowMs rl'
@@ -142,7 +154,7 @@ maybeCleanup now rl
           cleanup = filter (\t -> elapsedMs t now < window)
           cleaned = Map.map cleanup (rlRequests rl)
           nonEmpty = Map.filter (not . null) cleaned
-       in rl {rlRequests = nonEmpty, rlLastCleanup = now}
+       in rl & #rlRequests .~ nonEmpty & #rlLastCleanup .~ now
 
 -- | Connect token for authentication.
 data ConnectToken = ConnectToken
@@ -152,6 +164,8 @@ data ConnectToken = ConnectToken
     ctUserData :: !BS.ByteString
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''ConnectToken
 
 -- | Create a new connect token.
 newConnectToken :: Word64 -> Double -> BS.ByteString -> MonoTime -> ConnectToken
@@ -183,6 +197,8 @@ data TokenValidator = TokenValidator
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''TokenValidator
+
 -- | Create a new token validator.
 newTokenValidator :: Double -> Int -> TokenValidator
 newTokenValidator lifetimeMs maxTracked =
@@ -200,9 +216,7 @@ validateToken token now tv
   | Map.member (ctClientId token) (tvUsedTokens tv) = (Left TokenReplayed, tv)
   | otherwise =
       let tv' =
-            tv
-              { tvUsedTokens = Map.insert (ctClientId token) now (tvUsedTokens tv)
-              }
+            tv & #tvUsedTokens %~ Map.insert (ctClientId token) now
           tv'' = enforceLimit now tv'
        in (Right (ctClientId token), tv'')
 
@@ -223,7 +237,7 @@ cleanupExpired now tv =
   let lifetime = tvTokenLifetimeMs tv
       keep (_clientId, created) = elapsedMs created now < lifetime
       kept = Map.filterWithKey (curry keep) (tvUsedTokens tv)
-   in tv {tvUsedTokens = kept}
+   in tv & #tvUsedTokens .~ kept
 
 -- | Evict oldest token.
 evictOldest :: TokenValidator -> TokenValidator
@@ -231,10 +245,8 @@ evictOldest tv =
   case findOldest (Map.toList (tvUsedTokens tv)) of
     Nothing -> tv
     Just (oldestId, _) ->
-      tv
-        { tvUsedTokens = Map.delete oldestId (tvUsedTokens tv),
-          tvTokensEvicted = tvTokensEvicted tv + 1
-        }
+      tv & #tvUsedTokens %~ Map.delete oldestId
+         & #tvTokensEvicted %~ (+ 1)
   where
     findOldest [] = Nothing
     findOldest xs = Just $ minimumBy (comparing snd) xs

@@ -1,6 +1,12 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- |
@@ -46,7 +52,9 @@ import GBNet.Socket
     maxUdpPacketSize,
     socketSendTo,
   )
-import GBNet.Stats (SocketStats (..))
+import GBNet.Stats ()
+import Optics ((&), (.~), (%~), (%))
+import Optics.TH (makeFieldLabelsNoPrefix)
 import Network.Socket (SockAddr, Socket)
 import qualified Network.Socket.ByteString as NSB
 
@@ -64,6 +72,8 @@ data NetState = NetState
     -- | Receive thread handle (for cleanup)
     nsRecvThread :: !ThreadId
   }
+
+makeFieldLabelsNoPrefix ''NetState
 
 -- | Create network state and start the dedicated receive thread.
 --
@@ -148,7 +158,7 @@ instance MonadNetwork (NetT IO) where
     case result of
       Left err -> pure $ Left (NetSendFailed (show err))
       Right (_, sock') -> do
-        modifyNetState $ \s -> s {nsSocket = sock'}
+        modifyNetState $ #nsSocket .~ sock'
         pure $ Right ()
 
   netRecv = do
@@ -160,23 +170,18 @@ instance MonadNetwork (NetT IO) where
         -- Update receive stats on the socket
         now <- liftIO getMonoTimeIO
         let len = BS.length dat
-            sock = nsSocket st
-            stats = usStats sock
-            stats' =
-              stats
-                { ssBytesReceived = ssBytesReceived stats + fromIntegral len,
-                  ssPacketsReceived = ssPacketsReceived stats + 1,
-                  ssLastReceiveTime = Just now
-                }
-        modifyNetState $ \s -> s {nsSocket = (nsSocket s) {usStats = stats'}}
+        modifyNetState $
+          #nsSocket % #usStats %~
+            ( \stats -> stats
+                & #ssBytesReceived %~ (+ fromIntegral len)
+                & #ssPacketsReceived %~ (+ 1)
+                & #ssLastReceiveTime .~ Just now
+            )
         -- Validate CRC before returning
         case validateAndStripCrc32 dat of
           Nothing -> do
             -- Increment CRC drop counter
-            modifyNetState $ \s ->
-              let sock' = nsSocket s
-                  st' = (usStats sock') {ssCrcDrops = ssCrcDrops (usStats sock') + 1}
-               in s {nsSocket = sock' {usStats = st'}}
+            modifyNetState $ #nsSocket % #usStats % #ssCrcDrops %~ (+ 1)
             pure Nothing
           Just validated -> pure $ Just (validated, addr)
 

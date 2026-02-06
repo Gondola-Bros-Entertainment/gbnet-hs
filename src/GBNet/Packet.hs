@@ -1,4 +1,11 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- |
 -- Module      : GBNet.Packet
@@ -31,6 +38,7 @@ import qualified Data.ByteString.Unsafe as BSU
 import Data.Word (Word16, Word32, Word8)
 import Foreign.Storable (pokeByteOff)
 import GBNet.Types (SequenceNum (..))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Header size in bits (4 + 16 + 16 + 32 = 68).
 packetHeaderBitSize :: Int
@@ -80,6 +88,9 @@ data Packet = Packet
     pktPayload :: !BS.ByteString
   }
   deriving (Eq, Show)
+
+makeFieldLabelsNoPrefix ''PacketHeader
+makeFieldLabelsNoPrefix ''Packet
 
 -- | Bit shift for packet type in first byte.
 packetTypeBitShift :: Int

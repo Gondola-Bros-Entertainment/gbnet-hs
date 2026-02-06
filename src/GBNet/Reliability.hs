@@ -1,4 +1,12 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- |
 -- Module      : GBNet.Reliability
@@ -60,7 +68,6 @@ module GBNet.Reliability
 where
 
 import Control.DeepSeq (NFData (..))
-import Control.Monad.ST (runST)
 import Data.Bits (complement, popCount, shiftL, (.&.), (.|.))
 import Data.List (foldl')
 import qualified Data.Vector as V
@@ -71,7 +78,9 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Class (MonoTime (..))
 import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Util (sequenceDiff, sequenceGreaterThan)
-import GBNet.ZeroCopy (zeroCopyMutate, zeroCopyMutate')
+import GBNet.ZeroCopy (zeroCopyMutate, zeroCopyMutate', zeroCopyMutateU')
+import Optics ((&), (.~), (%~))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- Constants
 
@@ -115,6 +124,8 @@ data LossWindow = LossWindow
   }
   deriving (Show, Eq)
 
+makeFieldLabelsNoPrefix ''LossWindow
+
 instance NFData LossWindow where
   rnf (LossWindow b0 b1 b2 b3) = rnf b0 `seq` rnf b1 `seq` rnf b2 `seq` rnf b3
 
@@ -125,10 +136,10 @@ emptyLossWindow = LossWindow 0 0 0 0
 -- | Set a bit in the loss window. Index must be 0-255.
 lwSetBit :: Int -> Bool -> LossWindow -> LossWindow
 lwSetBit idx val lw
-  | idx < 64 = lw {lwBits0 = setBitWord64 (idx .&. 63) val (lwBits0 lw)}
-  | idx < 128 = lw {lwBits1 = setBitWord64 (idx .&. 63) val (lwBits1 lw)}
-  | idx < 192 = lw {lwBits2 = setBitWord64 (idx .&. 63) val (lwBits2 lw)}
-  | otherwise = lw {lwBits3 = setBitWord64 (idx .&. 63) val (lwBits3 lw)}
+  | idx < 64 = lw & #lwBits0 %~ setBitWord64 (idx .&. 63) val
+  | idx < 128 = lw & #lwBits1 %~ setBitWord64 (idx .&. 63) val
+  | idx < 192 = lw & #lwBits2 %~ setBitWord64 (idx .&. 63) val
+  | otherwise = lw & #lwBits3 %~ setBitWord64 (idx .&. 63) val
 {-# INLINE lwSetBit #-}
 
 -- | Count set bits (losses) in the first n entries.
@@ -166,9 +177,9 @@ data SBEntry a
   | SBEntry !SequenceNum a
   deriving (Show)
 
-instance NFData (SBEntry a) where
+instance (NFData a) => NFData (SBEntry a) where
   rnf SBEmpty = ()
-  rnf (SBEntry s _) = rnf s
+  rnf (SBEntry s a) = rnf s `seq` rnf a
 
 -- | High-performance circular buffer using Vector ring buffer.
 -- O(1) insert, O(1) lookup, O(1) exists via zero-copy mutation.
@@ -179,6 +190,8 @@ data SequenceBuffer a = SequenceBuffer
     sbSize :: !Int -- Keep for API compat, but use mask internally
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''SequenceBuffer
 
 -- | Create a new sequence buffer. Size is rounded up to power of 2.
 newSequenceBuffer :: Int -> SequenceBuffer a
@@ -210,7 +223,7 @@ sbInsert seqNum val buf =
         | otherwise = sbSequence buf
       entries' = zeroCopyMutate (sbEntries buf) $ \mv ->
         MV.unsafeWrite mv idx (SBEntry seqNum val)
-   in buf {sbEntries = entries', sbSequence = newHighest}
+   in buf & #sbEntries .~ entries' & #sbSequence .~ newHighest
 {-# INLINE sbInsert #-}
 
 -- | Batched insert - O(n) with single thaw/freeze for n entries.
@@ -218,16 +231,15 @@ sbInsertMany :: [(SequenceNum, a)] -> SequenceBuffer a -> SequenceBuffer a
 sbInsertMany [] buf = buf
 sbInsertMany items buf =
   let (entries', newHighest) = zeroCopyMutate' (sbEntries buf) $ \mv ->
-        go mv (sbSequence buf) items
-   in buf {sbEntries = entries', sbSequence = newHighest}
-  where
-    go _ !highest [] = return highest
-    go mv !highest ((seqNum, val) : rest) = do
-      let !idx = seqToIndex seqNum buf
-      MV.unsafeWrite mv idx (SBEntry seqNum val)
-      let !highest' =
-            if sequenceGreaterThan seqNum highest then seqNum else highest
-      go mv highest' rest
+        let go _ !highest [] = return highest
+            go mv' !highest ((seqNum, val) : rest) = do
+              let !idx = seqToIndex seqNum buf
+              MV.unsafeWrite mv' idx (SBEntry seqNum val)
+              let !highest' =
+                    if sequenceGreaterThan seqNum highest then seqNum else highest
+              go mv' highest' rest
+         in go mv (sbSequence buf) items
+   in buf & #sbEntries .~ entries' & #sbSequence .~ newHighest
 {-# INLINE sbInsertMany #-}
 
 -- | O(1) existence check via direct index.
@@ -266,12 +278,14 @@ receivedBufferMask = receivedBufferSize - 1
 
 -- | High-performance received packet tracker using unboxed Word16 vector.
 -- Stores sequence numbers directly - O(1) lookup via index, O(1) insert.
--- 512 bytes total (256 × Word16), cache-friendly contiguous memory.
+-- 512 bytes total (256 x Word16), cache-friendly contiguous memory.
 data ReceivedBuffer = ReceivedBuffer
   { rbSeqs :: !(VU.Vector Word16), -- Unboxed: contiguous like C array
     rbHighest :: !SequenceNum -- Track highest for ack bit calculation
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''ReceivedBuffer
 
 instance NFData ReceivedBuffer where
   rnf (ReceivedBuffer v h) = rnf v `seq` rnf h
@@ -290,19 +304,13 @@ rbExists (SequenceNum s) (ReceivedBuffer v _) =
   VU.unsafeIndex v (fromIntegral s .&. receivedBufferMask) == s
 {-# INLINE rbExists #-}
 
--- | Batched insert - O(n) for n sequence numbers with ZERO-COPY thaw/freeze.
---
--- SAFETY: unsafeThaw/unsafeFreeze are safe here because:
---   1. We never reference the old buffer after calling this function
---   2. The result is a completely new ReceivedBuffer
---   3. Linear data flow: old buffer in → new buffer out → old is GC'd
+-- | Batched insert - O(n) for n sequence numbers via zero-copy mutation.
 rbInsertMany :: [SequenceNum] -> ReceivedBuffer -> ReceivedBuffer
 rbInsertMany [] buf = buf
-rbInsertMany seqs buf = runST $ do
-  mv <- VU.unsafeThaw (rbSeqs buf) -- 0ns: no copy, just pointer cast
-  newHighest <- go mv (rbHighest buf) seqs
-  v' <- VU.unsafeFreeze mv -- 0ns: no copy, just pointer cast
-  return $! ReceivedBuffer v' newHighest
+rbInsertMany seqs buf =
+  let (v', newHighest) = zeroCopyMutateU' (rbSeqs buf) $ \mv ->
+        go mv (rbHighest buf) seqs
+   in ReceivedBuffer v' newHighest
   where
     go _ !highest [] = return highest
     go mv !highest (sn@(SequenceNum s) : rest) = do
@@ -321,6 +329,8 @@ data SentPacketRecord = SentPacketRecord
     sprNackCount :: !Word8
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''SentPacketRecord
 
 instance NFData SentPacketRecord where
   rnf (SentPacketRecord cid cseq t s n) =
@@ -342,6 +352,8 @@ data SentPacketBuffer = SentPacketBuffer
     spbCount :: !Int -- Cached count for O(1) access
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''SentPacketBuffer
 
 instance NFData SentPacketBuffer where
   rnf (SentPacketBuffer e c) = rnf e `seq` rnf c
@@ -382,32 +394,28 @@ spbMember seqNum buf =
     _ -> False
 {-# INLINE spbMember #-}
 
--- | O(1) insert using zero-copy ST mutation.
--- SAFETY: Linear data flow, old buffer never reused.
+-- | O(1) insert using zero-copy mutation.
 spbInsert :: SequenceNum -> SentPacketRecord -> SentPacketBuffer -> SentPacketBuffer
-spbInsert seqNum record buf = runST $ do
-  mvec <- V.unsafeThaw (spbEntries buf) -- 0ns: no copy
+spbInsert seqNum record buf =
   let idx = seqToIdx seqNum
-  old <- MV.unsafeRead mvec idx
-  MV.unsafeWrite mvec idx (RingEntry seqNum record)
-  vec' <- V.unsafeFreeze mvec -- 0ns: no copy
-  let countDelta = case old of
-        RingEmpty -> 1
-        _ -> 0
-  return $! buf {spbEntries = vec', spbCount = spbCount buf + countDelta}
+      (entries', countDelta) = zeroCopyMutate' (spbEntries buf) $ \mvec -> do
+        old <- MV.unsafeRead mvec idx
+        MV.unsafeWrite mvec idx (RingEntry seqNum record)
+        return $! case old of
+          RingEmpty -> 1 :: Int
+          _ -> 0
+   in buf & #spbEntries .~ entries' & #spbCount %~ (+ countDelta)
 {-# INLINE spbInsert #-}
 
 -- | O(1) delete by sequence number.
--- SAFETY: Linear data flow, old buffer never reused.
 spbDelete :: SequenceNum -> SentPacketBuffer -> SentPacketBuffer
 spbDelete seqNum buf =
   case V.unsafeIndex (spbEntries buf) idx of
     RingEntry storedSeq _
-      | storedSeq == seqNum -> runST $ do
-          mvec <- V.unsafeThaw (spbEntries buf) -- 0ns: no copy
-          MV.unsafeWrite mvec idx RingEmpty
-          vec' <- V.unsafeFreeze mvec -- 0ns: no copy
-          return $! buf {spbEntries = vec', spbCount = spbCount buf - 1}
+      | storedSeq == seqNum ->
+          let entries' = zeroCopyMutate (spbEntries buf) $ \mvec ->
+                MV.unsafeWrite mvec idx RingEmpty
+           in buf & #spbEntries .~ entries' & #spbCount %~ subtract 1
     _ -> buf
   where
     idx = seqToIdx seqNum
@@ -432,6 +440,8 @@ data AckResult = AckResult
     arFastRetransmit :: ![(ChannelId, SequenceNum)]
   }
   deriving (Show, Eq)
+
+makeFieldLabelsNoPrefix ''AckResult
 
 instance NFData AckResult where
   rnf (AckResult a f) = rnf a `seq` rnf f
@@ -460,6 +470,8 @@ data ReliableEndpoint = ReliableEndpoint
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''ReliableEndpoint
+
 newReliableEndpoint :: Int -> ReliableEndpoint
 newReliableEndpoint bufferSize =
   ReliableEndpoint
@@ -486,12 +498,12 @@ newReliableEndpoint bufferSize =
     }
 
 withMaxInFlight :: Int -> ReliableEndpoint -> ReliableEndpoint
-withMaxInFlight maxFlight ep = ep {reMaxInFlight = maxFlight}
+withMaxInFlight maxFlight ep = ep & #reMaxInFlight .~ maxFlight
 
 nextSequence :: ReliableEndpoint -> (SequenceNum, ReliableEndpoint)
 nextSequence ep =
   let s = reLocalSequence ep
-   in (s, ep {reLocalSequence = s + 1})
+   in (s, ep & #reLocalSequence .~ (s + 1))
 
 onPacketSent ::
   SequenceNum ->
@@ -514,21 +526,17 @@ onPacketSent seqNum sendTime channelId channelSeq size ep =
             sprSize = size,
             sprNackCount = 0
           }
-   in ep'
-        { reSentPackets = spbInsert seqNum record (reSentPackets ep'),
-          reTotalSent = reTotalSent ep' + 1,
-          reBytesSent = reBytesSent ep' + fromIntegral size
-        }
+   in ep' & #reSentPackets %~ spbInsert seqNum record
+          & #reTotalSent %~ (+ 1)
+          & #reBytesSent %~ (+ fromIntegral size)
 
 evictWorstInFlight :: ReliableEndpoint -> ReliableEndpoint
 evictWorstInFlight ep =
   case spbFindOldest (reSentPackets ep) of
     Nothing -> ep
     Just (worstSeq, _) ->
-      ep
-        { reSentPackets = spbDelete worstSeq (reSentPackets ep),
-          rePacketsEvicted = rePacketsEvicted ep + 1
-        }
+      ep & #reSentPackets %~ spbDelete worstSeq
+         & #rePacketsEvicted %~ (+ 1)
 
 -- | Process received packets - processes multiple sequence numbers with ONE thaw/freeze.
 -- This is the high-performance API for game loops processing many packets per frame.
@@ -537,7 +545,7 @@ onPacketsReceived seqNums ep =
   let validSeqs = filter isValid seqNums
       newBuf = rbInsertMany validSeqs (reReceivedPackets ep)
       (newRemote, newAckBits) = foldl' updateAckState (reRemoteSequence ep, reAckBits ep) validSeqs
-   in ep {reReceivedPackets = newBuf, reRemoteSequence = newRemote, reAckBits = newAckBits}
+   in ep & #reReceivedPackets .~ newBuf & #reRemoteSequence .~ newRemote & #reAckBits .~ newAckBits
   where
     isValid sn =
       let dist = fromIntegral (abs (sequenceDiff sn (reRemoteSequence ep))) :: Word32
@@ -578,11 +586,9 @@ processAcks ackSeq ackBitsVal now ep =
       -- Record loss samples for each ack (success = not lost)
       ep'' = foldl' (\e _ -> recordLossSample False e) ep' acked
       ep''' =
-        ep''
-          { reSentPackets = buf',
-            reTotalAcked = reTotalAcked ep + fromIntegral (length acked),
-            reBytesAcked = reBytesAcked ep + fromIntegral bytesAcked
-          }
+        ep'' & #reSentPackets .~ buf'
+             & #reTotalAcked .~ reTotalAcked ep + fromIntegral (length acked)
+             & #reBytesAcked .~ reBytesAcked ep + fromIntegral bytesAcked
    in (AckResult acked retrans, ep''')
   where
     processOne buf (!acked, !retrans, !muts, !rttSum, !rttCnt, !bytes) i
@@ -610,22 +616,20 @@ processAcks ackSeq ackBitsVal now ep =
                       else retrans
                in (acked, retrans', MutNack idx seqNum record newNack : muts, rttSum, rttCnt, bytes)
 
--- | Apply all mutations in one ST block. Zero-copy thaw/freeze.
--- SAFETY: Linear data flow, old buffer never reused.
+-- | Apply all mutations in one ST block via zero-copy mutation.
 applyMutations :: [BufferMutation] -> SentPacketBuffer -> SentPacketBuffer
 applyMutations [] buf = buf
-applyMutations muts buf = runST $ do
-  mvec <- V.unsafeThaw (spbEntries buf) -- 0ns: no copy
-  deletions <- applyAll mvec muts 0
-  vec' <- V.unsafeFreeze mvec -- 0ns: no copy
-  return $! buf {spbEntries = vec', spbCount = spbCount buf - deletions}
+applyMutations muts buf =
+  let (entries', deletions) = zeroCopyMutate' (spbEntries buf) $ \mvec ->
+        applyAll mvec muts 0
+   in buf & #spbEntries .~ entries' & #spbCount %~ subtract deletions
   where
     applyAll _ [] !dels = return dels
     applyAll mvec (MutDelete idx : rest) !dels = do
       MV.unsafeWrite mvec idx RingEmpty
       applyAll mvec rest (dels + 1)
     applyAll mvec (MutNack idx seqNum record newNack : rest) !dels = do
-      MV.unsafeWrite mvec idx (RingEntry seqNum (record {sprNackCount = newNack}))
+      MV.unsafeWrite mvec idx (RingEntry seqNum (record & #sprNackCount .~ newNack))
       applyAll mvec rest dels
 
 updateRtt :: Double -> ReliableEndpoint -> ReliableEndpoint
@@ -634,21 +638,17 @@ updateRtt sampleMs ep
       let newSrtt = sampleMs
           newRttvar = sampleMs / 2.0
           newRto = clampRto (newSrtt + 4.0 * newRttvar)
-       in ep
-            { reSrtt = newSrtt,
-              reRttvar = newRttvar,
-              reRto = newRto,
-              reHasRttSample = True
-            }
+       in ep & #reSrtt .~ newSrtt
+             & #reRttvar .~ newRttvar
+             & #reRto .~ newRto
+             & #reHasRttSample .~ True
   | otherwise =
       let newRttvar = (1.0 - rttBeta) * reRttvar ep + rttBeta * abs (sampleMs - reSrtt ep)
           newSrtt = (1.0 - rttAlpha) * reSrtt ep + rttAlpha * sampleMs
           newRto = clampRto (newSrtt + 4.0 * newRttvar)
-       in ep
-            { reSrtt = newSrtt,
-              reRttvar = newRttvar,
-              reRto = newRto
-            }
+       in ep & #reSrtt .~ newSrtt
+             & #reRttvar .~ newRttvar
+             & #reRto .~ newRto
 
 clampRto :: Double -> Double
 clampRto rto = max minRtoMs (min maxRtoMs rto)
@@ -658,11 +658,9 @@ recordLossSample lost ep =
   let idx = reLossWindowIndex ep `mod` lossWindowSize
       newWindow = lwSetBit idx lost (reLossWindow ep)
       newCount = min lossWindowSize (reLossWindowCount ep + 1)
-   in ep
-        { reLossWindow = newWindow,
-          reLossWindowIndex = reLossWindowIndex ep + 1,
-          reLossWindowCount = newCount
-        }
+   in ep & #reLossWindow .~ newWindow
+         & #reLossWindowIndex %~ (+ 1)
+         & #reLossWindowCount .~ newCount
 {-# INLINE recordLossSample #-}
 
 getAckInfo :: ReliableEndpoint -> (SequenceNum, Word64)

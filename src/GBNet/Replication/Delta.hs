@@ -1,5 +1,12 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- |
 -- Module      : GBNet.Replication.Delta
@@ -48,7 +55,9 @@ import qualified Data.Sequence as Seq
 import Data.Word (Word16)
 import Foreign.Storable (Storable (..))
 import GBNet.Reliability (MonoTime, elapsedMs)
-import GBNet.Serialize.FastSupport (deserialize, serialize)
+import GBNet.Serialize (deserialize, serialize)
+import Optics ((&), (.~))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Sequence number used to identify baseline snapshots on the wire.
 type BaselineSeq = Word16
@@ -112,6 +121,8 @@ data DeltaTracker a = DeltaTracker
     dtMaxPending :: !Int
   }
 
+makeFieldLabelsNoPrefix ''DeltaTracker
+
 -- | Create a new delta tracker with the given maximum pending snapshot count.
 newDeltaTracker :: Int -> DeltaTracker a
 newDeltaTracker maxPending =
@@ -148,7 +159,7 @@ deltaEncode seq' current tracker =
           then Seq.drop 1 pending Seq.|> (seq', current)
           else pending Seq.|> (seq', current)
 
-      tracker' = tracker {dtPending = pending'}
+      tracker' = tracker & #dtPending .~ pending'
    in (encoded, tracker')
 
 -- | Called when a sequence is ACK'd.
@@ -165,18 +176,14 @@ deltaOnAck seq' tracker =
           pending' =
             Seq.filter (\(s, _) -> baselineSeqDiff s ackSeq >= 0) $
               Seq.drop (idx + 1) (dtPending tracker)
-       in tracker
-            { dtPending = pending',
-              dtConfirmed = Just (ackSeq, snapshot)
-            }
+       in tracker & #dtPending .~ pending'
+                  & #dtConfirmed .~ Just (ackSeq, snapshot)
 
 -- | Reset tracker state (e.g. on reconnect).
 deltaReset :: DeltaTracker a -> DeltaTracker a
 deltaReset tracker =
-  tracker
-    { dtPending = Seq.empty,
-      dtConfirmed = Nothing
-    }
+  tracker & #dtPending .~ Seq.empty
+          & #dtConfirmed .~ Nothing
 
 -- | Returns the confirmed baseline sequence, if any.
 deltaConfirmedSeq :: DeltaTracker a -> Maybe BaselineSeq
@@ -194,6 +201,8 @@ data BaselineManager a = BaselineManager
     -- | Timeout in milliseconds before snapshots expire
     bmTimeoutMs :: !Double
   }
+
+makeFieldLabelsNoPrefix ''BaselineManager
 
 -- | Create a new baseline manager with the given capacity and expiration timeout.
 newBaselineManager ::
@@ -217,7 +226,7 @@ pushBaseline seq' state now manager =
         | Seq.length s >= bmMaxSnapshots manager = Seq.drop 1 s
         | otherwise = s
       snapshots = evictOldest (evictExpired (bmSnapshots manager)) Seq.|> (seq', state, now)
-   in manager {bmSnapshots = snapshots}
+   in manager & #bmSnapshots .~ snapshots
 
 -- | Look up a baseline by sequence number.
 getBaseline :: BaselineSeq -> BaselineManager a -> Maybe a
@@ -230,7 +239,7 @@ getBaseline seq' manager =
 
 -- | Clear all stored baselines.
 baselineReset :: BaselineManager a -> BaselineManager a
-baselineReset manager = manager {bmSnapshots = Seq.empty}
+baselineReset manager = manager & #bmSnapshots .~ Seq.empty
 
 -- | Number of stored baselines.
 baselineCount :: BaselineManager a -> Int

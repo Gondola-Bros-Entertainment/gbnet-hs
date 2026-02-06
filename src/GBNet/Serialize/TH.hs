@@ -1,19 +1,20 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 -- |
--- Module      : GBNet.Serialize.FastTH
+-- Module      : GBNet.Serialize.TH
 -- Description : Template Haskell for zero-allocation Storable instances
 --
 -- Generates 'Storable' instances for product types, enabling zero-allocation
--- serialization via 'fastSerialize'. Nested types compose naturally through
--- the Storable typeclass.
+-- serialization via 'serialize'. Wire format is always little-endian for
+-- cross-platform compatibility. On LE platforms, the generated code compiles
+-- to native memory operations with zero overhead.
 --
 -- Usage:
 --
 -- @
 -- {-# LANGUAGE TemplateHaskell #-}
--- import GBNet.Serialize.FastTH
--- import GBNet.Serialize.FastSupport
+-- import GBNet.Serialize.TH
+-- import GBNet.Serialize
 --
 -- data Vec3 = Vec3 !Float !Float !Float
 -- deriveStorable ''Vec3
@@ -22,20 +23,36 @@
 -- deriveStorable ''Transform  -- nested types just work
 --
 -- -- Serialize any Storable type:
--- fastSerialize (Vec3 1.0 2.0 3.0)        -- :: ByteString
--- fastSerialize (Transform pos rot)       -- :: ByteString
+-- serialize (Vec3 1.0 2.0 3.0)        -- :: ByteString
+-- serialize (Transform pos rot)       -- :: ByteString
 -- @
-module GBNet.Serialize.FastTH
+module GBNet.Serialize.TH
   ( deriveStorable,
-    -- Legacy alias
-    deriveFastSerialize,
   )
 where
 
-import Data.Int (Int8, Int16, Int32, Int64)
-import Data.Word (Word8, Word16, Word32, Word64)
+import Data.Int (Int16, Int32, Int64, Int8)
+import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Ptr (castPtr)
 import Foreign.Storable (Storable (..))
+import GBNet.Serialize
+  ( peekDoubleLE,
+    peekFloatLE,
+    peekInt16LE,
+    peekInt32LE,
+    peekInt64LE,
+    peekWord16LE,
+    peekWord32LE,
+    peekWord64LE,
+    pokeDoubleLE,
+    pokeFloatLE,
+    pokeInt16LE,
+    pokeInt32LE,
+    pokeInt64LE,
+    pokeWord16LE,
+    pokeWord32LE,
+    pokeWord64LE,
+  )
 import Language.Haskell.TH
 
 -- | Byte sizes and alignments of primitive types.
@@ -59,6 +76,34 @@ isPrimitive t = case primitiveSizeAlign t of
   Just _ -> True
   Nothing -> False
 
+-- | Get the LE poke function for a multi-byte primitive.
+-- Returns Nothing for single-byte types (no endianness concern).
+lePokeName :: Type -> Maybe Name
+lePokeName (ConT n)
+  | n == ''Word16 = Just 'pokeWord16LE
+  | n == ''Word32 = Just 'pokeWord32LE
+  | n == ''Word64 = Just 'pokeWord64LE
+  | n == ''Int16 = Just 'pokeInt16LE
+  | n == ''Int32 = Just 'pokeInt32LE
+  | n == ''Int64 = Just 'pokeInt64LE
+  | n == ''Float = Just 'pokeFloatLE
+  | n == ''Double = Just 'pokeDoubleLE
+lePokeName _ = Nothing
+
+-- | Get the LE peek function for a multi-byte primitive.
+-- Returns Nothing for single-byte types (no endianness concern).
+lePeekName :: Type -> Maybe Name
+lePeekName (ConT n)
+  | n == ''Word16 = Just 'peekWord16LE
+  | n == ''Word32 = Just 'peekWord32LE
+  | n == ''Word64 = Just 'peekWord64LE
+  | n == ''Int16 = Just 'peekInt16LE
+  | n == ''Int32 = Just 'peekInt32LE
+  | n == ''Int64 = Just 'peekInt64LE
+  | n == ''Float = Just 'peekFloatLE
+  | n == ''Double = Just 'peekDoubleLE
+lePeekName _ = Nothing
+
 -- | Derive a Storable instance for a product type.
 -- Supports primitives and nested Storable types.
 deriveStorable :: Name -> Q [Dec]
@@ -74,10 +119,6 @@ deriveStorable typeName = do
       let (conName, fieldTypes) = conFieldTypes con
       mkStorableInstance typeName conName fieldTypes
     _ -> fail $ "deriveStorable: " ++ show typeName ++ " is not a data type"
-
--- | Legacy alias for backwards compatibility.
-deriveFastSerialize :: Name -> Q [Dec]
-deriveFastSerialize = deriveStorable
 
 -- | Generate Storable instance.
 mkStorableInstance :: Name -> Name -> [Type] -> Q [Dec]
@@ -172,11 +213,16 @@ mkPokeStmts ptrName varNames fieldTypes = go 0 (zip varNames fieldTypes)
         Nothing -> goAfterNested ptr baseOffset fieldType rest
       return (stmt : restStmts)
 
--- | Generate a single poke statement for a field.
+-- | Generate a single poke statement for a field (LE-aware for multi-byte primitives).
 mkPokeStmt :: Name -> Name -> Type -> Int -> Q Stmt
 mkPokeStmt ptrName varName fieldType offset
-  | isPrimitive fieldType =
-      NoBindS <$> [|pokeByteOff $(varE ptrName) offset $(varE varName)|]
+  | isPrimitive fieldType = case lePokeName fieldType of
+      Nothing ->
+        -- Single-byte type, no endianness concern
+        NoBindS <$> [|pokeByteOff $(varE ptrName) offset $(varE varName)|]
+      Just pokeFn ->
+        -- Multi-byte primitive, use LE helper
+        NoBindS <$> [|$(varE pokeFn) $(varE ptrName) offset $(varE varName)|]
   | otherwise =
       -- Nested Storable type: poke at offset using castPtr
       NoBindS <$> [|poke (castPtr ($(varE ptrName) `plusPtr` offset)) $(varE varName)|]
@@ -186,7 +232,11 @@ mkPokeStmtDynamic :: Name -> Name -> Type -> Int -> Type -> Q Stmt
 mkPokeStmtDynamic ptrName varName fieldType baseOffset prevType = do
   let offsetExpr = [|baseOffset + sizeOf (undefined :: $(return prevType))|]
   if isPrimitive fieldType
-    then NoBindS <$> [|pokeByteOff $(varE ptrName) ($offsetExpr) $(varE varName)|]
+    then case lePokeName fieldType of
+      Nothing ->
+        NoBindS <$> [|pokeByteOff $(varE ptrName) ($offsetExpr) $(varE varName)|]
+      Just pokeFn ->
+        NoBindS <$> [|$(varE pokeFn) $(varE ptrName) ($offsetExpr) $(varE varName)|]
     else NoBindS <$> [|poke (castPtr ($(varE ptrName) `plusPtr` ($offsetExpr))) $(varE varName)|]
 
 -- | Generate peek body.
@@ -227,10 +277,12 @@ mkPeekExpr ptrName conName fieldTypes = do
         Nothing ->
           goAfterNested ptr baseOffset t ts newAcc
 
--- | Generate peek for a single field.
+-- | Generate peek for a single field (LE-aware for multi-byte primitives).
 mkPeekField :: Name -> Type -> Int -> Q Exp
 mkPeekField ptrName fieldType offset
-  | isPrimitive fieldType = [|peekByteOff $(varE ptrName) offset|]
+  | isPrimitive fieldType = case lePeekName fieldType of
+      Nothing -> [|peekByteOff $(varE ptrName) offset|]
+      Just peekFn -> [|$(varE peekFn) $(varE ptrName) offset|]
   | otherwise = [|peek (castPtr ($(varE ptrName) `plusPtr` offset))|]
 
 -- | Generate peek with dynamic offset.
@@ -238,7 +290,9 @@ mkPeekFieldDynamic :: Name -> Type -> Int -> Type -> Q Exp
 mkPeekFieldDynamic ptrName fieldType baseOffset prevType = do
   let offsetExpr = [|baseOffset + sizeOf (undefined :: $(return prevType))|]
   if isPrimitive fieldType
-    then [|peekByteOff $(varE ptrName) ($offsetExpr)|]
+    then case lePeekName fieldType of
+      Nothing -> [|peekByteOff $(varE ptrName) ($offsetExpr)|]
+      Just peekFn -> [|$(varE peekFn) $(varE ptrName) ($offsetExpr)|]
     else [|peek (castPtr ($(varE ptrName) `plusPtr` ($offsetExpr)))|]
 
 -- | Extract constructor name and field types.

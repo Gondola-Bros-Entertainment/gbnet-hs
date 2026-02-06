@@ -1,3 +1,11 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 -- |
 -- Module      : GBNet.Socket
 -- Description : Non-blocking UDP socket wrapper with statistics
@@ -29,6 +37,7 @@ import GBNet.Stats (SocketStats (..), defaultSocketStats)
 import Network.Socket (SockAddr, Socket)
 import qualified Network.Socket as NS
 import qualified Network.Socket.ByteString as NSB
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Maximum size of a single UDP datagram.
 maxUdpPacketSize :: Int
@@ -48,6 +57,8 @@ data UdpSocket = UdpSocket
     usStats :: !SocketStats
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''UdpSocket
 
 -- | Create a new UDP socket bound to the specified address.
 -- Uses bracket-style cleanup to avoid leaking the socket FD if bind fails.

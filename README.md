@@ -1,7 +1,7 @@
 <div align="center">
 <h1>gbnet-hs</h1>
 <p><strong>Transport-Level Networking for Haskell</strong></p>
-<p>Bitpacked serialization. Reliable UDP transport. Effect-abstracted design for pure testing.</p>
+<p>Zero-copy Storable serialization. Reliable UDP transport. Effect-abstracted design for pure testing.</p>
 <p><a href="#quick-start">Quick Start</a> · <a href="#networking">Networking</a> · <a href="#serialization">Serialization</a> · <a href="#testing">Testing</a> · <a href="#architecture">Architecture</a></p>
 <p>
 
@@ -18,7 +18,7 @@
 
 A transport-level networking library providing:
 
-- **Bitpacked serialization** — Sub-byte encoding for bandwidth efficiency
+- **Zero-copy serialization** — Storable-based, C-level speed (14ns per type)
 - **Reliable UDP** — Connection-oriented with ACKs, retransmits, and ordering
 - **Unified Peer API** — Same code for client, server, or P2P mesh
 - **Effect abstraction** — `MonadNetwork` typeclass enables pure deterministic testing
@@ -272,8 +272,8 @@ simulateLoss 0.1
 | `GBNet.Peer` | `NetPeer`, `peerTick`, connection management |
 | `GBNet.Congestion` | Dual-layer congestion control and backpressure |
 | `GBNet.TestNet` | Pure test network, `TestWorld` for multi-peer |
-| `GBNet.Serialize.FastTH` | `deriveStorable` TH for zero-copy serialization |
-| `GBNet.Serialize.FastSupport` | `serialize`/`deserialize` pure functions |
+| `GBNet.Serialize.TH` | `deriveStorable` TH for zero-copy serialization |
+| `GBNet.Serialize` | `serialize`/`deserialize` pure functions |
 
 ### Explicit Imports (for larger codebases)
 

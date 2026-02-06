@@ -1,4 +1,12 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- |
 -- Module      : GBNet.Fragment
@@ -45,19 +53,23 @@ module GBNet.Fragment
 where
 
 import Control.Monad (when)
-import Control.Monad.State.Strict (gets, modify', runState)
+import Control.Monad.State.Strict (modify', runState)
 import Data.Bits (shiftL, shiftR, (.|.))
 import qualified Data.ByteString as BS
 import Data.ByteString.Internal (unsafeCreate)
 import qualified Data.ByteString.Unsafe as BSU
-import Foreign.Storable (pokeByteOff)
 import Data.List (minimumBy)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Ord (comparing)
 import Data.Word (Word32, Word8)
+import Foreign.Storable (pokeByteOff)
 import GBNet.Reliability (MonoTime, elapsedMs)
 import GBNet.Types (MessageId (..))
+import Optics ((&), (.~), (%~))
+import Optics.State (use)
+import Optics.State.Operators ((%=))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- Constants
 
@@ -96,6 +108,8 @@ data FragmentHeader = FragmentHeader
     fhFragmentCount :: !Word8
   }
   deriving (Eq, Show)
+
+makeFieldLabelsNoPrefix ''FragmentHeader
 
 -- | Serialize fragment header to bytes.
 -- Uses zero-allocation direct memory writes.
@@ -164,6 +178,8 @@ data FragmentBuffer = FragmentBuffer
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''FragmentBuffer
+
 -- | Create a new fragment buffer.
 newFragmentBuffer :: Word8 -> MonoTime -> FragmentBuffer
 newFragmentBuffer count now =
@@ -181,10 +197,8 @@ insertFragment idx dat buf
   | Map.member idx (fbFragments buf) = (isComplete buf, buf) -- Already have this fragment
   | otherwise =
       let buf' =
-            buf
-              { fbFragments = Map.insert idx dat (fbFragments buf),
-                fbTotalSize = fbTotalSize buf + BS.length dat
-              }
+            buf & #fbFragments %~ Map.insert idx dat
+                & #fbTotalSize %~ (+ BS.length dat)
        in (isComplete buf', buf')
 
 -- | Check if all fragments received.
@@ -209,6 +223,8 @@ data FragmentAssembler = FragmentAssembler
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''FragmentAssembler
+
 -- | Create a new fragment assembler.
 newFragmentAssembler :: Double -> Int -> FragmentAssembler
 newFragmentAssembler timeoutMs maxSize =
@@ -230,37 +246,31 @@ processFragment dat now = runState $ do
           fragSize = BS.length fragData
           msgId = fhMessageId header
       -- Check if existing buffer has mismatched count
-      buffers <- gets faBuffers
+      buffers <- use #faBuffers
       case Map.lookup msgId buffers of
         Just existing
           | fbFragmentCount existing /= fhFragmentCount header ->
               pure Nothing
         _ -> do
           -- Enforce memory limit
-          currentSize <- gets faCurrentBufferSize
-          maxSize <- gets faMaxBufferSize
+          currentSize <- use #faCurrentBufferSize
+          maxSize <- use #faMaxBufferSize
           when (currentSize + fragSize > maxSize) $
             modify' expireOldest
           -- Get or create buffer
-          buf <- gets $ \s ->
-            case Map.lookup msgId (faBuffers s) of
-              Just b -> b
-              Nothing -> newFragmentBuffer (fhFragmentCount header) now
+          bufs <- use #faBuffers
+          let buf = case Map.lookup msgId bufs of
+                      Just b -> b
+                      Nothing -> newFragmentBuffer (fhFragmentCount header) now
           -- Insert fragment
           let (complete, buf') = insertFragment (fhFragmentIndex header) fragData buf
-          modify' $ \s ->
-            s
-              { faBuffers = Map.insert msgId buf' (faBuffers s),
-                faCurrentBufferSize = faCurrentBufferSize s + fragSize
-              }
+          #faBuffers %= Map.insert msgId buf'
+          #faCurrentBufferSize %= (+ fragSize)
           if complete
             then do
               let result = assembleFragments buf'
-              modify' $ \s ->
-                s
-                  { faBuffers = Map.delete msgId (faBuffers s),
-                    faCurrentBufferSize = faCurrentBufferSize s - fbTotalSize buf'
-                  }
+              #faBuffers %= Map.delete msgId
+              #faCurrentBufferSize %= subtract (fbTotalSize buf')
               pure result
             else pure Nothing
 
@@ -270,10 +280,8 @@ cleanupFragments now asm =
   let timeout = faTimeoutMs asm
       (expired, kept) = Map.partition (\buf -> elapsedMs (fbCreatedAt buf) now >= timeout) (faBuffers asm)
       removedSize = sum $ map fbTotalSize $ Map.elems expired
-   in asm
-        { faBuffers = kept,
-          faCurrentBufferSize = faCurrentBufferSize asm - removedSize
-        }
+   in asm & #faBuffers .~ kept
+          & #faCurrentBufferSize %~ subtract removedSize
 
 -- | Expire the oldest buffer to make room.
 expireOldest :: FragmentAssembler -> FragmentAssembler
@@ -281,10 +289,8 @@ expireOldest asm =
   case findOldest (faBuffers asm) of
     Nothing -> asm
     Just (oldestId, oldestBuf) ->
-      asm
-        { faBuffers = Map.delete oldestId (faBuffers asm),
-          faCurrentBufferSize = faCurrentBufferSize asm - fbTotalSize oldestBuf
-        }
+      asm & #faBuffers %~ Map.delete oldestId
+          & #faCurrentBufferSize %~ subtract (fbTotalSize oldestBuf)
   where
     findOldest :: Map MessageId FragmentBuffer -> Maybe (MessageId, FragmentBuffer)
     findOldest m =
@@ -312,6 +318,8 @@ data MtuDiscovery = MtuDiscovery
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''MtuDiscovery
+
 -- | Create MTU discovery with custom bounds.
 newMtuDiscovery :: Int -> Int -> MtuDiscovery
 newMtuDiscovery minM maxM =
@@ -336,9 +344,9 @@ defaultMtuDiscovery = newMtuDiscovery minMtu maxMtu
 nextProbe :: MonoTime -> MtuDiscovery -> (Maybe Int, MtuDiscovery)
 nextProbe now md
   | mdState md == MtuComplete || mdAttempts md >= mdMaxAttempts md =
-      (Nothing, md {mdState = MtuComplete})
+      (Nothing, md & #mdState .~ MtuComplete)
   | mdMaxMtu md - mdMinMtu md <= mtuConvergenceThreshold =
-      (Nothing, md {mdState = MtuComplete})
+      (Nothing, md & #mdState .~ MtuComplete)
   | otherwise =
       case mdLastProbeTime md of
         Just lastTime
@@ -347,26 +355,22 @@ nextProbe now md
         _ ->
           let probe = (mdMinMtu md + mdMaxMtu md) `div` 2
               md' =
-                md
-                  { mdCurrentProbe = probe,
-                    mdLastProbeTime = Just now,
-                    mdAttempts = mdAttempts md + 1
-                  }
+                md & #mdCurrentProbe .~ probe
+                   & #mdLastProbeTime .~ Just now
+                   & #mdAttempts %~ (+ 1)
            in (Just probe, md')
 
 -- | Called when probe succeeded (ack received).
 onProbeSuccess :: Int -> MtuDiscovery -> MtuDiscovery
 onProbeSuccess size md
   | size >= mdMinMtu md =
-      md
-        { mdDiscoveredMtu = size,
-          mdMinMtu = size
-        }
+      md & #mdDiscoveredMtu .~ size
+         & #mdMinMtu .~ size
   | otherwise = md
 
 -- | Called when probe timed out (too large).
 onProbeTimeout :: MtuDiscovery -> MtuDiscovery
-onProbeTimeout md = md {mdMaxMtu = mdCurrentProbe md}
+onProbeTimeout md = md & #mdMaxMtu .~ mdCurrentProbe md
 
 -- | Check if current probe timed out.
 checkProbeTimeout :: MonoTime -> MtuDiscovery -> MtuDiscovery

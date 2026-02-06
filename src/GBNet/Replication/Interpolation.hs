@@ -1,3 +1,12 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 -- |
 -- Module      : GBNet.Replication.Interpolation
 -- Description : Snapshot interpolation for smooth client-side rendering
@@ -48,6 +57,8 @@ where
 
 import Data.Sequence (Seq, ViewL (..), ViewR (..), (|>))
 import qualified Data.Sequence as Seq
+import Optics ((&), (.~))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Default number of snapshots to buffer before interpolation begins.
 defaultBufferDepth :: Int
@@ -79,6 +90,8 @@ data TimestampedSnapshot a = TimestampedSnapshot
   }
   deriving (Show)
 
+makeFieldLabelsNoPrefix ''TimestampedSnapshot
+
 -- | Ring buffer of timestamped snapshots with interpolation sampling.
 data SnapshotBuffer a = SnapshotBuffer
   { sbSnapshots :: !(Seq (TimestampedSnapshot a)),
@@ -86,6 +99,8 @@ data SnapshotBuffer a = SnapshotBuffer
     sbPlaybackDelayMs :: !Double
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''SnapshotBuffer
 
 -- | Create a snapshot buffer with default settings.
 newSnapshotBuffer :: SnapshotBuffer a
@@ -120,7 +135,7 @@ pushSnapshot timestamp state buffer =
       case Seq.viewr snapshots of
         EmptyR ->
           -- First snapshot
-          buffer {sbSnapshots = Seq.singleton (TimestampedSnapshot timestamp state)}
+          buffer & #sbSnapshots .~ Seq.singleton (TimestampedSnapshot timestamp state)
         _ :> last' ->
           if timestamp <= tsTimestamp last'
             then buffer -- Drop out-of-order
@@ -132,7 +147,7 @@ pushSnapshot timestamp state buffer =
                     if Seq.length snapshots' > maxEntries
                       then Seq.drop (Seq.length snapshots' - maxEntries) snapshots'
                       else snapshots'
-               in buffer {sbSnapshots = trimmed}
+               in buffer & #sbSnapshots .~ trimmed
 
 -- | Sample an interpolated state at @renderTime@ (in milliseconds).
 --
@@ -194,7 +209,7 @@ snapshotReady buffer = Seq.length (sbSnapshots buffer) >= sbBufferDepth buffer
 
 -- | Clear all buffered snapshots.
 snapshotReset :: SnapshotBuffer a -> SnapshotBuffer a
-snapshotReset buffer = buffer {sbSnapshots = Seq.empty}
+snapshotReset buffer = buffer & #sbSnapshots .~ Seq.empty
 
 -- | Get the playback delay in milliseconds.
 snapshotPlaybackDelayMs :: SnapshotBuffer a -> Double
@@ -202,7 +217,7 @@ snapshotPlaybackDelayMs = sbPlaybackDelayMs
 
 -- | Set the playback delay in milliseconds.
 setPlaybackDelayMs :: Double -> SnapshotBuffer a -> SnapshotBuffer a
-setPlaybackDelayMs delay buffer = buffer {sbPlaybackDelayMs = delay}
+setPlaybackDelayMs delay buffer = buffer & #sbPlaybackDelayMs .~ delay
 
 -- Common instances
 

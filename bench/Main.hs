@@ -63,8 +63,8 @@ import GBNet.Reliability
     updateRtt,
   )
 import GBNet.Security (appendCrc32, validateAndStripCrc32)
-import GBNet.Serialize.FastSupport (castPtr, plusPtr, serialize)
-import GBNet.Serialize.FastTH (deriveStorable)
+import GBNet.Serialize (castPtr, plusPtr, serialize)
+import GBNet.Serialize.TH (deriveStorable)
 import GBNet.Types (ChannelId (..), MessageId (..), SequenceNum (..))
 
 --------------------------------------------------------------------------------

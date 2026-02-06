@@ -1,6 +1,6 @@
 -- |
 -- Module      : GBNet
--- Description : Game networking library with bitpacked serialization
+-- Description : Game networking library with zero-copy Storable serialization
 --
 -- This is the main entry point for gbnet-hs. Import this module for
 -- convenient access to the full API.
@@ -137,7 +137,6 @@ module GBNet
     serialize,
     deserialize,
     deriveStorable,
-    Storable (..),
 
     -- * Statistics
     NetworkStats (..),
@@ -197,9 +196,9 @@ import GBNet.Replication.Interest (GridInterest, InterestManager (..), RadiusInt
 import qualified GBNet.Replication.Interest as Interest
 import GBNet.Replication.Interpolation (Interpolatable (..), SnapshotBuffer, newSnapshotBuffer, newSnapshotBufferWithConfig, pushSnapshot, sampleSnapshot, snapshotReady)
 import GBNet.Replication.Priority (PriorityAccumulator, accumulate, drainTop, getPriority, newPriorityAccumulator, register, unregister)
-import GBNet.Serialize.FastSupport (Storable (..), deserialize, serialize)
-import GBNet.Serialize.FastTH (deriveStorable)
-import GBNet.Simulator (NetworkSimulator (..), newNetworkSimulator, simulatorPendingCount, simulatorProcessSend, simulatorReceiveReady)
+import GBNet.Serialize (deserialize, serialize)
+import GBNet.Serialize.TH (deriveStorable)
+import GBNet.Simulator (NetworkSimulator, newNetworkSimulator, simulatorConfig, simulatorPendingCount, simulatorProcessSend, simulatorReceiveReady)
 import GBNet.Socket (SocketError (..), UdpSocket)
 import GBNet.Stats (CongestionLevel (..), NetworkStats (..))
 import GBNet.TestNet
@@ -249,7 +248,3 @@ filterRelevant mgr observerPos =
 -- | Get the network configuration from a peer.
 peerConfig :: NetPeer -> NetworkConfig
 peerConfig = npConfig
-
--- | Get the simulation configuration from a simulator.
-simulatorConfig :: NetworkSimulator -> SimulationConfig
-simulatorConfig = nsConfig

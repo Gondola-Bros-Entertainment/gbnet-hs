@@ -1,3 +1,12 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 -- |
 -- Module      : GBNet.Replication.Priority
 -- Description : Priority accumulator for bandwidth-limited entity replication
@@ -43,6 +52,8 @@ import Data.List (sortBy)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Ord (Down (..), comparing)
+import Optics ((&), (.~), (%~))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Per-entity priority tracking entry.
 data PriorityEntry = PriorityEntry
@@ -50,6 +61,8 @@ data PriorityEntry = PriorityEntry
     peAccumulated :: !Float
   }
   deriving (Show)
+
+makeFieldLabelsNoPrefix ''PriorityEntry
 
 -- | Accumulates priority per entity and drains the highest-priority entities
 -- that fit within a byte budget.
@@ -88,7 +101,7 @@ accumulate :: Float -> PriorityAccumulator id -> PriorityAccumulator id
 accumulate dt (PriorityAccumulator entries) =
   PriorityAccumulator $
     Map.map
-      (\e -> e {peAccumulated = peAccumulated e + peBase e * dt})
+      (\e -> e & #peAccumulated %~ (+ (peBase e * dt)))
       entries
 
 -- | Apply a priority modifier to a specific entity.
@@ -99,7 +112,7 @@ applyModifier :: (Ord id) => id -> Float -> PriorityAccumulator id -> PriorityAc
 applyModifier entityId modifier (PriorityAccumulator entries) =
   PriorityAccumulator $
     Map.adjust
-      (\e -> e {peAccumulated = peAccumulated e * modifier})
+      (\e -> e & #peAccumulated %~ (* modifier))
       entityId
       entries
 
@@ -128,7 +141,7 @@ drainTop budgetBytes sizeFunc (PriorityAccumulator entries) =
       -- Reset priority for selected entities
       entries' =
         foldr
-          (Map.adjust (\e -> e {peAccumulated = 0.0}))
+          (Map.adjust (#peAccumulated .~ 0.0))
           entries
           selected
    in (selected, PriorityAccumulator entries')
