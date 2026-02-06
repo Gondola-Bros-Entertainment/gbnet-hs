@@ -76,7 +76,7 @@ import qualified Data.Sequence as Seq
 import Data.Word (Word64, Word8)
 import GBNet.Reliability (MonoTime, elapsedMs)
 import GBNet.Stats (CongestionLevel (..))
-import Optics ((&), (.~), (%~))
+import Optics ((%~), (&), (.~), (?~))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- Constants
@@ -178,8 +178,11 @@ newCongestionController baseSendRate lossThreshold rttThresholdMs recoveryTimeMs
 ccRefillBudget :: Int -> CongestionController -> CongestionController
 ccRefillBudget mtu cc =
   let bytesPerTick = floor (ccCurrentSendRate cc * fromIntegral mtu)
-   in cc & #ccBytesPerTick .~ bytesPerTick
-         & #ccBudgetBytesRemaining .~ bytesPerTick
+   in cc
+        & #ccBytesPerTick
+        .~ bytesPerTick
+        & #ccBudgetBytesRemaining
+        .~ bytesPerTick
 
 -- | Deduct bytes from the send budget.
 ccDeductBudget :: Int -> CongestionController -> CongestionController
@@ -203,11 +206,17 @@ ccUpdate packetLoss rttMs now cc =
                     Nothing -> 1.0
                   newRecovery = min maxRecoverySecs (ccAdaptiveRecoverySecs cc * recoveryMult)
                   newRate = max minSendRate (ccCurrentSendRate cc * congestionRateReduction)
-               in cc & #ccMode .~ CongestionBad
-                     & #ccLastBadEntry .~ Just now
-                     & #ccCurrentSendRate .~ newRate
-                     & #ccGoodConditionsStart .~ Nothing
-                     & #ccAdaptiveRecoverySecs .~ newRecovery
+               in cc
+                    & #ccMode
+                    .~ CongestionBad
+                    & #ccLastBadEntry
+                    ?~ now
+                    & #ccCurrentSendRate
+                    .~ newRate
+                    & #ccGoodConditionsStart
+                    .~ Nothing
+                    & #ccAdaptiveRecoverySecs
+                    .~ newRecovery
           | otherwise ->
               -- Additive increase: ramp rate up toward max capacity
               let maxRate = ccBaseSendRate cc * maxSendRateMultiplier
@@ -224,23 +233,31 @@ ccUpdate packetLoss rttMs now cc =
                                     max
                                       minRecoverySecs
                                       (ccAdaptiveRecoverySecs cc' / (2.0 ^ intervals))
-                               in cc' & #ccAdaptiveRecoverySecs .~ newRecovery
-                                      & #ccLastGoodEntry .~ Just now
+                               in cc'
+                                    & #ccAdaptiveRecoverySecs
+                                    .~ newRecovery
+                                    & #ccLastGoodEntry
+                                    ?~ now
                             else cc'
                     Nothing -> cc'
         CongestionBad
           | not isBad ->
               case ccGoodConditionsStart cc of
                 Nothing ->
-                  cc & #ccGoodConditionsStart .~ Just now
+                  cc & #ccGoodConditionsStart ?~ now
                 Just start ->
                   let requiredMs = ccAdaptiveRecoverySecs cc * 1000.0
                    in if elapsedMs start now >= requiredMs
                         then
-                          cc & #ccMode .~ CongestionGood
-                             & #ccLastGoodEntry .~ Just now
-                             & #ccCurrentSendRate .~ ccBaseSendRate cc
-                             & #ccGoodConditionsStart .~ Nothing
+                          cc
+                            & #ccMode
+                            .~ CongestionGood
+                            & #ccLastGoodEntry
+                            ?~ now
+                            & #ccCurrentSendRate
+                            .~ ccBaseSendRate cc
+                            & #ccGoodConditionsStart
+                            .~ Nothing
                         else cc
           | otherwise ->
               cc & #ccGoodConditionsStart .~ Nothing
@@ -330,9 +347,13 @@ cwOnAck bytes cw =
 cwOnLoss :: CongestionWindow -> CongestionWindow
 cwOnLoss cw =
   let newSsthresh = max (fromIntegral minCwndBytes) (cwCwnd cw / 2.0)
-   in cw & #cwSsthresh .~ newSsthresh
-         & #cwCwnd .~ newSsthresh
-         & #cwPhase .~ Recovery
+   in cw
+        & #cwSsthresh
+        .~ newSsthresh
+        & #cwCwnd
+        .~ newSsthresh
+        & #cwPhase
+        .~ Recovery
 
 -- | Exit recovery and return to avoidance.
 cwExitRecovery :: CongestionWindow -> CongestionWindow
@@ -343,8 +364,11 @@ cwExitRecovery cw
 -- | Record bytes sent.
 cwOnSend :: Int -> MonoTime -> CongestionWindow -> CongestionWindow
 cwOnSend bytes now cw =
-  cw & #cwBytesInFlight %~ (+ fromIntegral bytes)
-     & #cwLastSendTime .~ Just now
+  cw
+    & #cwBytesInFlight
+    %~ (+ fromIntegral bytes)
+    & #cwLastSendTime
+    ?~ now
 
 -- | Check if a packet can be sent.
 cwCanSend :: Int -> CongestionWindow -> Bool
@@ -381,9 +405,13 @@ cwSlowStartRestart rtoMs now cw =
     Just lastSend
       | elapsedMs lastSend now > ssrIdleThreshold * rtoMs ->
           let initialCwnd = fromIntegral (initialCwndPackets * cwMtu cw)
-           in cw & #cwPhase .~ SlowStart
-                 & #cwCwnd .~ initialCwnd
-                 & #cwSsthresh .~ cwCwnd cw
+           in cw
+                & #cwPhase
+                .~ SlowStart
+                & #cwCwnd
+                .~ initialCwnd
+                & #cwSsthresh
+                .~ cwCwnd cw
       | otherwise -> cw
   where
     -- Idle for more than 2 RTOs triggers restart

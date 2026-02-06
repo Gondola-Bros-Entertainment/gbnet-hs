@@ -52,7 +52,7 @@ import Data.List (sortBy)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Ord (Down (..), comparing)
-import Optics ((&), (.~), (%~))
+import Optics ((%~), (&), (.~))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Per-entity priority tracking entry.

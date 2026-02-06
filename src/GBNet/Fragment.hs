@@ -66,7 +66,7 @@ import Data.Word (Word32, Word8)
 import Foreign.Storable (pokeByteOff)
 import GBNet.Reliability (MonoTime, elapsedMs)
 import GBNet.Types (MessageId (..))
-import Optics ((&), (.~), (%~))
+import Optics ((%~), (&), (.~), (?~))
 import Optics.State (use)
 import Optics.State.Operators ((%=))
 import Optics.TH (makeFieldLabelsNoPrefix)
@@ -197,8 +197,11 @@ insertFragment idx dat buf
   | Map.member idx (fbFragments buf) = (isComplete buf, buf) -- Already have this fragment
   | otherwise =
       let buf' =
-            buf & #fbFragments %~ Map.insert idx dat
-                & #fbTotalSize %~ (+ BS.length dat)
+            buf
+              & #fbFragments
+              %~ Map.insert idx dat
+              & #fbTotalSize
+              %~ (+ BS.length dat)
        in (isComplete buf', buf')
 
 -- | Check if all fragments received.
@@ -260,8 +263,8 @@ processFragment dat now = runState $ do
           -- Get or create buffer
           bufs <- use #faBuffers
           let buf = case Map.lookup msgId bufs of
-                      Just b -> b
-                      Nothing -> newFragmentBuffer (fhFragmentCount header) now
+                Just b -> b
+                Nothing -> newFragmentBuffer (fhFragmentCount header) now
           -- Insert fragment
           let (complete, buf') = insertFragment (fhFragmentIndex header) fragData buf
           #faBuffers %= Map.insert msgId buf'
@@ -280,8 +283,11 @@ cleanupFragments now asm =
   let timeout = faTimeoutMs asm
       (expired, kept) = Map.partition (\buf -> elapsedMs (fbCreatedAt buf) now >= timeout) (faBuffers asm)
       removedSize = sum $ map fbTotalSize $ Map.elems expired
-   in asm & #faBuffers .~ kept
-          & #faCurrentBufferSize %~ subtract removedSize
+   in asm
+        & #faBuffers
+        .~ kept
+        & #faCurrentBufferSize
+        %~ subtract removedSize
 
 -- | Expire the oldest buffer to make room.
 expireOldest :: FragmentAssembler -> FragmentAssembler
@@ -289,8 +295,11 @@ expireOldest asm =
   case findOldest (faBuffers asm) of
     Nothing -> asm
     Just (oldestId, oldestBuf) ->
-      asm & #faBuffers %~ Map.delete oldestId
-          & #faCurrentBufferSize %~ subtract (fbTotalSize oldestBuf)
+      asm
+        & #faBuffers
+        %~ Map.delete oldestId
+        & #faCurrentBufferSize
+        %~ subtract (fbTotalSize oldestBuf)
   where
     findOldest :: Map MessageId FragmentBuffer -> Maybe (MessageId, FragmentBuffer)
     findOldest m =
@@ -355,17 +364,24 @@ nextProbe now md
         _ ->
           let probe = (mdMinMtu md + mdMaxMtu md) `div` 2
               md' =
-                md & #mdCurrentProbe .~ probe
-                   & #mdLastProbeTime .~ Just now
-                   & #mdAttempts %~ (+ 1)
+                md
+                  & #mdCurrentProbe
+                  .~ probe
+                  & #mdLastProbeTime
+                  ?~ now
+                  & #mdAttempts
+                  %~ (+ 1)
            in (Just probe, md')
 
 -- | Called when probe succeeded (ack received).
 onProbeSuccess :: Int -> MtuDiscovery -> MtuDiscovery
 onProbeSuccess size md
   | size >= mdMinMtu md =
-      md & #mdDiscoveredMtu .~ size
-         & #mdMinMtu .~ size
+      md
+        & #mdDiscoveredMtu
+        .~ size
+        & #mdMinMtu
+        .~ size
   | otherwise = md
 
 -- | Called when probe timed out (too large).

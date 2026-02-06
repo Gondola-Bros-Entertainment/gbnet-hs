@@ -41,7 +41,7 @@ import GBNet.Reliability (elapsedMs)
 import GBNet.Util (nextRandom)
 import Optics ((&), (.~))
 import Optics.State (use)
-import Optics.State.Operators ((.=), (%=))
+import Optics.State.Operators ((%=), (.=))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Maximum extra delay (ms) applied to out-of-order packets.

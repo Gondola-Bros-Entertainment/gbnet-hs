@@ -123,9 +123,9 @@ import GBNet.Stats (NetworkStats)
 import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Util (nextRandom)
 import Network.Socket (PortNumber, SockAddr (..))
-import Optics ((&), (.~), (%~))
+import Optics ((%~), (&), (.~))
 import Optics.State (use)
-import Optics.State.Operators ((.=), (%=))
+import Optics.State.Operators ((%=), (.=))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Peer identifier wrapping a socket address.
@@ -360,8 +360,11 @@ peerConnect peerId now peer
                 pcLastRetry = now
               }
           peer' =
-            peer & #npPending %~ Map.insert peerId pending
-                 & #npRngState .~ rng'
+            peer
+              & #npPending
+              %~ Map.insert peerId pending
+              & #npRngState
+              .~ rng'
        in -- Queue connection request
           queueControlPacket ConnectionRequest BS.empty peerId peer'
 
@@ -790,11 +793,16 @@ handleMigrationS newPeerId pkt now = do
             _ -> do
               -- Perform migration
               modify' $ \p ->
-                p & #npConnections %~ (Map.insert newPeerId conn . Map.delete oldPeerId)
-                  & #npMigrationCooldowns %~ Map.insert migrationToken now
-                  & #npFragmentAssemblers %~ (\fa -> case Map.lookup oldPeerId fa of
-                      Nothing -> fa
-                      Just asm -> Map.insert newPeerId asm $ Map.delete oldPeerId fa)
+                p
+                  & #npConnections
+                  %~ (Map.insert newPeerId conn . Map.delete oldPeerId)
+                  & #npMigrationCooldowns
+                  %~ Map.insert migrationToken now
+                  & #npFragmentAssemblers
+                  %~ ( \fa -> case Map.lookup oldPeerId fa of
+                         Nothing -> fa
+                         Just asm -> Map.insert newPeerId asm $ Map.delete oldPeerId fa
+                     )
               let event = PeerMigrated oldPeerId newPeerId
               -- Now process the payload with the new peer ID
               payloadEvents <- handlePayloadS newPeerId pkt now

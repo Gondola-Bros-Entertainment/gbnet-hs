@@ -53,10 +53,10 @@ import GBNet.Socket
     socketSendTo,
   )
 import GBNet.Stats ()
-import Optics ((&), (.~), (%~), (%))
-import Optics.TH (makeFieldLabelsNoPrefix)
 import Network.Socket (SockAddr, Socket)
 import qualified Network.Socket.ByteString as NSB
+import Optics ((%), (%~), (&), (.~), (?~))
+import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Network state carried by NetT.
 --
@@ -171,12 +171,17 @@ instance MonadNetwork (NetT IO) where
         now <- liftIO getMonoTimeIO
         let len = BS.length dat
         modifyNetState $
-          #nsSocket % #usStats %~
-            ( \stats -> stats
-                & #ssBytesReceived %~ (+ fromIntegral len)
-                & #ssPacketsReceived %~ (+ 1)
-                & #ssLastReceiveTime .~ Just now
-            )
+          #nsSocket
+            % #usStats
+            %~ ( \stats ->
+                   stats
+                     & #ssBytesReceived
+                     %~ (+ fromIntegral len)
+                     & #ssPacketsReceived
+                     %~ (+ 1)
+                     & #ssLastReceiveTime
+                     ?~ now
+               )
         -- Validate CRC before returning
         case validateAndStripCrc32 dat of
           Nothing -> do

@@ -56,7 +56,7 @@ import Data.Word (Word16)
 import Foreign.Storable (Storable (..))
 import GBNet.Reliability (MonoTime, elapsedMs)
 import GBNet.Serialize (deserialize, serialize)
-import Optics ((&), (.~))
+import Optics ((&), (.~), (?~))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Sequence number used to identify baseline snapshots on the wire.
@@ -176,14 +176,20 @@ deltaOnAck seq' tracker =
           pending' =
             Seq.filter (\(s, _) -> baselineSeqDiff s ackSeq >= 0) $
               Seq.drop (idx + 1) (dtPending tracker)
-       in tracker & #dtPending .~ pending'
-                  & #dtConfirmed .~ Just (ackSeq, snapshot)
+       in tracker
+            & #dtPending
+            .~ pending'
+            & #dtConfirmed
+            ?~ (ackSeq, snapshot)
 
 -- | Reset tracker state (e.g. on reconnect).
 deltaReset :: DeltaTracker a -> DeltaTracker a
 deltaReset tracker =
-  tracker & #dtPending .~ Seq.empty
-          & #dtConfirmed .~ Nothing
+  tracker
+    & #dtPending
+    .~ Seq.empty
+    & #dtConfirmed
+    .~ Nothing
 
 -- | Returns the confirmed baseline sequence, if any.
 deltaConfirmedSeq :: DeltaTracker a -> Maybe BaselineSeq

@@ -55,9 +55,9 @@ import qualified Data.Sequence as Seq
 import Data.Word (Word64)
 import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime (..), NetError (..))
 import Network.Socket (SockAddr)
-import Optics ((&), (.~), (%~), (%))
+import Optics ((%), (%~), (&), (.~))
 import Optics.State (use)
-import Optics.State.Operators ((.=), (%=))
+import Optics.State.Operators ((%=), (.=))
 import Optics.TH (makeFieldLabelsNoPrefix)
 import System.Random (StdGen, mkStdGen, randomR)
 

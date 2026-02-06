@@ -49,7 +49,7 @@ import Data.Ord (comparing)
 import Data.Word (Word32, Word64, Word8)
 import Foreign.Storable (pokeByteOff)
 import GBNet.Reliability (MonoTime, elapsedMs)
-import Optics ((&), (.~), (%~))
+import Optics ((%~), (&), (.~))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | CRC32 checksum size in bytes.
@@ -245,8 +245,11 @@ evictOldest tv =
   case findOldest (Map.toList (tvUsedTokens tv)) of
     Nothing -> tv
     Just (oldestId, _) ->
-      tv & #tvUsedTokens %~ Map.delete oldestId
-         & #tvTokensEvicted %~ (+ 1)
+      tv
+        & #tvUsedTokens
+        %~ Map.delete oldestId
+        & #tvTokensEvicted
+        %~ (+ 1)
   where
     findOldest [] = Nothing
     findOldest xs = Just $ minimumBy (comparing snd) xs

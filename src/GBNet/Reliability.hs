@@ -79,7 +79,7 @@ import GBNet.Class (MonoTime (..))
 import GBNet.Types (ChannelId (..), SequenceNum (..))
 import GBNet.Util (sequenceDiff, sequenceGreaterThan)
 import GBNet.ZeroCopy (zeroCopyMutate, zeroCopyMutate', zeroCopyMutateU')
-import Optics ((&), (.~), (%~))
+import Optics ((%~), (&), (.~))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- Constants
@@ -526,17 +526,24 @@ onPacketSent seqNum sendTime channelId channelSeq size ep =
             sprSize = size,
             sprNackCount = 0
           }
-   in ep' & #reSentPackets %~ spbInsert seqNum record
-          & #reTotalSent %~ (+ 1)
-          & #reBytesSent %~ (+ fromIntegral size)
+   in ep'
+        & #reSentPackets
+        %~ spbInsert seqNum record
+        & #reTotalSent
+        %~ (+ 1)
+        & #reBytesSent
+        %~ (+ fromIntegral size)
 
 evictWorstInFlight :: ReliableEndpoint -> ReliableEndpoint
 evictWorstInFlight ep =
   case spbFindOldest (reSentPackets ep) of
     Nothing -> ep
     Just (worstSeq, _) ->
-      ep & #reSentPackets %~ spbDelete worstSeq
-         & #rePacketsEvicted %~ (+ 1)
+      ep
+        & #reSentPackets
+        %~ spbDelete worstSeq
+        & #rePacketsEvicted
+        %~ (+ 1)
 
 -- | Process received packets - processes multiple sequence numbers with ONE thaw/freeze.
 -- This is the high-performance API for game loops processing many packets per frame.
@@ -586,9 +593,13 @@ processAcks ackSeq ackBitsVal now ep =
       -- Record loss samples for each ack (success = not lost)
       ep'' = foldl' (\e _ -> recordLossSample False e) ep' acked
       ep''' =
-        ep'' & #reSentPackets .~ buf'
-             & #reTotalAcked .~ reTotalAcked ep + fromIntegral (length acked)
-             & #reBytesAcked .~ reBytesAcked ep + fromIntegral bytesAcked
+        ep''
+          & #reSentPackets
+          .~ buf'
+          & #reTotalAcked
+          .~ (reTotalAcked ep + fromIntegral (length acked))
+          & #reBytesAcked
+          .~ (reBytesAcked ep + fromIntegral bytesAcked)
    in (AckResult acked retrans, ep''')
   where
     processOne buf (!acked, !retrans, !muts, !rttSum, !rttCnt, !bytes) i
@@ -638,17 +649,26 @@ updateRtt sampleMs ep
       let newSrtt = sampleMs
           newRttvar = sampleMs / 2.0
           newRto = clampRto (newSrtt + 4.0 * newRttvar)
-       in ep & #reSrtt .~ newSrtt
-             & #reRttvar .~ newRttvar
-             & #reRto .~ newRto
-             & #reHasRttSample .~ True
+       in ep
+            & #reSrtt
+            .~ newSrtt
+            & #reRttvar
+            .~ newRttvar
+            & #reRto
+            .~ newRto
+            & #reHasRttSample
+            .~ True
   | otherwise =
       let newRttvar = (1.0 - rttBeta) * reRttvar ep + rttBeta * abs (sampleMs - reSrtt ep)
           newSrtt = (1.0 - rttAlpha) * reSrtt ep + rttAlpha * sampleMs
           newRto = clampRto (newSrtt + 4.0 * newRttvar)
-       in ep & #reSrtt .~ newSrtt
-             & #reRttvar .~ newRttvar
-             & #reRto .~ newRto
+       in ep
+            & #reSrtt
+            .~ newSrtt
+            & #reRttvar
+            .~ newRttvar
+            & #reRto
+            .~ newRto
 
 clampRto :: Double -> Double
 clampRto rto = max minRtoMs (min maxRtoMs rto)
@@ -658,9 +678,13 @@ recordLossSample lost ep =
   let idx = reLossWindowIndex ep `mod` lossWindowSize
       newWindow = lwSetBit idx lost (reLossWindow ep)
       newCount = min lossWindowSize (reLossWindowCount ep + 1)
-   in ep & #reLossWindow .~ newWindow
-         & #reLossWindowIndex %~ (+ 1)
-         & #reLossWindowCount .~ newCount
+   in ep
+        & #reLossWindow
+        .~ newWindow
+        & #reLossWindowIndex
+        %~ (+ 1)
+        & #reLossWindowCount
+        .~ newCount
 {-# INLINE recordLossSample #-}
 
 getAckInfo :: ReliableEndpoint -> (SequenceNum, Word64)

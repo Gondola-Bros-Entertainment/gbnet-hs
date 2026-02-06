@@ -117,9 +117,9 @@ import GBNet.Stats
     defaultNetworkStats,
   )
 import GBNet.Types (ChannelId (..), SequenceNum (..), channelIdToInt)
-import Optics ((&), (.~), (%~), (%))
+import Optics ((%), (%~), (&), (.~), (?~))
 import Optics.State (use)
-import Optics.State.Operators ((.=), (%=))
+import Optics.State.Operators ((%=), (.=))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Bandwidth tracking window duration in milliseconds.
@@ -306,9 +306,13 @@ connect now conn
   | otherwise =
       Right $
         sendConnectionRequest $
-          conn & #connState .~ Connecting
-               & #connRequestTime .~ Just now
-               & #connRetryCount .~ 0
+          conn
+            & #connState
+            .~ Connecting
+            & #connRequestTime
+            ?~ now
+            & #connRetryCount
+            .~ 0
 
 -- | Initiate disconnect.
 disconnect :: DisconnectReason -> MonoTime -> Connection -> Connection
@@ -322,11 +326,17 @@ disconnect reason now conn
                 opType = Disconnect,
                 opPayload = BS.singleton (disconnectReasonCode reason)
               }
-       in conn & #connState .~ Disconnecting
-               & #connDisconnectTime .~ Just now
-               & #connDisconnectRetries .~ 0
-               & #connSendQueue %~ (Seq.|> pkt)
-               & #connLocalSeq %~ (+ 1)
+       in conn
+            & #connState
+            .~ Disconnecting
+            & #connDisconnectTime
+            ?~ now
+            & #connDisconnectRetries
+            .~ 0
+            & #connSendQueue
+            %~ (Seq.|> pkt)
+            & #connLocalSeq
+            %~ (+ 1)
 
 -- | Send a message on a channel.
 sendMessage :: ChannelId -> BS.ByteString -> MonoTime -> Connection -> Either ConnectionError Connection
@@ -450,8 +460,11 @@ updateConnecting now conn =
       | otherwise ->
           Right $
             sendConnectionRequest $
-              conn & #connRetryCount .~ retries
-                   & #connRequestTime .~ Just now
+              conn
+                & #connRetryCount
+                .~ retries
+                & #connRequestTime
+                ?~ now
       where
         elapsed = elapsedMs reqTime now
         timeoutMs = ncConnectionRequestTimeoutMs (connConfig conn)
@@ -581,13 +594,21 @@ processChannelMessages now conn chIdx =
                             (connReliability conn)
                         else connReliability conn
                     conn' =
-                      conn & #connChannels %~ IntMap.insert chIdx channel'
-                           & #connSendQueue %~ (Seq.|> pkt)
-                           & #connLocalSeq %~ (+ 1)
-                           & #connCongestion .~ cong'
-                           & #connCwnd .~ cwnd'
-                           & #connReliability .~ rel'
-                           & #connDataSentThisTick .~ True
+                      conn
+                        & #connChannels
+                        %~ IntMap.insert chIdx channel'
+                        & #connSendQueue
+                        %~ (Seq.|> pkt)
+                        & #connLocalSeq
+                        %~ (+ 1)
+                        & #connCongestion
+                        .~ cong'
+                        & #connCwnd
+                        .~ cwnd'
+                        & #connReliability
+                        .~ rel'
+                        & #connDataSentThisTick
+                        .~ True
                  in processChannelMessages now conn' chIdx
 
 -- | Enqueue an empty keepalive/ack-only packet.
@@ -606,8 +627,11 @@ enqueueEmptyPacket conn =
             opType = Keepalive,
             opPayload = BS.empty
           }
-   in conn & #connSendQueue %~ (Seq.|> pkt)
-           & #connLocalSeq %~ (+ 1)
+   in conn
+        & #connSendQueue
+        %~ (Seq.|> pkt)
+        & #connLocalSeq
+        %~ (+ 1)
 
 -- | Update while disconnecting.
 updateDisconnecting :: MonoTime -> Connection -> Either ConnectionError Connection
@@ -626,10 +650,15 @@ updateDisconnecting now conn =
                     opPayload = BS.singleton (disconnectReasonCode ReasonRequested)
                   }
            in Right $
-                conn & #connDisconnectRetries .~ retries + 1
-                     & #connDisconnectTime .~ Just now
-                     & #connSendQueue %~ (Seq.|> pkt)
-                     & #connLocalSeq %~ (+ 1)
+                conn
+                  & #connDisconnectRetries
+                  .~ (retries + 1)
+                  & #connDisconnectTime
+                  ?~ now
+                  & #connSendQueue
+                  %~ (Seq.|> pkt)
+                  & #connLocalSeq
+                  %~ (+ 1)
       where
         elapsed = elapsedMs discTime now
         timeoutMs = ncDisconnectRetryTimeoutMs (connConfig conn)
@@ -679,23 +708,40 @@ touchSendTime now conn = conn & #connLastSendTime .~ now
 -- Used after handshake completes.
 markConnected :: MonoTime -> Connection -> Connection
 markConnected now conn =
-  conn & #connState .~ Connected
-       & #connStartTime .~ Just now
-       & #connLocalSeq .~ 0
+  conn
+    & #connState
+    .~ Connected
+    & #connStartTime
+    ?~ now
+    & #connLocalSeq
+    .~ 0
 
 -- | Record bytes sent for bandwidth tracking.
 recordBytesSent :: Int -> MonoTime -> Connection -> Connection
 recordBytesSent bytes now conn =
   let bw = btRecord bytes now (connBandwidthUp conn)
-   in conn & #connBandwidthUp .~ bw
-           & #connStats % #nsPacketsSent %~ (+ 1)
-           & #connStats % #nsBytesSent %~ (+ fromIntegral bytes)
-           & #connLastSendTime .~ now
+   in conn
+        & #connBandwidthUp
+        .~ bw
+        & #connStats
+        % #nsPacketsSent
+        %~ (+ 1)
+        & #connStats
+        % #nsBytesSent
+        %~ (+ fromIntegral bytes)
+        & #connLastSendTime
+        .~ now
 
 -- | Record bytes received for bandwidth tracking.
 recordBytesReceived :: Int -> MonoTime -> Connection -> Connection
 recordBytesReceived bytes now conn =
   let bw = btRecord bytes now (connBandwidthDown conn)
-   in conn & #connBandwidthDown .~ bw
-           & #connStats % #nsPacketsReceived %~ (+ 1)
-           & #connStats % #nsBytesReceived %~ (+ fromIntegral bytes)
+   in conn
+        & #connBandwidthDown
+        .~ bw
+        & #connStats
+        % #nsPacketsReceived
+        %~ (+ 1)
+        & #connStats
+        % #nsBytesReceived
+        %~ (+ fromIntegral bytes)
