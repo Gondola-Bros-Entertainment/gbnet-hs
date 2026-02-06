@@ -31,13 +31,13 @@ module GBNet.Packet
   )
 where
 
+import Control.DeepSeq (NFData (..), rwhnf)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import qualified Data.ByteString as BS
 import Data.ByteString.Internal (unsafeCreate)
 import qualified Data.ByteString.Unsafe as BSU
 import Data.Word (Word16, Word32, Word8)
 import Foreign.Storable (pokeByteOff)
-import Control.DeepSeq (NFData (..), rwhnf)
 import GBNet.Types (SequenceNum (..))
 import Optics.TH (makeFieldLabelsNoPrefix)
 

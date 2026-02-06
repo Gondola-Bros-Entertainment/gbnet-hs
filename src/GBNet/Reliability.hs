@@ -475,10 +475,26 @@ data ReliableEndpoint = ReliableEndpoint
 
 instance NFData ReliableEndpoint where
   rnf (ReliableEndpoint ls rs ab sp rp msd mif srtt rv rto hrs lw lwi lwc ts ta tl pe bs ba) =
-    rnf ls `seq` rnf rs `seq` rnf ab `seq` rnf sp `seq` rnf rp
-      `seq` rnf msd `seq` rnf mif `seq` rnf srtt `seq` rnf rv `seq` rnf rto
-      `seq` rnf hrs `seq` rnf lw `seq` rnf lwi `seq` rnf lwc
-      `seq` rnf ts `seq` rnf ta `seq` rnf tl `seq` rnf pe `seq` rnf bs `seq` rnf ba
+    rnf ls `seq`
+      rnf rs `seq`
+        rnf ab `seq`
+          rnf sp `seq`
+            rnf rp `seq`
+              rnf msd `seq`
+                rnf mif `seq`
+                  rnf srtt `seq`
+                    rnf rv `seq`
+                      rnf rto `seq`
+                        rnf hrs `seq`
+                          rnf lw `seq`
+                            rnf lwi `seq`
+                              rnf lwc `seq`
+                                rnf ts `seq`
+                                  rnf ta `seq`
+                                    rnf tl `seq`
+                                      rnf pe `seq`
+                                        rnf bs `seq`
+                                          rnf ba
 
 makeFieldLabelsNoPrefix ''ReliableEndpoint
 

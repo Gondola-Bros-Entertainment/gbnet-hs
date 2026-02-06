@@ -54,12 +54,12 @@ import qualified Data.Sequence as Seq
 import Data.Word (Word64)
 import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime (..), NetError (..))
 import GBNet.Security (validateAndStripCrc32)
+import GBNet.Util (nextRandom, randomDouble)
 import Network.Socket (SockAddr)
 import Optics ((%), (%~), (&), (.~))
 import Optics.State (use)
 import Optics.State.Operators ((%=), (.=))
 import Optics.TH (makeFieldLabelsNoPrefix)
-import GBNet.Util (nextRandom, randomDouble)
 
 -- | A packet in transit.
 data InFlightPacket = InFlightPacket
@@ -277,4 +277,3 @@ worldAdvanceTime newTime world =
           (\ps -> ps & #tnsCurrentTime .~ newTime)
           (twPeers world')
    in deliverPackets (world' & #twPeers .~ updatedPeers)
-

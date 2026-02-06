@@ -210,4 +210,3 @@ nextRandomS = do
   let (output, next) = nextRandom s
   #nsRngState .= next
   pure output
-

@@ -113,8 +113,14 @@ data ChannelConfig = ChannelConfig
 
 instance NFData ChannelConfig where
   rnf (ChannelConfig dm mms mbs bof obt mobs mrr p) =
-    rnf dm `seq` rnf mms `seq` rnf mbs `seq` rnf bof
-      `seq` rnf obt `seq` rnf mobs `seq` rnf mrr `seq` rnf p
+    rnf dm `seq`
+      rnf mms `seq`
+        rnf mbs `seq`
+          rnf bof `seq`
+            rnf obt `seq`
+              rnf mobs `seq`
+                rnf mrr `seq`
+                  rnf p
 
 -- | Default channel configuration (ReliableOrdered).
 defaultChannelConfig :: ChannelConfig
@@ -187,9 +193,19 @@ data Channel = Channel
 
 instance NFData Channel where
   rnf (Channel cfg ci ls rs sb rb pa orb oe ts tr td trt) =
-    rnf cfg `seq` rnf ci `seq` rnf ls `seq` rnf rs `seq` rnf sb
-      `seq` rnf rb `seq` rnf pa `seq` rnf orb `seq` rnf oe
-      `seq` rnf ts `seq` rnf tr `seq` rnf td `seq` rnf trt
+    rnf cfg `seq`
+      rnf ci `seq`
+        rnf ls `seq`
+          rnf rs `seq`
+            rnf sb `seq`
+              rnf rb `seq`
+                rnf pa `seq`
+                  rnf orb `seq`
+                    rnf oe `seq`
+                      rnf ts `seq`
+                        rnf tr `seq`
+                          rnf td `seq`
+                            rnf trt
 
 makeFieldLabelsNoPrefix ''ChannelConfig
 makeFieldLabelsNoPrefix ''ChannelMessage

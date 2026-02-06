@@ -270,15 +270,19 @@ processFragment dat now asm0 =
                       (complete, buf') = insertFragment (fhFragmentIndex header) fragData buf
                       asm3 =
                         asm2
-                          & #faBuffers %~ Map.insert msgId buf'
-                          & #faCurrentBufferSize %~ (+ fragSize)
+                          & #faBuffers
+                          %~ Map.insert msgId buf'
+                          & #faCurrentBufferSize
+                          %~ (+ fragSize)
                    in if complete
                         then
                           let result = assembleFragments buf'
                               asm4 =
                                 asm3
-                                  & #faBuffers %~ Map.delete msgId
-                                  & #faCurrentBufferSize %~ subtract (fbTotalSize buf')
+                                  & #faBuffers
+                                  %~ Map.delete msgId
+                                  & #faCurrentBufferSize
+                                  %~ subtract (fbTotalSize buf')
                            in (result, asm4)
                         else (Nothing, asm3)
 

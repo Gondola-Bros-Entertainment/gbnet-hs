@@ -6,6 +6,7 @@
 - **Zero-copy linear types** — `ZeroCopy` module with mutable thaw/freeze for `SequenceBuffer`
 - **SequenceBuffer rewrite** — vector-based ring buffer replacing `IntMap`, O(1) insert/lookup
 - **Sub-microsecond packet processing** — INLINE pragmas, bang patterns, strict fields throughout
+- **Peer module split** — `GBNet.Peer` split into `Internal`, `Protocol`, `Handshake`, `Migration` sub-modules (public API unchanged)
 - Benchmark suite: connection, fragment, security, and reliability groups
 
 ## 0.2.0.0
