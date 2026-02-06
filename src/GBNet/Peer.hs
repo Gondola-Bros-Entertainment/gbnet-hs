@@ -1,12 +1,5 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedLabels #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE UndecidableInstances #-}
 
 -- |
 -- Module      : GBNet.Peer
@@ -75,34 +68,21 @@ module GBNet.Peer
   )
 where
 
-import Control.Monad.State.Strict (State, get, modify', runState)
-import Data.Bits (shiftL, xor, (.&.), (.|.))
 import qualified Data.ByteString as BS
 import Data.Either (fromRight)
-import Data.Foldable (toList)
 import Data.List (foldl')
-import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Sequence (Seq)
-import qualified Data.Sequence as Seq
-import Data.Word (Word64, Word8)
-import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime (..))
+import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime)
 import GBNet.Config (NetworkConfig (..))
 import GBNet.Connection
-  ( Connection,
-    ConnectionError (..),
+  ( ConnectionError (..),
     DisconnectReason (..),
     OutgoingPacket (..),
-    newConnection,
     processIncomingHeader,
     receiveIncomingPayload,
   )
 import qualified GBNet.Connection as Conn
-import GBNet.Fragment
-  ( FragmentAssembler,
-    newFragmentAssembler,
-    processFragment,
-  )
+import GBNet.Fragment (newFragmentAssembler, processFragment)
 import GBNet.Packet
   ( Packet (..),
     PacketHeader (..),
@@ -110,9 +90,27 @@ import GBNet.Packet
     deserializePacket,
     serializePacket,
   )
+import GBNet.Peer.Handshake
+  ( handleConnectionAccepted,
+    handleConnectionChallenge,
+    handleConnectionRequest,
+    handleConnectionResponse,
+    handleDisconnect,
+  )
+import GBNet.Peer.Internal
+import GBNet.Peer.Migration
+  ( findMigrationCandidate,
+    migrationCooldownMs,
+  )
+import GBNet.Peer.Protocol
+  ( decodeDenyReason,
+    decodePayloadHeader,
+    denyToDisconnectReason,
+    minPayloadSize,
+  )
+import qualified GBNet.Peer.Protocol as Proto
 import GBNet.Reliability (elapsedMs)
-import GBNet.Security (RateLimiter, appendCrc32, newRateLimiter, rateLimiterAllow)
-import GBNet.Serialize (deserialize, serialize)
+import GBNet.Security (appendCrc32)
 import GBNet.Socket
   ( SocketError (..),
     UdpSocket,
@@ -120,124 +118,10 @@ import GBNet.Socket
     socketLocalAddr,
   )
 import GBNet.Stats (NetworkStats)
-import GBNet.Types (ChannelId (..), SequenceNum (..))
+import GBNet.Types (ChannelId (..))
 import GBNet.Util (nextRandom)
-import Network.Socket (PortNumber, SockAddr (..))
+import Network.Socket (SockAddr)
 import Optics ((%~), (&), (.~))
-import Optics.State (use)
-import Optics.State.Operators ((%=), (.=))
-import Optics.TH (makeFieldLabelsNoPrefix)
-
--- | Peer identifier wrapping a socket address.
-newtype PeerId = PeerId {unPeerId :: SockAddr}
-  deriving (Eq, Ord, Show)
-
--- | Create a PeerId from a SockAddr.
-peerIdFromAddr :: SockAddr -> PeerId
-peerIdFromAddr = PeerId
-
--- | Direction of connection establishment.
-data ConnectionDirection
-  = -- | They connected to us
-    Inbound
-  | -- | We connected to them
-    Outbound
-  deriving (Eq, Show)
-
--- | Events emitted by 'peerProcess'.
-data PeerEvent
-  = -- | A peer connected
-    PeerConnected !PeerId !ConnectionDirection
-  | -- | A peer disconnected
-    PeerDisconnected !PeerId !DisconnectReason
-  | -- | Received a message from a peer
-    PeerMessage !PeerId !ChannelId !BS.ByteString
-  | -- | A peer's address changed (connection migration)
-    PeerMigrated !PeerId !PeerId -- old, new
-  deriving (Eq, Show)
-
--- | An incoming packet from the network (CRC already validated and stripped).
-data IncomingPacket = IncomingPacket
-  { ipFrom :: !PeerId,
-    -- | CRC-validated payload
-    ipData :: !BS.ByteString
-  }
-  deriving (Eq, Show)
-
-makeFieldLabelsNoPrefix ''IncomingPacket
-
--- | An outgoing packet ready to send (with CRC appended).
-data RawPacket = RawPacket
-  { rpTo :: !PeerId,
-    -- | Data with CRC appended
-    rpData :: !BS.ByteString
-  }
-  deriving (Eq, Show)
-
-makeFieldLabelsNoPrefix ''RawPacket
-
--- | State of a pending connection (mid-handshake).
-data PendingConnection = PendingConnection
-  { pcDirection :: !ConnectionDirection,
-    pcServerSalt :: !Word64,
-    pcClientSalt :: !Word64,
-    pcCreatedAt :: !MonoTime,
-    pcRetryCount :: !Int,
-    pcLastRetry :: !MonoTime
-  }
-  deriving (Show)
-
-makeFieldLabelsNoPrefix ''PendingConnection
-
--- | Cookie secret size in bytes.
-cookieSecretSize :: Int
-cookieSecretSize = 32
-
--- | Fragment reassembly timeout in milliseconds.
-fragmentTimeoutMs :: Double
-fragmentTimeoutMs = 5000.0
-
--- | Fragment reassembly max buffer size.
-fragmentMaxBufferSize :: Int
-fragmentMaxBufferSize = 1024 * 1024 -- 1MB
-
--- | Migration cooldown in milliseconds.
-migrationCooldownMs :: Double
-migrationCooldownMs = 5000.0
-
--- | A network peer that can accept and initiate connections.
-data NetPeer = NetPeer
-  { npSocket :: !UdpSocket,
-    -- | Local address this peer is bound to (for polymorphic operations)
-    npLocalAddr :: !SockAddr,
-    npConnections :: !(Map PeerId Connection),
-    npPending :: !(Map PeerId PendingConnection),
-    npConfig :: !NetworkConfig,
-    npRateLimiter :: !RateLimiter,
-    npCookieSecret :: !BS.ByteString,
-    npRngState :: !Word64,
-    npFragmentAssemblers :: !(Map PeerId FragmentAssembler),
-    -- | Tracks last migration time per connection to rate-limit migrations
-    npMigrationCooldowns :: !(Map Word64 MonoTime),
-    -- | Queued outgoing control packets (for pure API)
-    npSendQueue :: !(Seq RawPacket),
-    -- | Number of packets dropped by rate limiting
-    npRateLimitDrops :: !Word64
-  }
-
-makeFieldLabelsNoPrefix ''NetPeer
-
--- | Result of pure packet processing via 'peerProcess'.
-data PeerResult = PeerResult
-  { -- | Updated peer state
-    prPeer :: !NetPeer,
-    -- | Events that occurred during processing
-    prEvents :: ![PeerEvent],
-    -- | Packets to send (call 'peerSendAllM' with these)
-    prOutgoing :: ![RawPacket]
-  }
-
-makeFieldLabelsNoPrefix ''PeerResult
 
 -- | Create a new peer bound to the given address.
 -- Returns the peer and socket. The socket is also stored in the peer for
@@ -258,85 +142,6 @@ newPeer addr config now = do
             Right a -> a
       let peer = newPeerState sock localAddr config now
       return $ Right (peer, sock)
-
--- | Create peer state (pure). Used internally and for polymorphic backends.
-newPeerState ::
-  UdpSocket ->
-  SockAddr ->
-  NetworkConfig ->
-  MonoTime ->
-  NetPeer
-newPeerState sock localAddr config now =
-  let rng0 = unMonoTime now
-      (secret, rng1) = generateCookieSecret rng0
-   in NetPeer
-        { npSocket = sock,
-          npLocalAddr = localAddr,
-          npConnections = Map.empty,
-          npPending = Map.empty,
-          npConfig = config,
-          npRateLimiter = newRateLimiter (ncRateLimitPerSecond config) now,
-          npCookieSecret = secret,
-          npRngState = rng1,
-          npFragmentAssemblers = Map.empty,
-          npMigrationCooldowns = Map.empty,
-          npSendQueue = Seq.empty,
-          npRateLimitDrops = 0
-        }
-
--- | Generate a pseudo-random cookie secret.
-generateCookieSecret :: Word64 -> (BS.ByteString, Word64)
-generateCookieSecret seed = go seed cookieSecretSize []
-  where
-    go s 0 acc = (BS.pack (reverse acc), s)
-    go s n acc =
-      let (r, s') = nextRandom s
-       in go s' (n - 1) (fromIntegral (r `mod` 256) : acc)
-
--- -----------------------------------------------------------------------------
--- Helper functions for pure API
--- -----------------------------------------------------------------------------
-
--- | Update a connection by PeerId, returning unchanged peer if not found.
-withConnection :: PeerId -> (Connection -> Connection) -> NetPeer -> NetPeer
-withConnection pid f peer = peer & #npConnections %~ Map.adjust f pid
-{-# INLINE withConnection #-}
-
--- | Decode channel sequence from payload bytes.
--- Returns (channelSeq, remaining data) or Nothing if too short.
-decodeChannelSeq :: BS.ByteString -> Maybe (SequenceNum, BS.ByteString)
-decodeChannelSeq bs
-  | BS.length bs < 2 = Nothing
-  | otherwise =
-      let chSeq =
-            SequenceNum $
-              (fromIntegral (BS.index bs 0) `shiftL` 8)
-                .|. fromIntegral (BS.index bs 1)
-       in Just (chSeq, BS.drop 2 bs)
-{-# INLINE decodeChannelSeq #-}
-
--- | Queue a raw packet for sending.
-queueRawPacket :: RawPacket -> NetPeer -> NetPeer
-queueRawPacket pkt peer = peer & #npSendQueue %~ (Seq.|> pkt)
-
--- | Drain the peer's send queue.
-drainPeerSendQueue :: NetPeer -> ([RawPacket], NetPeer)
-drainPeerSendQueue peer =
-  (toList (npSendQueue peer), peer & #npSendQueue .~ Seq.empty)
-
--- | Serialize and queue a control packet.
-queueControlPacket :: PacketType -> BS.ByteString -> PeerId -> NetPeer -> NetPeer
-queueControlPacket ptype payload pid peer =
-  let header =
-        PacketHeader
-          { packetType = ptype,
-            sequenceNum = 0,
-            ack = 0,
-            ackBitfield = 0
-          }
-      pkt = Packet {pktHeader = header, pktPayload = payload}
-      raw = appendCrc32 (serializePacket pkt)
-   in queueRawPacket (RawPacket pid raw) peer
 
 -- -----------------------------------------------------------------------------
 -- Connection management
@@ -389,30 +194,20 @@ peerDisconnect peerId now peer =
 -- Use 'peerRecvAllM' to get incoming packets and 'peerSendAllM' to send outgoing.
 peerProcess :: MonoTime -> [IncomingPacket] -> NetPeer -> PeerResult
 peerProcess now packets peer0 =
-  let (events, peer1) = runState (peerProcessS now packets) peer0
-      (outgoing, peer2) = drainPeerSendQueue peer1
-   in PeerResult peer2 events outgoing
-
--- | State-based peer processing.
-peerProcessS :: MonoTime -> [IncomingPacket] -> State NetPeer [PeerEvent]
-peerProcessS now packets = do
-  -- Process incoming packets
-  let internalPackets = map (\ip -> (ipFrom ip, ipData ip)) packets
-  events1 <- processPacketsPureS internalPackets now
-
-  -- Update all connections and collect messages
-  events2 <- updateConnectionsS now
-
-  -- Drain connection send queues into peer send queue
-  modify' (drainAllConnectionQueues now)
-
-  -- Retry pending outbound connections
-  modify' (retryPendingConnectionsPure now)
-
-  -- Cleanup expired pending connections
-  events3 <- cleanupPendingS now
-
-  pure (events1 ++ events2 ++ events3)
+  let -- Process incoming packets
+      internalPackets = map (\ip -> (ipFrom ip, ipData ip)) packets
+      (events1, peer1) = processPacketsPure internalPackets now peer0
+      -- Update all connections and collect messages
+      (events2, peer2) = updateConnections now peer1
+      -- Drain connection send queues into peer send queue
+      peer3 = drainAllConnectionQueues now peer2
+      -- Retry pending outbound connections
+      peer4 = retryPendingConnectionsPure now peer3
+      -- Cleanup expired pending connections
+      (events3, peer5) = cleanupPending now peer4
+      -- Drain the peer's send queue
+      (outgoing, peer6) = drainPeerSendQueue peer5
+   in PeerResult peer6 (events1 ++ events2 ++ events3) outgoing
 
 -- | Drain send queues from all connections into the peer's send queue.
 -- Single-pass over the connection map via foldlWithKey'.
@@ -456,12 +251,14 @@ peerSendAllM = mapM_ sendOne
     sendOne (RawPacket pid dat) = netSend (unPeerId pid) dat
 
 -- | Shutdown the peer (polymorphic).
--- Sends disconnect packets to all connections and closes the network.
+-- Disconnects all connections through the state machine and closes the network.
 peerShutdownM :: (MonadNetwork m) => NetPeer -> m ()
 peerShutdownM peer = do
+  now <- getMonoTime
   let peerIds = Map.keys (npConnections peer)
-      peer' = foldr (queueControlPacket Disconnect BS.empty) peer peerIds
-      (outgoing, _) = drainPeerSendQueue peer'
+      -- Disconnect each connection through the proper state machine
+      peer' = foldr (\pid p -> withConnection pid (Conn.disconnect ReasonRequested now) p) peer peerIds
+      (outgoing, _) = drainPeerSendQueue (drainAllConnectionQueues now peer')
   peerSendAllM outgoing
   netClose
 
@@ -498,27 +295,33 @@ peerTick messages peer = do
   where
     queueMessage now p (ch, msg) = peerBroadcast ch msg Nothing now p
 
--- | Process received packets (State version).
-processPacketsPureS ::
+-- -----------------------------------------------------------------------------
+-- Packet handling (pure)
+-- -----------------------------------------------------------------------------
+
+-- | Process received packets (pure).
+processPacketsPure ::
   [(PeerId, BS.ByteString)] ->
   MonoTime ->
-  State NetPeer [PeerEvent]
-processPacketsPureS packets now = do
-  eventss <- mapM (\(pid, dat) -> handlePacketS pid dat now) packets
-  pure (concat eventss)
+  NetPeer ->
+  ([PeerEvent], NetPeer)
+processPacketsPure packets now peer = foldl' go ([], peer) packets
+  where
+    go (evts, p) (pid, dat) =
+      let (evts', p') = handlePacket pid dat now p
+       in (evts ++ evts', p')
 
--- | Handle a single received packet (State version).
-handlePacketS ::
+-- | Handle a single received packet (pure).
+handlePacket ::
   PeerId ->
   BS.ByteString ->
   MonoTime ->
-  State NetPeer [PeerEvent]
-handlePacketS peerId dat now =
+  NetPeer ->
+  ([PeerEvent], NetPeer)
+handlePacket peerId dat now peer =
   case parsePacket dat of
-    Nothing -> pure []
-    Just pkt -> do
-      let ptype = packetType (pktHeader pkt)
-      handlePacketByTypeS peerId pkt now ptype
+    Nothing -> ([], peer)
+    Just pkt -> handlePacketByType peerId pkt now (packetType (pktHeader pkt)) peer
 
 -- | Parse packet from raw data.
 parsePacket :: BS.ByteString -> Maybe Packet
@@ -527,323 +330,119 @@ parsePacket dat =
     Left _ -> Nothing
     Right pkt -> Just pkt
 
--- | Handle a packet by its type (State version).
-handlePacketByTypeS ::
+-- | Handle a packet by its type (pure).
+handlePacketByType ::
   PeerId ->
   Packet ->
   MonoTime ->
   PacketType ->
-  State NetPeer [PeerEvent]
-handlePacketByTypeS peerId pkt now ptype = case ptype of
-  -- Incoming connection request
-  ConnectionRequest -> handleConnectionRequestS peerId now
-  -- Challenge from server (we're connecting outbound)
-  ConnectionChallenge -> handleConnectionChallengeS peerId pkt now
-  -- Response to our challenge (they're connecting inbound)
-  ConnectionResponse -> handleConnectionResponseS peerId pkt now
-  -- Connection accepted
-  ConnectionAccepted -> handleConnectionAcceptedS peerId now
-  -- Connection denied
-  ConnectionDenied -> do
+  NetPeer ->
+  ([PeerEvent], NetPeer)
+handlePacketByType peerId pkt now ptype peer = case ptype of
+  ConnectionRequest -> handleConnectionRequest peerId now peer
+  ConnectionChallenge -> handleConnectionChallenge peerId pkt now peer
+  ConnectionResponse -> handleConnectionResponse peerId pkt now peer
+  ConnectionAccepted -> handleConnectionAccepted peerId now peer
+  ConnectionDenied ->
     let reason = decodeDenyReason (pktPayload pkt)
-    modify' (removePending peerId)
-    pure [PeerDisconnected peerId (ReasonUnknown reason)]
-  -- Disconnect
-  Disconnect -> handleDisconnectS peerId
-  -- Payload from connected peer (or potential migration)
-  Payload -> do
-    conns <- use #npConnections
-    if Map.member peerId conns
-      then handlePayloadS peerId pkt now
-      else handleMigrationS peerId pkt now
-  -- Keepalive
-  Keepalive -> do
-    modify' $ withConnection peerId $ \conn ->
-      Conn.touchRecvTime now $ processIncomingHeader (pktHeader pkt) now conn
-    pure []
+        peer' = removePending peerId peer
+     in ([PeerDisconnected peerId (denyToDisconnectReason reason)], peer')
+  Disconnect -> handleDisconnect peerId peer
+  Payload ->
+    if Map.member peerId (npConnections peer)
+      then handlePayload peerId pkt now peer
+      else handleMigration peerId pkt now peer
+  Keepalive ->
+    let peer' =
+          withConnection
+            peerId
+            (Conn.touchRecvTime now . processIncomingHeader (pktHeader pkt) now)
+            peer
+     in ([], peer')
 
--- | Handle incoming connection request (State version).
-handleConnectionRequestS :: PeerId -> MonoTime -> State NetPeer [PeerEvent]
-handleConnectionRequestS peerId now = do
-  conns <- use #npConnections
-  pending <- use #npPending
-  case (Map.member peerId conns, Map.lookup peerId pending) of
-    (True, _) -> do
-      -- Already connected, resend accept
-      modify' $ queueControlPacket ConnectionAccepted BS.empty peerId
-      pure []
-    (_, Just p) -> do
-      -- Already pending, resend challenge with stored salt
-      let saltPayload = encodeSalt (pcServerSalt p)
-      modify' $ queueControlPacket ConnectionChallenge saltPayload peerId
-      pure []
-    (False, Nothing) ->
-      handleNewConnectionRequest peerId now
-
--- | Handle a genuinely new connection request after checking existing state.
-handleNewConnectionRequest :: PeerId -> MonoTime -> State NetPeer [PeerEvent]
-handleNewConnectionRequest peerId now = do
-  -- Check rate limit
-  rl <- use #npRateLimiter
-  let addrKey = sockAddrToKey (unPeerId peerId)
-      (allowed, rl') = rateLimiterAllow addrKey now rl
-  #npRateLimiter .= rl'
-  peer <- get
-  let pendingSize = Map.size (npPending peer)
-      connSize = Map.size (npConnections peer)
-      maxClients = ncMaxClients (npConfig peer)
-  if
-    | not allowed -> do
-        #npRateLimitDrops %= (+ 1)
-        pure []
-    | pendingSize >= maxClients -> do
-        #npRateLimitDrops %= (+ 1)
-        pure []
-    | connSize >= maxClients -> do
-        let reason = encodeDenyReason denyReasonServerFull
-        modify' $ queueControlPacket ConnectionDenied reason peerId
-        pure []
-    | otherwise -> do
-        -- Create pending connection and send challenge with salt
-        rng <- use #npRngState
-        let (salt, rng') = nextRandom rng
-            newPending =
-              PendingConnection
-                { pcDirection = Inbound,
-                  pcServerSalt = salt,
-                  pcClientSalt = 0,
-                  pcCreatedAt = now,
-                  pcRetryCount = 0,
-                  pcLastRetry = now
-                }
-        #npPending %= Map.insert peerId newPending
-        #npRngState .= rng'
-        let saltPayload = encodeSalt salt
-        modify' $ queueControlPacket ConnectionChallenge saltPayload peerId
-        pure []
-
--- | Handle connection challenge (we're outbound, received their challenge) (State version).
-handleConnectionChallengeS :: PeerId -> Packet -> MonoTime -> State NetPeer [PeerEvent]
-handleConnectionChallengeS peerId pkt _now = do
-  pending <- use #npPending
-  case Map.lookup peerId pending of
-    Nothing -> pure [] -- Not expecting this
-    Just p
-      | pcDirection p /= Outbound -> pure []
-      | otherwise ->
-          case decodeSalt (pktPayload pkt) of
-            Nothing -> pure [] -- Invalid challenge
-            Just serverSalt -> do
-              let p' = p & #pcServerSalt .~ serverSalt
-              #npPending %= Map.insert peerId p'
-              let saltPayload = encodeSalt (pcClientSalt p')
-              modify' $ queueControlPacket ConnectionResponse saltPayload peerId
-              pure []
-
--- | Handle connection response (we're inbound, received their response) (State version).
-handleConnectionResponseS :: PeerId -> Packet -> MonoTime -> State NetPeer [PeerEvent]
-handleConnectionResponseS peerId pkt now = do
-  pending <- use #npPending
-  case Map.lookup peerId pending of
-    Nothing -> pure []
-    Just p
-      | pcDirection p /= Inbound -> pure []
-      | otherwise ->
-          case decodeSalt (pktPayload pkt) of
-            Nothing -> pure [] -- Invalid response
-            Just clientSalt
-              | clientSalt == 0 || clientSalt == pcServerSalt p -> do
-                  let reason = encodeDenyReason denyReasonInvalidChallenge
-                  modify' $ queueControlPacket ConnectionDenied reason peerId
-                  modify' $ removePending peerId
-                  pure []
-              | otherwise -> do
-                  -- Accept the connection
-                  config <- use #npConfig
-                  let conn = Conn.markConnected now $ Conn.touchRecvTime now $ newConnection config clientSalt now
-                  #npConnections %= Map.insert peerId conn
-                  #npPending %= Map.delete peerId
-                  modify' $ queueControlPacket ConnectionAccepted BS.empty peerId
-                  pure [PeerConnected peerId Inbound]
-
--- | Handle connection accepted (we're outbound, they accepted) (State version).
-handleConnectionAcceptedS :: PeerId -> MonoTime -> State NetPeer [PeerEvent]
-handleConnectionAcceptedS peerId now = do
-  pending <- use #npPending
-  case Map.lookup peerId pending of
-    Nothing -> pure [] -- Might be duplicate accept, ignore
-    Just p
-      | pcDirection p /= Outbound -> pure []
-      | otherwise -> do
-          -- Promote to connected
-          config <- use #npConfig
-          let conn = Conn.markConnected now $ Conn.touchRecvTime now $ newConnection config (pcClientSalt p) now
-          #npConnections %= Map.insert peerId conn
-          #npPending %= Map.delete peerId
-          pure [PeerConnected peerId Outbound]
-
--- | Handle disconnect packet (State version).
-handleDisconnectS :: PeerId -> State NetPeer [PeerEvent]
-handleDisconnectS peerId = do
-  conns <- use #npConnections
-  if Map.member peerId conns
-    then do
-      modify' $ \peer ->
-        cleanupPeer peerId (peer & #npConnections %~ Map.delete peerId)
-      pure [PeerDisconnected peerId ReasonRequested]
-    else do
-      modify' (removePending peerId)
-      pure []
-
--- | Clean up per-peer state (fragment assemblers, migration cooldowns).
-cleanupPeer :: PeerId -> NetPeer -> NetPeer
-cleanupPeer peerId peer =
-  peer & #npFragmentAssemblers %~ Map.delete peerId
-
--- | Payload header: channel (3 bits) + is_fragment (1 bit) + reserved (4 bits)
--- Encoded in first byte: [is_fragment:1][reserved:4][channel:3]
--- Channel is low 3 bits, is_fragment is high bit (0x80)
-
--- | Fragment flag bit in payload header.
-payloadFragmentFlag :: Word8
-payloadFragmentFlag = 0x80
-
--- | Channel mask in payload header.
-payloadChannelMask :: Word8
-payloadChannelMask = 0x07
-
--- | Decode payload header byte.
-decodePayloadHeader :: Word8 -> (ChannelId, Bool)
-decodePayloadHeader b =
-  let channel = ChannelId (b .&. payloadChannelMask)
-      isFragment = (b .&. payloadFragmentFlag) /= 0
-   in (channel, isFragment)
-{-# INLINE decodePayloadHeader #-}
-
--- | Minimum size of a non-fragment payload: headerByte + 2 bytes channel sequence.
-minPayloadSize :: Int
-minPayloadSize = 3
-
--- | Handle payload packet (State version).
+-- | Handle payload packet (pure).
 -- Routes messages through the channel system for proper ordering/dedup.
-handlePayloadS :: PeerId -> Packet -> MonoTime -> State NetPeer [PeerEvent]
-handlePayloadS peerId pkt now = do
-  conns <- use #npConnections
-  case Map.lookup peerId conns of
-    Nothing -> pure []
-    Just conn -> do
+handlePayload :: PeerId -> Packet -> MonoTime -> NetPeer -> ([PeerEvent], NetPeer)
+handlePayload peerId pkt now peer =
+  case Map.lookup peerId (npConnections peer) of
+    Nothing -> ([], peer)
+    Just conn ->
       let conn' = Conn.touchRecvTime now $ processIncomingHeader (pktHeader pkt) now conn
           payload = pktPayload pkt
-      case BS.uncons payload of
-        Nothing -> do
-          #npConnections %= Map.insert peerId conn'
-          pure []
-        Just (headerByte, rest) -> do
-          let (channel, isFragment) = decodePayloadHeader headerByte
-          if isFragment
-            then do
-              #npConnections %= Map.insert peerId conn'
-              handleFragmentS peerId channel rest now
-            else do
-              let finalConn
-                    | BS.length payload < minPayloadSize = conn'
-                    | otherwise = case decodeChannelSeq rest of
-                        Nothing -> conn'
-                        Just (chSeq, msgData) ->
-                          receiveIncomingPayload channel chSeq msgData now conn'
-              #npConnections %= Map.insert peerId finalConn
-              pure []
+       in case BS.uncons payload of
+            Nothing ->
+              ([], peer & #npConnections %~ Map.insert peerId conn')
+            Just (headerByte, rest) ->
+              let (channel, isFragment) = decodePayloadHeader headerByte
+               in if isFragment
+                    then
+                      let peer' = peer & #npConnections %~ Map.insert peerId conn'
+                       in handleFragment peerId channel rest now peer'
+                    else
+                      let finalConn
+                            | BS.length payload < minPayloadSize = conn'
+                            | otherwise = case Proto.decodeChannelSeq rest of
+                                Nothing -> conn'
+                                Just (chSeq, msgData) ->
+                                  receiveIncomingPayload channel chSeq msgData now conn'
+                       in ([], peer & #npConnections %~ Map.insert peerId finalConn)
 
--- | Handle a fragment, reassembling if complete (State version).
+-- | Handle a fragment, reassembling if complete (pure).
 -- After reassembly, routes through the channel system for ordering/dedup.
-handleFragmentS :: PeerId -> ChannelId -> BS.ByteString -> MonoTime -> State NetPeer [PeerEvent]
-handleFragmentS peerId channel fragData now = do
-  assemblers <- use #npFragmentAssemblers
-  let assembler =
+handleFragment :: PeerId -> ChannelId -> BS.ByteString -> MonoTime -> NetPeer -> ([PeerEvent], NetPeer)
+handleFragment peerId channel fragData now peer =
+  let assemblers = npFragmentAssemblers peer
+      assembler =
         Map.findWithDefault
           (newFragmentAssembler fragmentTimeoutMs fragmentMaxBufferSize)
           peerId
           assemblers
       (maybeComplete, assembler') = processFragment fragData now assembler
-  #npFragmentAssemblers .= Map.insert peerId assembler' assemblers
-  case maybeComplete of
-    Nothing -> pure []
-    Just completeData ->
-      case decodeChannelSeq completeData of
-        Nothing -> pure [] -- Malformed: missing channel sequence
-        Just (chSeq, msgData) -> do
-          modify' $ withConnection peerId (receiveIncomingPayload channel chSeq msgData now)
-          pure []
+      peer' = peer & #npFragmentAssemblers .~ Map.insert peerId assembler' assemblers
+   in case maybeComplete of
+        Nothing -> ([], peer')
+        Just completeData ->
+          case Proto.decodeChannelSeq completeData of
+            Nothing -> ([], peer')
+            Just (chSeq, msgData) ->
+              ([], withConnection peerId (receiveIncomingPayload channel chSeq msgData now) peer')
 
--- | Try to migrate an existing connection to a new address, or ignore the packet (State version).
-handleMigrationS :: PeerId -> Packet -> MonoTime -> State NetPeer [PeerEvent]
-handleMigrationS newPeerId pkt now = do
-  config <- use #npConfig
-  if not (ncEnableConnectionMigration config)
-    then pure []
-    else do
-      peer <- get
-      case findMigrationCandidate pkt now peer of
-        Nothing -> pure [] -- No matching connection
-        Just (oldPeerId, conn, migrationToken) ->
-          case Map.lookup migrationToken (npMigrationCooldowns peer) of
-            Just lastMigration
-              | elapsedMs lastMigration now < migrationCooldownMs ->
-                  pure [] -- Still in cooldown
-            _ -> do
-              -- Perform migration
-              modify' $ \p ->
-                p
-                  & #npConnections
-                  %~ (Map.insert newPeerId conn . Map.delete oldPeerId)
-                  & #npMigrationCooldowns
-                  %~ Map.insert migrationToken now
-                  & #npFragmentAssemblers
-                  %~ ( \fa -> case Map.lookup oldPeerId fa of
-                         Nothing -> fa
-                         Just asm -> Map.insert newPeerId asm $ Map.delete oldPeerId fa
-                     )
-              let event = PeerMigrated oldPeerId newPeerId
-              -- Now process the payload with the new peer ID
-              payloadEvents <- handlePayloadS newPeerId pkt now
-              pure (event : payloadEvents)
+-- | Try to migrate an existing connection to a new address, or ignore the packet (pure).
+handleMigration :: PeerId -> Packet -> MonoTime -> NetPeer -> ([PeerEvent], NetPeer)
+handleMigration newPeerId pkt now peer =
+  if not (ncEnableConnectionMigration (npConfig peer))
+    then ([], peer)
+    else case findMigrationCandidate pkt now peer of
+      Nothing -> ([], peer)
+      Just (oldPeerId, conn, migrationToken) ->
+        case Map.lookup migrationToken (npMigrationCooldowns peer) of
+          Just lastMigration
+            | elapsedMs lastMigration now < migrationCooldownMs ->
+                ([], peer) -- Still in cooldown
+          _ ->
+            let peer' =
+                  peer
+                    & #npConnections
+                    %~ (Map.insert newPeerId conn . Map.delete oldPeerId)
+                    & #npMigrationCooldowns
+                    %~ Map.insert migrationToken now
+                    & #npFragmentAssemblers
+                    %~ ( \fa -> case Map.lookup oldPeerId fa of
+                           Nothing -> fa
+                           Just asm -> Map.insert newPeerId asm $ Map.delete oldPeerId fa
+                       )
+                event = PeerMigrated oldPeerId newPeerId
+                (payloadEvents, peer'') = handlePayload newPeerId pkt now peer'
+             in (event : payloadEvents, peer'')
 
--- | Find a connection that could match this packet (for migration).
--- Returns (oldPeerId, connection, migrationToken) if found.
-findMigrationCandidate :: Packet -> MonoTime -> NetPeer -> Maybe (PeerId, Connection, Word64)
-findMigrationCandidate pkt _now peer =
-  let header = pktHeader pkt
-      incomingSeq = sequenceNum header
-      maxDistance = ncMaxSequenceDistance (npConfig peer)
-   in -- Find a connection whose sequence is within range
-      foldr
-        ( \(pid, conn) acc ->
-            case acc of
-              Just _ -> acc -- Already found one
-              Nothing ->
-                let remoteSeq = Conn.connRemoteSeq conn
-                    diff = abs (fromIntegral incomingSeq - fromIntegral remoteSeq :: Int)
-                 in if diff <= fromIntegral maxDistance
-                      then Just (pid, conn, migrationTokenFor conn)
-                      else Nothing
-        )
-        Nothing
-        (Map.toList (npConnections peer))
-
--- | Generate a migration token for a connection.
--- This should be stable across the connection lifetime.
-migrationTokenFor :: Connection -> Word64
-migrationTokenFor = Conn.connClientSalt
-
--- | Update all connections and collect messages/disconnects (State version).
+-- | Update all connections and collect messages/disconnects (pure).
 -- Uses reverse accumulator to avoid O(n^2) list appending.
-updateConnectionsS :: MonoTime -> State NetPeer [PeerEvent]
-updateConnectionsS now = do
-  conns <- use #npConnections
-  let (revEvents, conns', disconnectedIds) = Map.foldlWithKey' updateOne ([], Map.empty, []) conns
-  modify' $ \peer ->
-    foldl' (flip cleanupPeer) (peer & #npConnections .~ conns') disconnectedIds
-  pure (reverse revEvents)
+updateConnections :: MonoTime -> NetPeer -> ([PeerEvent], NetPeer)
+updateConnections now peer =
+  let conns = npConnections peer
+      (revEvents, conns', disconnectedIds) = Map.foldlWithKey' updateOne ([], Map.empty, []) conns
+      peer' = foldl' (flip cleanupPeer) (peer & #npConnections .~ conns') disconnectedIds
+   in (reverse revEvents, peer')
   where
     updateOne (revEvts, connsAcc, discs) peerId conn =
       case Conn.updateTick now conn of
@@ -892,82 +491,13 @@ retryPendingConnectionsPure now peer =
                in queueControlPacket ConnectionRequest BS.empty peerId p'
             else p
 
--- | Cleanup expired pending connections (State version).
-cleanupPendingS :: MonoTime -> State NetPeer [PeerEvent]
-cleanupPendingS now = do
-  config <- use #npConfig
-  pending <- use #npPending
-  let timeout = ncConnectionRequestTimeoutMs config
-      (expired, kept) = Map.partition (\p -> elapsedMs (pcCreatedAt p) now > timeout) pending
+-- | Cleanup expired pending connections (pure).
+cleanupPending :: MonoTime -> NetPeer -> ([PeerEvent], NetPeer)
+cleanupPending now peer =
+  let timeout = ncConnectionRequestTimeoutMs (npConfig peer)
+      (expired, kept) = Map.partition (\p -> elapsedMs (pcCreatedAt p) now > timeout) (npPending peer)
       events = map (\(pid, _) -> PeerDisconnected pid ReasonTimeout) (Map.toList expired)
-  #npPending .= kept
-  pure events
-
--- | Remove a peer from pending.
-removePending :: PeerId -> NetPeer -> NetPeer
-removePending peerId peer = peer & #npPending %~ Map.delete peerId
-
--- | Encode a Word64 salt to bytes.
-encodeSalt :: Word64 -> BS.ByteString
-encodeSalt = serialize
-{-# INLINE encodeSalt #-}
-
--- | Decode a Word64 salt from bytes.
-decodeSalt :: BS.ByteString -> Maybe Word64
-decodeSalt bs = case deserialize bs of
-  Left _ -> Nothing
-  Right v -> Just v
-{-# INLINE decodeSalt #-}
-
--- | Deny reason codes.
-denyReasonServerFull :: Word8
-denyReasonServerFull = 1
-
-denyReasonInvalidChallenge :: Word8
-denyReasonInvalidChallenge = 2
-
--- | Encode a deny reason to bytes.
-encodeDenyReason :: Word8 -> BS.ByteString
-encodeDenyReason = BS.singleton
-
--- | Decode a deny reason from bytes.
-decodeDenyReason :: BS.ByteString -> Word8
-decodeDenyReason bs = maybe 0 fst (BS.uncons bs)
-
--- | FNV-1a hash seed.
-fnvOffsetBasis :: Word64
-fnvOffsetBasis = 14695981039346656037
-
--- | FNV-1a hash prime.
-fnvPrime :: Word64
-fnvPrime = 1099511628211
-
--- | Convert SockAddr to a key for rate limiting using FNV-1a hash.
--- Hashes the raw address/port words directly, avoiding 'show'.
-sockAddrToKey :: SockAddr -> Word64
-sockAddrToKey addr = case addr of
-  SockAddrInet port host ->
-    fnvMix (fnvMix fnvOffsetBasis (fromIntegral host)) (fromIntegral (portToWord port))
-  SockAddrInet6 port _ (h1, h2, h3, h4) _ ->
-    foldl'
-      fnvMix
-      fnvOffsetBasis
-      [ fromIntegral (portToWord port),
-        fromIntegral h1,
-        fromIntegral h2,
-        fromIntegral h3,
-        fromIntegral h4
-      ]
-  _ -> fnvMix fnvOffsetBasis 0
-  where
-    portToWord :: PortNumber -> Word64
-    portToWord = fromIntegral
-    {-# INLINE portToWord #-}
-
--- | FNV-1a mix step: XOR then multiply.
-fnvMix :: Word64 -> Word64 -> Word64
-fnvMix h val = (h `xor` val) * fnvPrime
-{-# INLINE fnvMix #-}
+   in (events, peer & #npPending .~ kept)
 
 -- | Send a message to a connected peer.
 peerSend ::

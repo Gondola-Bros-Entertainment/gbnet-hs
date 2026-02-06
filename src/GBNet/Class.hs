@@ -33,7 +33,7 @@ import Network.Socket (SockAddr)
 -- Derives 'Num' because arithmetic on timestamps is pervasive.
 newtype MonoTime = MonoTime {unMonoTime :: Word64}
   deriving stock (Eq, Ord, Show)
-  deriving newtype (Bounded, Enum, Integral, NFData, Num, Real)
+  deriving newtype (Bounded, Enum, NFData, Num)
 
 -- | Network errors.
 data NetError

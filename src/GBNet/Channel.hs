@@ -50,6 +50,7 @@ module GBNet.Channel
   )
 where
 
+import Control.DeepSeq (NFData (..), rwhnf)
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
 import Data.Map.Strict (Map)
@@ -76,6 +77,8 @@ data DeliveryMode
   | -- | Guaranteed delivery, drops out-of-order
     ReliableSequenced
   deriving (Eq, Show, Enum, Bounded)
+
+instance NFData DeliveryMode where rnf = rwhnf
 
 -- | Check if a delivery mode guarantees delivery.
 isReliable :: DeliveryMode -> Bool
@@ -106,7 +109,12 @@ data ChannelConfig = ChannelConfig
     ccMaxReliableRetries :: !Int,
     ccPriority :: !Word8
   }
-  deriving (Show)
+  deriving (Eq, Show)
+
+instance NFData ChannelConfig where
+  rnf (ChannelConfig dm mms mbs bof obt mobs mrr p) =
+    rnf dm `seq` rnf mms `seq` rnf mbs `seq` rnf bof
+      `seq` rnf obt `seq` rnf mobs `seq` rnf mrr `seq` rnf p
 
 -- | Default channel configuration (ReliableOrdered).
 defaultChannelConfig :: ChannelConfig
@@ -155,6 +163,10 @@ data ChannelMessage = ChannelMessage
   }
   deriving (Show)
 
+instance NFData ChannelMessage where
+  rnf (ChannelMessage s d t a r rel) =
+    rnf s `seq` rnf d `seq` rnf t `seq` rnf a `seq` rnf r `seq` rnf rel
+
 -- | Channel state for message delivery.
 data Channel = Channel
   { chConfig :: !ChannelConfig,
@@ -172,6 +184,12 @@ data Channel = Channel
     chTotalRetransmits :: !Word64
   }
   deriving (Show)
+
+instance NFData Channel where
+  rnf (Channel cfg ci ls rs sb rb pa orb oe ts tr td trt) =
+    rnf cfg `seq` rnf ci `seq` rnf ls `seq` rnf rs `seq` rnf sb
+      `seq` rnf rb `seq` rnf pa `seq` rnf orb `seq` rnf oe
+      `seq` rnf ts `seq` rnf tr `seq` rnf td `seq` rnf trt
 
 makeFieldLabelsNoPrefix ''ChannelConfig
 makeFieldLabelsNoPrefix ''ChannelMessage
@@ -453,3 +471,5 @@ data ChannelError
   = ChannelBufferFull
   | ChannelMessageTooLarge
   deriving (Eq, Show)
+
+instance NFData ChannelError where rnf = rwhnf

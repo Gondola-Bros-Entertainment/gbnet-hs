@@ -52,7 +52,6 @@ import GBNet.Socket
     maxUdpPacketSize,
     socketSendTo,
   )
-import GBNet.Stats ()
 import Network.Socket (SockAddr, Socket)
 import qualified Network.Socket.ByteString as NSB
 import Optics ((%), (%~), (&), (.~), (?~))

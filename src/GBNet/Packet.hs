@@ -37,6 +37,7 @@ import Data.ByteString.Internal (unsafeCreate)
 import qualified Data.ByteString.Unsafe as BSU
 import Data.Word (Word16, Word32, Word8)
 import Foreign.Storable (pokeByteOff)
+import Control.DeepSeq (NFData (..), rwhnf)
 import GBNet.Types (SequenceNum (..))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
@@ -65,6 +66,8 @@ data PacketType
     ConnectionResponse
   deriving (Eq, Show, Enum, Bounded)
 
+instance NFData PacketType where rnf = rwhnf
+
 -- | Packet header (68 bits on wire).
 data PacketHeader = PacketHeader
   { -- | 4 bits
@@ -77,6 +80,9 @@ data PacketHeader = PacketHeader
     ackBitfield :: !Word32
   }
   deriving (Eq, Show)
+
+instance NFData PacketHeader where
+  rnf (PacketHeader pt sn ak abf) = rnf pt `seq` rnf sn `seq` rnf ak `seq` rnf abf
 
 -- | Header size in bytes (68 bits = 9 bytes, rounded up).
 packetHeaderByteSize :: Int

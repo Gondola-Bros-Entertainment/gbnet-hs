@@ -6,10 +6,11 @@ module GBNet.Util
 
     -- * Deterministic RNG (LCG + SplitMix output mixing)
     nextRandom,
+    randomDouble,
   )
 where
 
-import Data.Bits (shiftR, xor)
+import Data.Bits (shiftR, xor, (.&.))
 import Data.Int (Int32)
 import Data.Word (Word16, Word64)
 import GBNet.Types (SequenceNum (..))
@@ -57,3 +58,9 @@ nextRandom s =
       output = z3 `xor` (z3 `shiftR` 31)
    in (output, next)
 {-# INLINE nextRandom #-}
+
+-- | Convert random Word64 to double in [0, 1).
+-- Uses lower 32 bits; SplitMix output mixing ensures all bits are well-distributed.
+randomDouble :: Word64 -> Double
+randomDouble w = fromIntegral (w .&. 0xFFFFFFFF) / 4294967296.0
+{-# INLINE randomDouble #-}

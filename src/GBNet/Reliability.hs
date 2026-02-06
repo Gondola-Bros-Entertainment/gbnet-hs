@@ -37,7 +37,7 @@ module GBNet.Reliability
 
     -- * Sequence buffer
     SBEntry (..),
-    SequenceBuffer (..),
+    SequenceBuffer,
     newSequenceBuffer,
     sbInsert,
     sbInsertMany,
@@ -166,7 +166,7 @@ setBitWord64 idx False w = w .&. complement (1 `shiftL` idx)
 
 -- | Elapsed time in milliseconds.
 elapsedMs :: MonoTime -> MonoTime -> Double
-elapsedMs start now = fromIntegral (now - start) / 1e6
+elapsedMs start now = fromIntegral (unMonoTime (now - start)) / 1e6
 {-# INLINE elapsedMs #-}
 
 -- SequenceBuffer
@@ -190,6 +190,9 @@ data SequenceBuffer a = SequenceBuffer
     sbSize :: !Int -- Keep for API compat, but use mask internally
   }
   deriving (Show)
+
+instance (NFData a) => NFData (SequenceBuffer a) where
+  rnf (SequenceBuffer e s sz) = rnf e `seq` rnf s `seq` rnf sz
 
 makeFieldLabelsNoPrefix ''SequenceBuffer
 
@@ -470,6 +473,13 @@ data ReliableEndpoint = ReliableEndpoint
   }
   deriving (Show)
 
+instance NFData ReliableEndpoint where
+  rnf (ReliableEndpoint ls rs ab sp rp msd mif srtt rv rto hrs lw lwi lwc ts ta tl pe bs ba) =
+    rnf ls `seq` rnf rs `seq` rnf ab `seq` rnf sp `seq` rnf rp
+      `seq` rnf msd `seq` rnf mif `seq` rnf srtt `seq` rnf rv `seq` rnf rto
+      `seq` rnf hrs `seq` rnf lw `seq` rnf lwi `seq` rnf lwc
+      `seq` rnf ts `seq` rnf ta `seq` rnf tl `seq` rnf pe `seq` rnf bs `seq` rnf ba
+
 makeFieldLabelsNoPrefix ''ReliableEndpoint
 
 newReliableEndpoint :: Int -> ReliableEndpoint
@@ -699,7 +709,7 @@ srttMs :: ReliableEndpoint -> Double
 srttMs = reSrtt
 {-# INLINE srttMs #-}
 
-packetLossPercent :: ReliableEndpoint -> Float
+packetLossPercent :: ReliableEndpoint -> Double
 packetLossPercent ep
   | count == 0 = 0.0
   | otherwise = fromIntegral lost / fromIntegral count

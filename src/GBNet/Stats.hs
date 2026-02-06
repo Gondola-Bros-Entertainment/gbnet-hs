@@ -23,14 +23,6 @@ module GBNet.Stats
     NetworkStats (..),
     defaultNetworkStats,
 
-    -- * Channel statistics
-    ChannelStats (..),
-    defaultChannelStats,
-
-    -- * Reliability statistics
-    ReliabilityStats (..),
-    defaultReliabilityStats,
-
     -- * Socket statistics
     SocketStats (..),
     defaultSocketStats,
@@ -51,20 +43,20 @@ data ConnectionQuality
   deriving (Eq, Show, Ord)
 
 -- Quality thresholds: (lossPercent, rttMs)
-badLossThreshold, poorLossThreshold, fairLossThreshold, goodLossThreshold :: Float
+badLossThreshold, poorLossThreshold, fairLossThreshold, goodLossThreshold :: Double
 badLossThreshold = 10.0
 poorLossThreshold = 5.0
 fairLossThreshold = 2.0
 goodLossThreshold = 0.5
 
-badRttThreshold, poorRttThreshold, fairRttThreshold, goodRttThreshold :: Float
+badRttThreshold, poorRttThreshold, fairRttThreshold, goodRttThreshold :: Double
 badRttThreshold = 500.0
 poorRttThreshold = 250.0
 fairRttThreshold = 150.0
 goodRttThreshold = 80.0
 
 -- | Assess connection quality from RTT and packet loss.
-assessConnectionQuality :: Float -> Float -> ConnectionQuality
+assessConnectionQuality :: Double -> Double -> ConnectionQuality
 assessConnectionQuality rttMs lossPercent
   | lossPercent > badLossThreshold || rttMs > badRttThreshold = QualityBad
   | lossPercent > poorLossThreshold || rttMs > poorRttThreshold = QualityPoor
@@ -93,10 +85,10 @@ data NetworkStats = NetworkStats
     nsPacketsReceived :: !Word64,
     nsBytesSent :: !Word64,
     nsBytesReceived :: !Word64,
-    nsRtt :: !Float,
-    nsPacketLoss :: !Float,
-    nsBandwidthUp :: !Float,
-    nsBandwidthDown :: !Float,
+    nsRtt :: !Double,
+    nsPacketLoss :: !Double,
+    nsBandwidthUp :: !Double,
+    nsBandwidthDown :: !Double,
     nsConnectionQuality :: !ConnectionQuality,
     nsCongestionLevel :: !CongestionLevel
   }
@@ -116,48 +108,6 @@ defaultNetworkStats =
       nsBandwidthDown = 0.0,
       nsConnectionQuality = QualityExcellent,
       nsCongestionLevel = CongestionNone
-    }
-
--- | Per-channel statistics.
-data ChannelStats = ChannelStats
-  { csMessagesSent :: !Word64,
-    csMessagesReceived :: !Word64,
-    csMessagesDropped :: !Word64,
-    csRetransmissions :: !Word64
-  }
-  deriving (Show)
-
--- | Default channel statistics.
-defaultChannelStats :: ChannelStats
-defaultChannelStats =
-  ChannelStats
-    { csMessagesSent = 0,
-      csMessagesReceived = 0,
-      csMessagesDropped = 0,
-      csRetransmissions = 0
-    }
-
--- | Reliability layer statistics.
-data ReliabilityStats = ReliabilityStats
-  { rsTotalSent :: !Word64,
-    rsTotalAcked :: !Word64,
-    rsTotalLost :: !Word64,
-    rsEvicted :: !Word64,
-    rsBytesSent :: !Word64,
-    rsBytesAcked :: !Word64
-  }
-  deriving (Show)
-
--- | Default reliability statistics.
-defaultReliabilityStats :: ReliabilityStats
-defaultReliabilityStats =
-  ReliabilityStats
-    { rsTotalSent = 0,
-      rsTotalAcked = 0,
-      rsTotalLost = 0,
-      rsEvicted = 0,
-      rsBytesSent = 0,
-      rsBytesAcked = 0
     }
 
 -- | Socket-level statistics.
@@ -186,6 +136,4 @@ defaultSocketStats =
     }
 
 makeFieldLabelsNoPrefix ''NetworkStats
-makeFieldLabelsNoPrefix ''ChannelStats
-makeFieldLabelsNoPrefix ''ReliabilityStats
 makeFieldLabelsNoPrefix ''SocketStats

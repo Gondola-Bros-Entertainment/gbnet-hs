@@ -3,18 +3,14 @@
 
 module Main where
 
-import Control.DeepSeq (NFData (..), rwhnf)
+import Control.DeepSeq (NFData (..))
 import Criterion.Main
 import qualified Data.ByteString as BS
 import Data.List (foldl')
 import Data.Word (Word16, Word32, Word64)
 import Foreign.Storable (Storable (..))
 import GBNet.Channel
-  ( Channel (..),
-    ChannelConfig (..),
-    ChannelError (..),
-    ChannelMessage (..),
-    DeliveryMode (..),
+  ( Channel,
     channelSend,
     defaultChannelConfig,
     getRetransmitMessages,
@@ -25,33 +21,30 @@ import GBNet.Channel
 import GBNet.Class (MonoTime (..))
 import GBNet.Config (defaultNetworkConfig)
 import GBNet.Connection
-  ( Connection (..),
+  ( Connection,
     drainSendQueue,
     newConnection,
     sendMessage,
   )
-import qualified GBNet.Connection
 import GBNet.Fragment
-  ( FragmentAssembler (..),
-    FragmentHeader (..),
+  ( FragmentHeader (..),
     deserializeFragmentHeader,
     fragmentMessage,
     newFragmentAssembler,
     processFragment,
     serializeFragmentHeader,
   )
-import qualified GBNet.Fragment
 import GBNet.Packet
   ( PacketHeader (..),
-    PacketType (..),
+    PacketType (Payload),
     deserializeHeader,
     serializeHeader,
   )
 import GBNet.Reliability
-  ( ReliableEndpoint (..),
+  ( ReliableEndpoint,
     SBEntry (..),
     SentPacketRecord (..),
-    SequenceBuffer (..),
+    SequenceBuffer,
     newReliableEndpoint,
     newSequenceBuffer,
     onPacketSent,
@@ -84,104 +77,12 @@ data Transform = Transform !Vec3S !Float -- position + rotation angle
 deriveStorable ''Transform
 
 --------------------------------------------------------------------------------
--- NFData instances for criterion (force full evaluation)
+-- NFData instances for benchmark-only types
 --------------------------------------------------------------------------------
-
--- Note: SequenceNum, ChannelId have NFData derived in GBNet.Types
-
-instance NFData MessageId where rnf (MessageId w) = rnf w
-
--- Note: MonoTime NFData is derived in GBNet.Class
-
-instance NFData FragmentHeader where
-  rnf (FragmentHeader mid idx cnt) = rnf mid `seq` rnf idx `seq` rnf cnt
-
-instance NFData PacketType where rnf = rwhnf
-
-instance NFData DeliveryMode where rnf = rwhnf
-
-instance NFData ChannelError where rnf = rwhnf
 
 instance NFData Vec3S where rnf (Vec3S x y z) = rnf x `seq` rnf y `seq` rnf z
 
 instance NFData Transform where rnf (Transform v r) = rnf v `seq` rnf r
-
--- Packet
-instance NFData PacketHeader where
-  rnf (PacketHeader pt sn ak abf) = rnf pt `seq` rnf sn `seq` rnf ak `seq` rnf abf
-
--- Reliability
--- Note: SentPacketRecord NFData is defined in GBNet.Reliability
-
-instance (NFData a) => NFData (SequenceBuffer a) where
-  rnf sb = rnf (sbEntries sb) `seq` rnf (sbSequence sb) `seq` rnf (sbSize sb)
-
-instance NFData ReliableEndpoint where
-  rnf (ReliableEndpoint ls rs ab sp rp msd mif srtt rv rto hrs lw lwi lwc ts ta tl pe bs ba) =
-    rnf ls `seq`
-      rnf rs `seq`
-        rnf ab `seq`
-          rnf sp `seq`
-            rnf rp `seq`
-              rnf msd `seq`
-                rnf mif `seq`
-                  rnf srtt `seq`
-                    rnf rv `seq`
-                      rnf rto `seq`
-                        rnf hrs `seq`
-                          rnf lw `seq`
-                            rnf lwi `seq`
-                              rnf lwc `seq`
-                                rnf ts `seq`
-                                  rnf ta `seq`
-                                    rnf tl `seq`
-                                      rnf pe `seq`
-                                        rnf bs `seq`
-                                          rnf ba
-
--- Channel
-instance NFData ChannelConfig where
-  rnf (ChannelConfig dm mms mbs bof obt mobs mrr p) =
-    rnf dm `seq`
-      rnf mms `seq`
-        rnf mbs `seq`
-          rnf bof `seq`
-            rnf obt `seq`
-              rnf mobs `seq`
-                rnf mrr `seq`
-                  rnf p
-
-instance NFData ChannelMessage where
-  rnf (ChannelMessage s d t a r rel) =
-    rnf s `seq` rnf d `seq` rnf t `seq` rnf a `seq` rnf r `seq` rnf rel
-
-instance NFData Channel where
-  rnf (Channel cfg ci ls rs sb rb pa orb oe ts tr td trt) =
-    rnf cfg `seq`
-      rnf ci `seq`
-        rnf ls `seq`
-          rnf rs `seq`
-            rnf sb `seq`
-              rnf rb `seq`
-                rnf pa `seq`
-                  rnf orb `seq`
-                    rnf oe `seq`
-                      rnf ts `seq`
-                        rnf tr `seq`
-                          rnf td `seq`
-                            rnf trt
-
--- Connection (use rwhnf - deep eval is expensive)
-instance NFData Connection where rnf = rwhnf
-
-instance NFData GBNet.Connection.ConnectionError where rnf = rwhnf
-
-instance NFData GBNet.Connection.OutgoingPacket where rnf = rwhnf
-
--- FragmentAssembler
-instance NFData FragmentAssembler where rnf = rwhnf
-
-instance NFData GBNet.Fragment.FragmentError where rnf = rwhnf
 
 --------------------------------------------------------------------------------
 -- Setup helpers

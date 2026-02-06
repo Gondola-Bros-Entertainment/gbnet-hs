@@ -41,7 +41,6 @@ module GBNet.TestNet
     runPeerInWorld,
     deliverPackets,
     worldAdvanceTime,
-    worldGetPeerState,
   )
 where
 
@@ -54,12 +53,13 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Word (Word64)
 import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime (..), NetError (..))
+import GBNet.Security (validateAndStripCrc32)
 import Network.Socket (SockAddr)
 import Optics ((%), (%~), (&), (.~))
 import Optics.State (use)
 import Optics.State.Operators ((%=), (.=))
 import Optics.TH (makeFieldLabelsNoPrefix)
-import System.Random (StdGen, mkStdGen, randomR)
+import GBNet.Util (nextRandom, randomDouble)
 
 -- | A packet in transit.
 data InFlightPacket = InFlightPacket
@@ -102,7 +102,7 @@ data TestNetState = TestNetState
     tnsInFlight :: !(Seq InFlightPacket), -- Packets in transit
     tnsInbox :: !(Seq (ByteString, SockAddr)), -- Delivered packets
     tnsConfig :: !TestNetConfig,
-    tnsRng :: !StdGen,
+    tnsRng :: !Word64,
     tnsClosed :: !Bool
   }
   deriving (Show)
@@ -118,7 +118,7 @@ initialTestNetState localAddr =
       tnsInFlight = Seq.empty,
       tnsInbox = Seq.empty,
       tnsConfig = defaultTestNetConfig,
-      tnsRng = mkStdGen 42, -- Deterministic seed
+      tnsRng = 42, -- Deterministic seed
       tnsClosed = False
     }
 
@@ -140,13 +140,15 @@ instance MonadNetwork TestNet where
       then pure (Left NetSocketClosed)
       else do
         let cfg = tnsConfig st
-            (shouldDrop, rng') = randomR (0.0, 1.0) (tnsRng st) :: (Double, StdGen)
-        if shouldDrop < tncLossRate cfg
+            (r1, rng') = nextRandom (tnsRng st)
+        if randomDouble r1 < tncLossRate cfg
           then do
             #tnsRng .= rng'
             pure (Right ())
           else do
-            let (jitter, rng'') = randomR (0, tncJitterNs cfg) rng'
+            let (r2, rng'') = nextRandom rng'
+                jitterRange = tncJitterNs cfg
+                jitter = if jitterRange == 0 then 0 else r2 `mod` (jitterRange + 1)
                 deliverAt = tnsCurrentTime st + MonoTime (tncLatencyNs cfg) + MonoTime jitter
                 pkt =
                   InFlightPacket
@@ -165,7 +167,10 @@ instance MonadNetwork TestNet where
       Seq.EmptyL -> pure Nothing
       (bytes, from) Seq.:< rest -> do
         #tnsInbox .= rest
-        pure (Just (bytes, from))
+        -- Validate and strip CRC, matching the IO backend behavior
+        case validateAndStripCrc32 bytes of
+          Nothing -> pure Nothing -- Drop corrupt packets
+          Just validated -> pure (Just (validated, from))
 
   netClose = #tnsClosed .= True
 
@@ -273,6 +278,3 @@ worldAdvanceTime newTime world =
           (twPeers world')
    in deliverPackets (world' & #twPeers .~ updatedPeers)
 
--- | Get a peer's state from the world (for inspection in tests).
-worldGetPeerState :: SockAddr -> TestWorld -> Maybe TestNetState
-worldGetPeerState addr world = Map.lookup addr (twPeers world)

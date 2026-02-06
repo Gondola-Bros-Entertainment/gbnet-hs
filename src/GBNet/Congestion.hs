@@ -49,7 +49,6 @@ module GBNet.Congestion
     newCongestionWindow,
     cwOnAck,
     cwOnLoss,
-    cwExitRecovery,
     cwOnSend,
     cwCanSend,
     cwUpdatePacing,
@@ -81,10 +80,10 @@ import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- Constants
 
-congestionRateReduction :: Float
+congestionRateReduction :: Double
 congestionRateReduction = 0.5
 
-minSendRate :: Float
+minSendRate :: Double
 minSendRate = 1.0
 
 batchHeaderSize :: Int
@@ -119,11 +118,11 @@ initialSsthresh :: Double
 initialSsthresh = 1 / 0
 
 -- | Additive increase per update tick when in Good mode (packets/sec).
-sendRateIncrease :: Float
+sendRateIncrease :: Double
 sendRateIncrease = 1.0
 
 -- | Maximum send rate multiplier relative to base rate.
-maxSendRateMultiplier :: Float
+maxSendRateMultiplier :: Double
 maxSendRateMultiplier = 4.0
 
 -- | Binary congestion state.
@@ -143,10 +142,10 @@ data CongestionPhase
 data CongestionController = CongestionController
   { ccMode :: !CongestionMode,
     ccGoodConditionsStart :: !(Maybe MonoTime),
-    ccLossThreshold :: !Float,
-    ccRttThresholdMs :: !Float,
-    ccBaseSendRate :: !Float,
-    ccCurrentSendRate :: !Float,
+    ccLossThreshold :: !Double,
+    ccRttThresholdMs :: !Double,
+    ccBaseSendRate :: !Double,
+    ccCurrentSendRate :: !Double,
     ccBudgetBytesRemaining :: !Int,
     ccBytesPerTick :: !Int,
     ccAdaptiveRecoverySecs :: !Double,
@@ -158,7 +157,7 @@ data CongestionController = CongestionController
 makeFieldLabelsNoPrefix ''CongestionController
 
 -- | Create a new congestion controller.
-newCongestionController :: Float -> Float -> Float -> Double -> CongestionController
+newCongestionController :: Double -> Double -> Double -> Double -> CongestionController
 newCongestionController baseSendRate lossThreshold rttThresholdMs recoveryTimeMs =
   CongestionController
     { ccMode = CongestionGood,
@@ -191,7 +190,7 @@ ccDeductBudget bytes cc =
 {-# INLINE ccDeductBudget #-}
 
 -- | Update congestion state based on current network conditions.
-ccUpdate :: Float -> Float -> MonoTime -> CongestionController -> CongestionController
+ccUpdate :: Double -> Double -> MonoTime -> CongestionController -> CongestionController
 ccUpdate packetLoss rttMs now cc =
   let isBad = packetLoss > ccLossThreshold cc || rttMs > ccRttThresholdMs cc
    in case ccMode cc of
@@ -279,7 +278,7 @@ ccCongestionLevel cc = case ccMode cc of
   where
     budgetRatio
       | ccBytesPerTick cc <= 0 = 1.0
-      | otherwise = fromIntegral (ccBudgetBytesRemaining cc) / fromIntegral (ccBytesPerTick cc) :: Float
+      | otherwise = fromIntegral (ccBudgetBytesRemaining cc) / fromIntegral (ccBytesPerTick cc) :: Double
     budgetElevatedThreshold = 0.25
 
 -- | Query congestion level from the window-based controller.
@@ -354,12 +353,6 @@ cwOnLoss cw =
         .~ newSsthresh
         & #cwPhase
         .~ Recovery
-
--- | Exit recovery and return to avoidance.
-cwExitRecovery :: CongestionWindow -> CongestionWindow
-cwExitRecovery cw
-  | cwPhase cw == Recovery = cw & #cwPhase .~ Avoidance
-  | otherwise = cw
 
 -- | Record bytes sent.
 cwOnSend :: Int -> MonoTime -> CongestionWindow -> CongestionWindow

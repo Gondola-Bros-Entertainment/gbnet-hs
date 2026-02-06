@@ -119,19 +119,19 @@ defaultMaxReliableRetries = 10
 defaultMaxChannels :: Int
 defaultMaxChannels = 8
 
-defaultSendRateHz :: Float
+defaultSendRateHz :: Double
 defaultSendRateHz = 60.0
 
-defaultMaxPacketRateHz :: Float
+defaultMaxPacketRateHz :: Double
 defaultMaxPacketRateHz = 120.0
 
-defaultCongestionThreshold :: Float
+defaultCongestionThreshold :: Double
 defaultCongestionThreshold = 0.1
 
-defaultCongestionGoodRttThresholdMs :: Float
+defaultCongestionGoodRttThresholdMs :: Double
 defaultCongestionGoodRttThresholdMs = 250.0
 
-defaultCongestionBadLossThreshold :: Float
+defaultCongestionBadLossThreshold :: Double
 defaultCongestionBadLossThreshold = 0.1
 
 defaultCongestionRecoveryTimeMs :: Double
@@ -218,11 +218,11 @@ data NetworkConfig = NetworkConfig
     ncMaxChannels :: !Int,
     ncDefaultChannelConfig :: !ChannelConfig,
     ncChannelConfigs :: ![ChannelConfig],
-    ncSendRate :: !Float,
-    ncMaxPacketRate :: !Float,
-    ncCongestionThreshold :: !Float,
-    ncCongestionGoodRttThreshold :: !Float,
-    ncCongestionBadLossThreshold :: !Float,
+    ncSendRate :: !Double,
+    ncMaxPacketRate :: !Double,
+    ncCongestionThreshold :: !Double,
+    ncCongestionGoodRttThreshold :: !Double,
+    ncCongestionBadLossThreshold :: !Double,
     ncCongestionRecoveryTimeMs :: !Double,
     ncDisconnectRetries :: !Int,
     ncDisconnectRetryTimeoutMs :: !Double,
@@ -234,7 +234,7 @@ data NetworkConfig = NetworkConfig
     ncDeltaBaselineTimeoutMs :: !Double,
     ncMaxBaselineSnapshots :: !Int
   }
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | Default network configuration.
 defaultNetworkConfig :: NetworkConfig
@@ -315,14 +315,14 @@ validateConfig cfg
 
 -- | Network condition simulation configuration.
 data SimulationConfig = SimulationConfig
-  { simPacketLoss :: !Float,
+  { simPacketLoss :: !Double,
     simLatencyMs :: !Int,
     simJitterMs :: !Int,
-    simDuplicateChance :: !Float,
-    simOutOfOrderChance :: !Float,
+    simDuplicateChance :: !Double,
+    simOutOfOrderChance :: !Double,
     simBandwidthLimitBytesPerSec :: !Int
   }
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | Default simulation config (no simulation).
 defaultSimulationConfig :: SimulationConfig

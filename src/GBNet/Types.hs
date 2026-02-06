@@ -45,4 +45,4 @@ newtype SequenceNum = SequenceNum {unSequenceNum :: Word16}
 -- Derives 'Num' for increment patterns in fragmentation.
 newtype MessageId = MessageId {unMessageId :: Word32}
   deriving stock (Eq, Ord, Show)
-  deriving newtype (Num, Bounded, Storable)
+  deriving newtype (Bounded, NFData, Num, Storable)

@@ -29,7 +29,6 @@ where
 
 import Control.Monad (when)
 import Control.Monad.State.Strict (State, runState)
-import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
 import Data.Sequence (Seq)
@@ -38,7 +37,7 @@ import Data.Word (Word64)
 import GBNet.Class (MonoTime (..))
 import GBNet.Config (SimulationConfig (..))
 import GBNet.Reliability (elapsedMs)
-import GBNet.Util (nextRandom)
+import GBNet.Util (nextRandom, randomDouble)
 import Optics ((&), (.~))
 import Optics.State (use)
 import Optics.State.Operators ((%=), (.=))
@@ -114,7 +113,7 @@ simulatorProcessSend dat addr now =
           then pure []
           else do
             let totalDelayMs = calculateDelay config r2 r3 r4
-                deliverAt = now + round (totalDelayMs * 1e6)
+                deliverAt = now + MonoTime (round (totalDelayMs * 1e6))
             immediate <- scheduleOrDeliverS dat addr deliverAt totalDelayMs
             scheduleDuplicateS dat addr now totalDelayMs config
             pure immediate
@@ -122,7 +121,7 @@ simulatorProcessSend dat addr now =
 -- | Check if a packet should be dropped due to simulated loss.
 checkLoss :: SimulationConfig -> Word64 -> Bool
 checkLoss config rng =
-  let threshold = realToFrac (simPacketLoss config) :: Double
+  let threshold = simPacketLoss config
    in threshold > 0.0 && randomDouble rng < threshold
 
 -- | Check if bandwidth limit is exceeded, consuming tokens if available.
@@ -146,7 +145,7 @@ calculateDelay config rJitter rOoOChance rOoODelay =
       jitter
         | simJitterMs config > 0 = randomDouble rJitter * fromIntegral (simJitterMs config)
         | otherwise = 0.0
-      outOfOrderChance = realToFrac (simOutOfOrderChance config) :: Double
+      outOfOrderChance = simOutOfOrderChance config
       extraDelay
         | outOfOrderChance > 0.0 && randomDouble rOoOChance < outOfOrderChance =
             randomDouble rOoODelay * outOfOrderMaxDelayMs
@@ -167,9 +166,9 @@ scheduleOrDeliverS dat addr deliverAt totalDelayMs
 scheduleDuplicateS :: BS.ByteString -> Word64 -> MonoTime -> Double -> SimulationConfig -> State NetworkSimulator ()
 scheduleDuplicateS dat addr now baseDelayMs config = do
   r <- nextRandomS
-  let dupChance = realToFrac (simDuplicateChance config) :: Double
+  let dupChance = simDuplicateChance config
   when (dupChance > 0.0 && randomDouble r < dupChance) $ do
-    let dupDeliverAt = now + round ((baseDelayMs + randomDouble r * duplicateJitterMs) * 1e6)
+    let dupDeliverAt = now + MonoTime (round ((baseDelayMs + randomDouble r * duplicateJitterMs) * 1e6))
         dupPacket = DelayedPacket {dpData = dat, dpAddr = addr, dpDeliverAt = dupDeliverAt}
     #nsDelayedPackets %= (Seq.|> dupPacket)
 
@@ -212,7 +211,3 @@ nextRandomS = do
   #nsRngState .= next
   pure output
 
--- | Convert random Word64 to double in [0, 1).
--- Uses lower 32 bits; SplitMix output mixing ensures all bits are well-distributed.
-randomDouble :: Word64 -> Double
-randomDouble w = fromIntegral (w .&. 0xFFFFFFFF) / 4294967296.0

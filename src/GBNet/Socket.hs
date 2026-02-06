@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -25,8 +26,6 @@ module GBNet.Socket
     closeSocket,
     socketLocalAddr,
     socketSendTo,
-    socketStats,
-    socketResetStats,
   )
 where
 
@@ -37,6 +36,7 @@ import GBNet.Stats (SocketStats (..), defaultSocketStats)
 import Network.Socket (SockAddr, Socket)
 import qualified Network.Socket as NS
 import qualified Network.Socket.ByteString as NSB
+import Optics ((%), (%~), (&), (.~))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Maximum size of a single UDP datagram.
@@ -108,22 +108,12 @@ socketSendTo dat addr now sock = do
   return $ case result of
     Left err -> Left (SocketIoError err)
     Right sent ->
-      let stats = usStats sock
-          stats' =
-            stats
-              { ssBytesSent = ssBytesSent stats + fromIntegral sent,
-                ssPacketsSent = ssPacketsSent stats + 1,
-                ssLastSendTime = Just now
-              }
-       in Right (sent, sock {usStats = stats'})
-
--- | Get socket statistics.
-socketStats :: UdpSocket -> SocketStats
-socketStats = usStats
-
--- | Reset socket statistics.
-socketResetStats :: UdpSocket -> UdpSocket
-socketResetStats sock = sock {usStats = defaultSocketStats}
+      let sock' =
+            sock
+              & #usStats % #ssBytesSent %~ (+ fromIntegral sent)
+              & #usStats % #ssPacketsSent %~ (+ 1)
+              & #usStats % #ssLastSendTime .~ Just now
+       in Right (sent, sock')
 
 -- | Try an IO action, catching IOExceptions.
 tryIO :: IO a -> IO (Either String a)
