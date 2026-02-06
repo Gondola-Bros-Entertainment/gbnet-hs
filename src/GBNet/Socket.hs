@@ -36,7 +36,7 @@ import GBNet.Stats (SocketStats (..), defaultSocketStats)
 import Network.Socket (SockAddr, Socket)
 import qualified Network.Socket as NS
 import qualified Network.Socket.ByteString as NSB
-import Optics ((%), (%~), (&), (.~))
+import Optics ((%), (%~), (&), (?~))
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- | Maximum size of a single UDP datagram.
@@ -110,9 +110,14 @@ socketSendTo dat addr now sock = do
     Right sent ->
       let sock' =
             sock
-              & #usStats % #ssBytesSent %~ (+ fromIntegral sent)
-              & #usStats % #ssPacketsSent %~ (+ 1)
-              & #usStats % #ssLastSendTime .~ Just now
+              & #usStats
+              % #ssBytesSent
+              %~ (+ fromIntegral sent)
+              & #usStats
+              % #ssPacketsSent
+              %~ (+ 1)
+              & (#usStats % #ssLastSendTime)
+              ?~ now
        in Right (sent, sock')
 
 -- | Try an IO action, catching IOExceptions.

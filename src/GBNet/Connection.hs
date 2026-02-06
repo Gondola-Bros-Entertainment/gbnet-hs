@@ -418,8 +418,10 @@ processIncomingHeader header now conn0 =
   let -- Record received packet for ACK generation
       conn1 =
         conn0
-          & #connReliability %~ Rel.onPacketsReceived [sequenceNum header]
-          & #connPendingAck .~ True
+          & #connReliability
+          %~ Rel.onPacketsReceived [sequenceNum header]
+          & #connPendingAck
+          .~ True
       -- Process ACKs (extend 32-bit wire format to 64-bit)
       ackBits64 = fromIntegral (ackBitfield header) :: Word64
       (ackResult, rel') = Rel.processAcks (ack header) ackBits64 now (connReliability conn1)
@@ -435,7 +437,7 @@ processIncomingHeader header now conn0 =
                 | hasLoss = cwOnLoss cwVal
                 | ackedBytes > 0 = cwOnAck ackedBytes cwVal
                 | otherwise = cwVal
-           in conn2 & #connCwnd .~ Just cwVal'
+           in conn2 & #connCwnd ?~ cwVal'
         Nothing -> conn2
       -- Acknowledge messages on channels
       conn4 = foldl' (\c (chId, chSeq) -> modifyChannel (channelIdToInt chId) (Channel.acknowledgeMessage chSeq) c) conn3 ackedPairs
@@ -492,7 +494,7 @@ updateConnectedPure now conn0 =
         Just cwVal ->
           let rto = Rel.rtoMs (connReliability conn1)
               cwPaced = cwUpdatePacing rto $ cwSlowStartRestart rto now cwVal
-           in conn1 & #connCwnd .~ Just cwPaced
+           in conn1 & #connCwnd ?~ cwPaced
         Nothing -> conn1
       -- Send keepalive if needed
       timeSinceSend = elapsedMs (connLastSendTime conn2) now
@@ -516,13 +518,26 @@ updateConnectedPure now conn0 =
       rel' = connReliability conn6
       conn7 =
         conn6
-          & #connStats % #nsRtt .~ Rel.srttMs rel'
-          & #connStats % #nsPacketLoss .~ Rel.packetLossPercent rel'
-          & #connStats % #nsBandwidthUp .~ btBytesPerSecond (connBandwidthUp conn6)
-          & #connStats % #nsBandwidthDown .~ btBytesPerSecond (connBandwidthDown conn6)
-          & #connStats % #nsConnectionQuality .~ assessConnectionQuality (Rel.srttMs rel') (Rel.packetLossPercent rel' * 100)
-          & #connStats % #nsCongestionLevel .~ congLevel
-          & #connPendingAck .~ False
+          & #connStats
+          % #nsRtt
+          .~ Rel.srttMs rel'
+          & #connStats
+          % #nsPacketLoss
+          .~ Rel.packetLossPercent rel'
+          & #connStats
+          % #nsBandwidthUp
+          .~ btBytesPerSecond (connBandwidthUp conn6)
+          & #connStats
+          % #nsBandwidthDown
+          .~ btBytesPerSecond (connBandwidthDown conn6)
+          & #connStats
+          % #nsConnectionQuality
+          .~ assessConnectionQuality (Rel.srttMs rel') (Rel.packetLossPercent rel' * 100)
+          & #connStats
+          % #nsCongestionLevel
+          .~ congLevel
+          & #connPendingAck
+          .~ False
    in conn7
 
 -- | Process outgoing messages from channels.
@@ -657,23 +672,34 @@ resetConnection :: Connection -> Connection
 resetConnection conn =
   let config = connConfig conn
    in conn
-        & #connStartTime .~ Nothing
-        & #connRequestTime .~ Nothing
-        & #connLocalSeq .~ 0
-        & #connSendQueue .~ Seq.empty
-        & #connDisconnectTime .~ Nothing
-        & #connDisconnectRetries .~ 0
-        & #connPendingAck .~ False
-        & #connDataSentThisTick .~ False
-        & #connChannels .~ IntMap.map Channel.resetChannel (connChannels conn)
+        & #connStartTime
+        .~ Nothing
+        & #connRequestTime
+        .~ Nothing
+        & #connLocalSeq
+        .~ 0
+        & #connSendQueue
+        .~ Seq.empty
+        & #connDisconnectTime
+        .~ Nothing
+        & #connDisconnectRetries
+        .~ 0
+        & #connPendingAck
+        .~ False
+        & #connDataSentThisTick
+        .~ False
+        & #connChannels
+        .~ IntMap.map Channel.resetChannel (connChannels conn)
         & #connCongestion
-          .~ newCongestionController
-            (ncSendRate config)
-            (ncCongestionBadLossThreshold config)
-            (ncCongestionGoodRttThreshold config)
-            (ncCongestionRecoveryTimeMs config)
-        & #connBandwidthUp .~ newBandwidthTracker bandwidthWindowMs
-        & #connBandwidthDown .~ newBandwidthTracker bandwidthWindowMs
+        .~ newCongestionController
+          (ncSendRate config)
+          (ncCongestionBadLossThreshold config)
+          (ncCongestionGoodRttThreshold config)
+          (ncCongestionRecoveryTimeMs config)
+        & #connBandwidthUp
+        .~ newBandwidthTracker bandwidthWindowMs
+        & #connBandwidthDown
+        .~ newBandwidthTracker bandwidthWindowMs
 
 -- | Drain send queue.
 drainSendQueue :: Connection -> ([OutgoingPacket], Connection)
