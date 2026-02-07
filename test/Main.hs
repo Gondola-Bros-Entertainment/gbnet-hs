@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -7,6 +8,7 @@
 module Main where
 
 import Data.Bits ((.&.))
+import Data.List (foldl')
 import qualified Data.ByteString as BS
 import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Channel
@@ -52,7 +54,7 @@ import GBNet.Types (ChannelId (..), MessageId (..), SequenceNum (..))
 import GBNet.Util
 import Network.Socket (SockAddr (..), tupleToHostAddress)
 import qualified Network.Socket as NS
-import Test.QuickCheck (Arbitrary (..), quickCheck, withMaxSuccess)
+import Test.QuickCheck (Arbitrary (..), Property, elements, quickCheck, withMaxSuccess, (==>))
 
 --------------------------------------------------------------------------------
 -- TH-derived test types (Storable)
@@ -69,6 +71,33 @@ deriveStorable ''Vec3
 
 instance Arbitrary Vec3 where
   arbitrary = Vec3 <$> arbitrary <*> arbitrary <*> arbitrary
+
+instance Arbitrary PacketType where
+  arbitrary = elements [minBound .. maxBound]
+
+instance Arbitrary SequenceNum where
+  arbitrary = SequenceNum <$> arbitrary
+
+instance Arbitrary PacketHeader where
+  arbitrary =
+    PacketHeader
+      <$> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+
+instance Arbitrary MessageId where
+  arbitrary = MessageId <$> arbitrary
+
+instance Arbitrary FragmentHeader where
+  arbitrary =
+    FragmentHeader
+      <$> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+
+instance Arbitrary TestDeltaState where
+  arbitrary = TestDeltaState <$> arbitrary <*> arbitrary
 
 --------------------------------------------------------------------------------
 -- Delta test types (Storable-based)
@@ -210,6 +239,7 @@ main = do
 
   -- Simulator
   testSimulatorBasic
+  testSimulatorPeerDelivery
 
   putStrLn ""
   putStrLn "All tests passed!"
@@ -956,11 +986,87 @@ propStorableRoundTrip v =
     Right v' -> v == v'
     Left _ -> False
 
+-- | PacketHeader serialize/deserialize roundtrip
+propPacketHeaderRoundTrip :: PacketHeader -> Bool
+propPacketHeaderRoundTrip hdr =
+  case deserializeHeader (serializeHeader hdr) of
+    Left _ -> False
+    Right hdr' ->
+      packetType hdr == packetType hdr'
+        && sequenceNum hdr == sequenceNum hdr'
+        && ack hdr == ack hdr'
+        && ackBitfield hdr == ackBitfield hdr'
+
+-- | FragmentHeader serialize/deserialize roundtrip
+propFragmentHeaderRoundTrip :: FragmentHeader -> Bool
+propFragmentHeaderRoundTrip hdr =
+  case deserializeFragmentHeader (serializeFragmentHeader hdr) of
+    Nothing -> False
+    Just hdr' ->
+      fhMessageId hdr == fhMessageId hdr'
+        && fhFragmentIndex hdr == fhFragmentIndex hdr'
+        && fhFragmentCount hdr == fhFragmentCount hdr'
+
+-- | sequenceGreaterThan is antisymmetric: if a > b then not (b > a)
+propSeqGtAntisymmetric :: SequenceNum -> SequenceNum -> Bool
+propSeqGtAntisymmetric a b
+  | a == b = True -- equal: neither is greater
+  | sequenceGreaterThan a b = not (sequenceGreaterThan b a)
+  | otherwise = True -- a not > b is fine
+
+-- | sequenceDiff consistent with sequenceGreaterThan
+propSeqDiffConsistent :: SequenceNum -> SequenceNum -> Bool
+propSeqDiffConsistent a b
+  | a == b = sequenceDiff a b == 0
+  | sequenceGreaterThan a b = sequenceDiff a b > 0
+  | otherwise = sequenceDiff a b < 0
+
+-- | Delta: apply (diff new old) old == new
+propDeltaRoundTrip :: TestDeltaState -> TestDeltaState -> Bool
+propDeltaRoundTrip new old =
+  let d = diff new old
+   in apply old d == new
+
+-- | CRC32C: append then validate always succeeds
+propCrcRoundTrip :: [Word8] -> Bool
+propCrcRoundTrip bytes =
+  let bs = BS.pack bytes
+      withCrc = appendCrc32 bs
+   in case validateAndStripCrc32 withCrc of
+        Nothing -> False
+        Just stripped -> stripped == bs
+
+-- | CRC32C: flipping any bit in payload fails validation
+propCrcDetectsCorruption :: [Word8] -> Property
+propCrcDetectsCorruption bytes =
+  let bs = BS.pack bytes
+      withCrc = appendCrc32 bs
+   in BS.length bs > 0
+        ==> let -- Flip first byte of payload
+                corrupted = BS.cons (BS.index withCrc 0 + 1) (BS.drop 1 withCrc)
+             in case validateAndStripCrc32 corrupted of
+                  Nothing -> True
+                  Just _ -> False
+
 testPropertyRoundTrips :: IO ()
 testPropertyRoundTrips = do
-  putStrLn "Property-based roundtrip tests:"
-  putStr "  Vec3 Storable: "
+  putStrLn "Property-based tests:"
+  putStr "  Vec3 Storable roundtrip: "
   quickCheck (withMaxSuccess 200 propStorableRoundTrip)
+  putStr "  PacketHeader roundtrip: "
+  quickCheck (withMaxSuccess 500 propPacketHeaderRoundTrip)
+  putStr "  FragmentHeader roundtrip: "
+  quickCheck (withMaxSuccess 500 propFragmentHeaderRoundTrip)
+  putStr "  sequenceGreaterThan antisymmetric: "
+  quickCheck (withMaxSuccess 1000 propSeqGtAntisymmetric)
+  putStr "  sequenceDiff consistent: "
+  quickCheck (withMaxSuccess 1000 propSeqDiffConsistent)
+  putStr "  Delta apply . diff == id: "
+  quickCheck (withMaxSuccess 500 propDeltaRoundTrip)
+  putStr "  CRC32C roundtrip: "
+  quickCheck (withMaxSuccess 200 propCrcRoundTrip)
+  putStr "  CRC32C detects corruption: "
+  quickCheck (withMaxSuccess 200 propCrcDetectsCorruption)
 
 --------------------------------------------------------------------------------
 -- Adversarial: Malformed packet handling
@@ -1288,6 +1394,129 @@ testSimulatorBasic = do
       assertEqual "received data" testData dat
       assertEqual "received addr" testAddr' addr
     _ -> error "  FAIL: unexpected late result"
+
+-- | Test that reliable messages survive loss + latency via Simulator.
+--
+-- Strategy: connect two peers via TestNet (clean), then run a
+-- bidirectional tick loop where both peers' outgoing packets pass
+-- through lossy Simulators. Retransmission recovers dropped packets.
+testSimulatorPeerDelivery :: IO ()
+testSimulatorPeerDelivery = do
+  putStrLn "Simulator peer delivery under loss:"
+  sock <- newTestUdpSocket
+  let serverAddr = testAddr 7020
+      clientAddr = testAddr 8020
+      config = defaultNetworkConfig
+      startTime = 1000000000 :: MonoTime
+
+  let serverPeer = newPeerState sock serverAddr config 100000000
+      clientPeer0 = newPeerState sock clientAddr config 200000000
+      clientPeer1 = peerConnect (peerIdFromAddr serverAddr) startTime clientPeer0
+
+  -- Establish connection via clean TestNet (no loss)
+  let world0 = initWorld startTime serverAddr clientAddr
+  let ((_, cp2), w1) = tickPeerInWorld clientAddr [] clientPeer1 world0
+  let w2 = stepWorld 10 w1
+  let ((_, sp1), w3) = tickPeerInWorld serverAddr [] serverPeer w2
+  let w4 = stepWorld 10 w3
+  let ((_, cp3), w5) = tickPeerInWorld clientAddr [] cp2 w4
+  let w6 = stepWorld 10 w5
+  let ((_, sp2), w7) = tickPeerInWorld serverAddr [] sp1 w6
+  let w8 = stepWorld 10 w7
+  let ((_, cp4), w9) = tickPeerInWorld clientAddr [] cp3 w8
+  let w10 = stepWorld 10 w9
+
+  -- Both connected. Now use Simulators as lossy conditioners (one per direction).
+  -- 10% loss, 20ms latency — moderate but recoverable
+  let simConfig =
+        defaultSimulationConfig
+          { simPacketLoss = 0.1,
+            simLatencyMs = 20,
+            simJitterMs = 5
+          }
+      -- Two simulators: client→server and server→client
+      simC2S0 = newNetworkSimulator simConfig startTime
+      simS2C0 = newNetworkSimulator simConfig (startTime + 1)
+      serverAddrKey = 1 :: Word64
+      clientAddrKey = 2 :: Word64
+      testMsg = "reliable under loss"
+
+  -- Queue reliable message via pure peerSend (not TestNet) so it flows
+  -- through peerProcess → Simulator, not through TestNet's delivery.
+  let sendTime = twGlobalTime w10 + 1000000
+      serverPid = peerIdFromAddr serverAddr
+  let cp5 = case peerSend serverPid (ChannelId 0) testMsg sendTime cp4 of
+        Right p -> p
+        Left e -> error $ "  FAIL: peerSend failed: " ++ show e
+
+  -- Bidirectional tick loop: both peers process, outgoing passes through Simulators
+  let tickCount = 30 :: Int
+      tickIntervalNs = 50000000 :: MonoTime -- 50ms
+
+  let (receivedMsg, _, _, _, _) =
+        foldl'
+          ( \(!found, !server, !client, !sC2S, !sS2C) i ->
+              if found
+                then (found, server, client, sC2S, sS2C)
+                else
+                  let tickTime = sendTime + fromIntegral i * tickIntervalNs
+
+                      -- Process client → get outgoing (includes queued message)
+                      clientResult = peerProcess tickTime [] client
+                      client' = prPeer clientResult
+                      clientOut = prOutgoing clientResult
+
+                      -- Feed client outgoing through C2S Simulator
+                      (sC2S', serverPkts) = conditionPackets clientOut clientAddrKey clientAddr tickTime sC2S
+
+                      -- Process server with conditioned client packets
+                      serverResult = peerProcess tickTime serverPkts server
+                      server' = prPeer serverResult
+                      serverOut = prOutgoing serverResult
+                      events = prEvents serverResult
+
+                      -- Feed server outgoing through S2C Simulator
+                      (sS2C', clientPkts) = conditionPackets serverOut serverAddrKey serverAddr tickTime sS2C
+
+                      -- Feed server responses back to client
+                      clientResult2 = peerProcess tickTime clientPkts client'
+                      client'' = prPeer clientResult2
+
+                      gotMessage = any isMessage events
+                   in (gotMessage, server', client'', sC2S', sS2C')
+          )
+          (False, sp2, cp5, simC2S0, simS2C0)
+          [1 .. tickCount]
+
+  assertEqual "reliable message delivered under 10% loss" True receivedMsg
+  putStrLn "  PASS: Simulator peer delivery under loss"
+  where
+    isMessage (PeerMessage _ _ _) = True
+    isMessage _ = False
+
+    -- | Run outgoing packets through a Simulator, strip CRC (matching
+    -- MonadNetwork layer), and collect deliverables as IncomingPackets.
+    conditionPackets ::
+      [RawPacket] -> Word64 -> SockAddr -> MonoTime -> NetworkSimulator -> (NetworkSimulator, [IncomingPacket])
+    conditionPackets pkts addrKey fromAddr now sim0 =
+      let (sim1, incoming) =
+            foldl'
+              ( \(!s, !acc) pkt ->
+                  let (immediate, s') = simulatorProcessSend (rpData pkt) addrKey now s
+                   in (s', acc ++ stripAndWrap immediate)
+              )
+              (sim0, [])
+              pkts
+          -- Also deliver any previously delayed packets now ready
+          (delayed, sim2) = simulatorReceiveReady now sim1
+          allIncoming = incoming ++ stripAndWrap delayed
+       in (sim2, allIncoming)
+      where
+        -- Strip CRC (as MonadNetwork layer does) and wrap as IncomingPacket
+        stripAndWrap = concatMap $ \(d, _) ->
+          case validateAndStripCrc32 d of
+            Nothing -> [] -- Drop corrupt (CRC mismatch)
+            Just valid -> [IncomingPacket (peerIdFromAddr fromAddr) valid]
 
 --------------------------------------------------------------------------------
 -- Channel: delivery modes, errors, retransmit

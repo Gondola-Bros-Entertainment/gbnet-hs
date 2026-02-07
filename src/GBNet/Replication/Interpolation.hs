@@ -35,6 +35,7 @@ module GBNet.Replication.Interpolation
     Interpolatable (..),
 
     -- * Snapshot buffer
+    TimestampedSnapshot (..),
     SnapshotBuffer,
     newSnapshotBuffer,
     newSnapshotBufferWithConfig,

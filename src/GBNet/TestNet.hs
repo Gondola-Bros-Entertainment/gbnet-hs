@@ -26,8 +26,11 @@ module GBNet.TestNet
     runTestNet,
 
     -- * Test network state
+    InFlightPacket (..),
+    TestNetConfig (..),
     TestNetState (..),
     initialTestNetState,
+    defaultTestNetConfig,
 
     -- * Operations
     advanceTime,

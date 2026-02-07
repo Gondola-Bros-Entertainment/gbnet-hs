@@ -34,12 +34,14 @@ module GBNet.Fragment
     fragmentMessage,
 
     -- * Reassembly
+    FragmentBuffer,
     FragmentAssembler (..),
     newFragmentAssembler,
     processFragment,
     cleanupFragments,
 
     -- * MTU discovery
+    MtuState,
     MtuDiscovery (..),
     newMtuDiscovery,
     defaultMtuDiscovery,

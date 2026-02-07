@@ -44,6 +44,13 @@ module GBNet.Reliability
     sbExists,
     sbGet,
 
+    -- * Received packet buffer (opaque)
+    ReceivedBuffer,
+
+    -- * Sent packet buffer (opaque)
+    RingEntry,
+    SentPacketBuffer,
+
     -- * Sent packet record
     SentPacketRecord (..),
 

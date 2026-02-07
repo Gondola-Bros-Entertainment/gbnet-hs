@@ -59,6 +59,9 @@ module GBNet.Peer
     peerSend,
     peerBroadcast,
 
+    -- * Pending connection (opaque)
+    PendingConnection,
+
     -- * Queries
     peerCount,
     peerIsConnected,
