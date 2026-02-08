@@ -98,7 +98,7 @@ data ConnectionDirection
     Outbound
   deriving (Eq, Show)
 
--- | Events emitted by 'peerProcess'.
+-- | Events emitted by peer processing.
 data PeerEvent
   = -- | A peer connected
     PeerConnected !PeerId !ConnectionDirection
@@ -177,13 +177,13 @@ data NetPeer = NetPeer
 
 makeFieldLabelsNoPrefix ''NetPeer
 
--- | Result of pure packet processing via 'peerProcess'.
+-- | Result of pure packet processing.
 data PeerResult = PeerResult
   { -- | Updated peer state
     prPeer :: !NetPeer,
     -- | Events that occurred during processing
     prEvents :: ![PeerEvent],
-    -- | Packets to send (call 'peerSendAllM' with these)
+    -- | Packets to send (call @peerSendAllM@ with these)
     prOutgoing :: ![RawPacket]
   }
 

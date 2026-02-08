@@ -190,7 +190,7 @@ makeFieldLabelsNoPrefix ''OutgoingPacket
 data Connection = Connection
   { connConfig :: !NetworkConfig,
     connState :: !ConnectionState,
-    -- Salts for connection validation
+    -- | Client-side salt for connection validation.
     connClientSalt :: !Word64,
     connServerSalt :: !Word64,
     -- Timing
@@ -199,7 +199,7 @@ data Connection = Connection
     connStartTime :: !(Maybe MonoTime),
     connRequestTime :: !(Maybe MonoTime),
     connRetryCount :: !Int,
-    -- Sequences
+    -- | Local outgoing sequence number, incremented per packet.
     connLocalSeq :: !SequenceNum,
     -- Subsystems
     connReliability :: !ReliableEndpoint,

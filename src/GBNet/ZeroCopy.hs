@@ -12,7 +12,7 @@
 --      from escaping the callback — compiler-enforced, not convention.
 --
 --   2. __Module opacity__: this module is internal. All buffer types
---      ('SequenceBuffer', 'SentPacketBuffer', etc.) are opaque, so
+--      (@SequenceBuffer@, @SentPacketBuffer@, etc.) are opaque, so
 --      external code cannot access the raw vectors.
 --
 -- The @unsafeThaw@\/@unsafeFreeze@ pair are pointer casts (zero memcpy),

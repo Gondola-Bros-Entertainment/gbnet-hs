@@ -91,33 +91,43 @@ import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- Constants
 
+-- | Initial retransmission timeout in milliseconds (before any RTT samples).
 initialRtoMillis :: Double
 initialRtoMillis = 100.0
 
+-- | Number of ACK bits tracked per packet (64-bit bitfield).
 ackBitsWindow :: Word16
 ackBitsWindow = 64
 
+-- | Jacobson\/Karels SRTT smoothing factor (1\/8).
 rttAlpha :: Double
 rttAlpha = 0.125
 
+-- | Jacobson\/Karels RTTVAR smoothing factor (1\/4).
 rttBeta :: Double
 rttBeta = 0.25
 
+-- | Minimum retransmission timeout in milliseconds.
 minRtoMs :: Double
 minRtoMs = 50.0
 
+-- | Maximum retransmission timeout in milliseconds.
 maxRtoMs :: Double
 maxRtoMs = 2000.0
 
+-- | Rolling loss window size (number of samples tracked).
 lossWindowSize :: Int
 lossWindowSize = 256
 
+-- | Number of NACKs before triggering fast retransmit.
 fastRetransmitThreshold :: Word8
 fastRetransmitThreshold = 3
 
+-- | Default maximum sequence distance before treating packets as stale.
 defaultMaxSequenceDistance :: Word16
 defaultMaxSequenceDistance = 32768
 
+-- | Default maximum packets in flight.
 defaultMaxInFlight :: Int
 defaultMaxInFlight = 256
 
@@ -331,6 +341,7 @@ rbInsertMany seqs buf =
 
 -- SentPacketRecord
 
+-- | Record of a sent packet, tracked for ACK processing and RTT estimation.
 data SentPacketRecord = SentPacketRecord
   { sprChannelId :: !ChannelId,
     sprChannelSequence :: !SequenceNum,
@@ -456,6 +467,8 @@ makeFieldLabelsNoPrefix ''AckResult
 instance NFData AckResult where
   rnf (AckResult a f) = rnf a `seq` rnf f
 
+-- | Core reliability state: sequence tracking, RTT estimation, loss detection,
+-- and in-flight packet management.
 data ReliableEndpoint = ReliableEndpoint
   { reLocalSequence :: !SequenceNum,
     reRemoteSequence :: !SequenceNum,
@@ -505,6 +518,7 @@ instance NFData ReliableEndpoint where
 
 makeFieldLabelsNoPrefix ''ReliableEndpoint
 
+-- | Create a new reliable endpoint with the given buffer size.
 newReliableEndpoint :: Int -> ReliableEndpoint
 newReliableEndpoint bufferSize =
   ReliableEndpoint
@@ -530,14 +544,17 @@ newReliableEndpoint bufferSize =
       reBytesAcked = 0
     }
 
+-- | Override the maximum in-flight packet count.
 withMaxInFlight :: Int -> ReliableEndpoint -> ReliableEndpoint
 withMaxInFlight maxFlight ep = ep & #reMaxInFlight .~ maxFlight
 
+-- | Allocate the next local sequence number.
 nextSequence :: ReliableEndpoint -> (SequenceNum, ReliableEndpoint)
 nextSequence ep =
   let s = reLocalSequence ep
    in (s, ep & #reLocalSequence .~ (s + 1))
 
+-- | Record a sent packet for in-flight tracking and future ACK processing.
 onPacketSent ::
   SequenceNum ->
   MonoTime ->
@@ -676,6 +693,7 @@ applyMutations muts buf =
       MV.unsafeWrite mvec idx (RingEntry seqNum (record & #sprNackCount .~ newNack))
       applyAll mvec rest dels
 
+-- | Update SRTT and RTO using Jacobson\/Karels algorithm.
 updateRtt :: Double -> ReliableEndpoint -> ReliableEndpoint
 updateRtt sampleMs ep
   | not (reHasRttSample ep) =
@@ -706,6 +724,7 @@ updateRtt sampleMs ep
 clampRto :: Double -> Double
 clampRto rto = max minRtoMs (min maxRtoMs rto)
 
+-- | Record a loss\/success sample in the rolling loss window.
 recordLossSample :: Bool -> ReliableEndpoint -> ReliableEndpoint
 recordLossSample lost ep =
   let idx = reLossWindowIndex ep `mod` lossWindowSize
@@ -720,18 +739,22 @@ recordLossSample lost ep =
         .~ newCount
 {-# INLINE recordLossSample #-}
 
+-- | Get the current ACK sequence and bitfield for outgoing packet headers.
 getAckInfo :: ReliableEndpoint -> (SequenceNum, Word64)
 getAckInfo ep = (reRemoteSequence ep, reAckBits ep)
 {-# INLINE getAckInfo #-}
 
+-- | Current retransmission timeout in milliseconds.
 rtoMs :: ReliableEndpoint -> Double
 rtoMs = reRto
 {-# INLINE rtoMs #-}
 
+-- | Smoothed round-trip time in milliseconds.
 srttMs :: ReliableEndpoint -> Double
 srttMs = reSrtt
 {-# INLINE srttMs #-}
 
+-- | Current packet loss as a fraction (0.0 to 1.0).
 packetLossPercent :: ReliableEndpoint -> Double
 packetLossPercent ep
   | count == 0 = 0.0
@@ -741,10 +764,12 @@ packetLossPercent ep
     lost = lwCountLosses count (reLossWindow ep)
 {-# INLINE packetLossPercent #-}
 
+-- | Check whether a sequence number is currently in flight.
 isInFlight :: SequenceNum -> ReliableEndpoint -> Bool
 isInFlight seqNum ep = spbMember seqNum (reSentPackets ep)
 {-# INLINE isInFlight #-}
 
+-- | Number of packets currently in flight.
 packetsInFlight :: ReliableEndpoint -> Int
 packetsInFlight = spbCount . reSentPackets
 {-# INLINE packetsInFlight #-}

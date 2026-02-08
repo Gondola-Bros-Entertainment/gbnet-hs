@@ -1,5 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Main where
 
@@ -19,6 +20,16 @@ import GBNet.Channel
     unreliableConfig,
   )
 import GBNet.Class (MonoTime (..))
+import GBNet.Congestion
+  ( batchMessages,
+    ccRefillBudget,
+    ccUpdate,
+    cwOnAck,
+    cwOnLoss,
+    newCongestionController,
+    newCongestionWindow,
+    unbatchMessages,
+  )
 import GBNet.Config (defaultNetworkConfig)
 import GBNet.Connection
   ( Connection,
@@ -55,8 +66,10 @@ import GBNet.Reliability
     sbInsertMany,
     updateRtt,
   )
+import GBNet.Replication.Delta (DeltaTracker, NetworkDelta (..), deltaEncode, newDeltaTracker)
+import GBNet.Replication.Interest (InterestManager (..), newRadiusInterest)
 import GBNet.Security (appendCrc32, validateAndStripCrc32)
-import GBNet.Serialize (castPtr, plusPtr, serialize)
+import GBNet.Serialize (castPtr, deserialize, plusPtr, serialize)
 import GBNet.Serialize.TH (deriveStorable)
 import GBNet.Types (ChannelId (..), MessageId (..), SequenceNum (..))
 
@@ -83,6 +96,13 @@ deriveStorable ''Transform
 instance NFData Vec3S where rnf (Vec3S x y z) = rnf x `seq` rnf y `seq` rnf z
 
 instance NFData Transform where rnf (Transform v r) = rnf v `seq` rnf r
+
+-- | Trivial delta instance for benchmarking tracker mechanics.
+-- Uses full state as delta (no field-level compression).
+instance NetworkDelta Vec3S where
+  type Delta Vec3S = Vec3S
+  diff current _baseline = current
+  apply _state delta = delta
 
 --------------------------------------------------------------------------------
 -- Setup helpers
@@ -270,9 +290,13 @@ main =
       bgroup
         "storable"
         [ env (pure (Vec3S 1.0 (-2.5) 100.0)) $ \v ->
-            bench "vec3" $ nf serialize v,
+            bench "vec3/serialize" $ nf serialize v,
+          env (pure (serialize (Vec3S 1.0 (-2.5) 100.0))) $ \bs ->
+            bench "vec3/deserialize" $ nf (deserialize :: BS.ByteString -> Either String Vec3S) bs,
           env (pure (Transform (Vec3S 1.0 2.0 3.0) 45.0)) $ \t ->
-            bench "transform/nested" $ nf serialize t
+            bench "transform/serialize" $ nf serialize t,
+          env (pure (serialize (Transform (Vec3S 1.0 2.0 3.0) 45.0))) $ \bs ->
+            bench "transform/deserialize" $ nf (deserialize :: BS.ByteString -> Either String Transform) bs
         ],
       -- Group 7: Connection operations
       bgroup
@@ -303,5 +327,51 @@ main =
             bench "crc32c/append/1KB" $ nf appendCrc32 payload,
           env (pure payload64WithCrc) $ \payload ->
             bench "crc32c/validate/64B" $ nf validateAndStripCrc32 payload
+        ],
+      -- Group 10: Congestion control
+      bgroup
+        "congestion"
+        [ env (pure (newCongestionController 60.0 0.1 250.0 10000.0)) $ \cc ->
+            bench "ccUpdate/good" $
+              nf (ccUpdate 0.02 50.0 (MonoTime 1000000000)) cc,
+          env (pure (newCongestionController 60.0 0.1 250.0 10000.0)) $ \cc ->
+            bench "ccUpdate/bad" $
+              nf (ccUpdate 0.15 300.0 (MonoTime 1000000000)) cc,
+          env (pure (newCongestionController 60.0 0.1 250.0 10000.0)) $ \cc ->
+            bench "ccRefillBudget" $
+              nf (ccRefillBudget 1200) cc,
+          env (pure (newCongestionWindow 1200)) $ \cw ->
+            bench "cwOnAck/1200B" $
+              nf (cwOnAck 1200) cw,
+          env (pure (newCongestionWindow 1200)) $ \cw ->
+            bench "cwOnLoss" $
+              nf cwOnLoss cw
+        ],
+      -- Group 11: Delta replication
+      bgroup
+        "delta"
+        [ env (pure (newDeltaTracker 64 :: DeltaTracker Vec3S)) $ \dt ->
+            bench "deltaEncode" $
+              nf (\t -> deltaEncode 0 (Vec3S 1.0 2.0 3.0) t) dt
+        ],
+      -- Group 12: Interest manager
+      bgroup
+        "interest"
+        [ env (pure (newRadiusInterest 100.0)) $ \interest ->
+            bench "relevant/inRange" $
+              nf (\i -> relevant i (50.0, 50.0, 0.0) (100.0, 100.0, 0.0)) interest,
+          env (pure (newRadiusInterest 100.0)) $ \interest ->
+            bench "relevant/outOfRange" $
+              nf (\i -> relevant i (0.0, 0.0, 0.0) (500.0, 500.0, 0.0)) interest
+        ],
+      -- Group 13: Message batching
+      bgroup
+        "batching"
+        [ env (pure (replicate 10 payload64)) $ \msgs ->
+            bench "batchMessages/10x64B" $
+              nf (\m -> batchMessages m 1200) msgs,
+          env (pure (batchMessages (replicate 10 payload64) 1200)) $ \ ~batches ->
+            bench "unbatchMessages/10x64B" $
+              nf (map unbatchMessages) batches
         ]
     ]

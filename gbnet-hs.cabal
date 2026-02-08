@@ -66,7 +66,6 @@ library
     , network             >= 3.1 && < 3.3
     , stm                 >= 2.5 && < 2.6
     , template-haskell    >= 2.18 && < 2.23
-    , text                >= 2.0 && < 2.2
     , transformers        >= 0.5 && < 0.7
     , optics             >= 0.4.2 && < 0.5
     , optics-th          >= 0.4.1 && < 0.5
@@ -90,27 +89,26 @@ test-suite gbnet-test
   main-is:          Main.hs
   hs-source-dirs:   test
   build-depends:
-      base
+      base                >= 4.16 && < 5
     , gbnet-hs
-    , bytestring
-    , text
-    , network
+    , bytestring          >= 0.11 && < 0.13
+    , network             >= 3.1 && < 3.3
     , QuickCheck          >= 2.14 && < 2.16
-    , containers
+    , containers          >= 0.6 && < 0.8
   default-language: Haskell2010
-  ghc-options:      -Wall
+  ghc-options:      -Wall -Wcompat
 
 benchmark gbnet-bench
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   bench
   default-language: Haskell2010
-  ghc-options:      -O2 -rtsopts
+  ghc-options:      -O2 -rtsopts -Wall -Wcompat
   build-depends:
-      base
-    , bytestring
+      base                >= 4.16 && < 5
+    , bytestring          >= 0.11 && < 0.13
     , criterion            >= 1.5 && < 1.7
-    , deepseq
+    , deepseq             >= 1.4 && < 1.6
     , gbnet-hs
 
 source-repository head

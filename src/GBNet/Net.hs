@@ -93,7 +93,7 @@ newNetState sock addr = do
 
 -- | Dedicated receive thread.
 --
--- Blocks on 'recvFrom' which GHC's runtime handles efficiently via the
+-- Blocks on @recvFrom@ which GHC's runtime handles efficiently via the
 -- IO manager — the green thread is parked with no CPU cost until data
 -- arrives. Exits cleanly when the socket is closed.
 recvLoop :: Socket -> TQueue (BS.ByteString, SockAddr) -> IO ()
@@ -109,7 +109,7 @@ recvLoop sock queue = go
 --
 -- Wraps StateT to carry network state. When @m@ is IO, this provides real
 -- UDP networking via the 'MonadNetwork' instance defined below.
--- For testing, use 'TestNet' from "GBNet.TestNet" instead.
+-- For testing, use @TestNet@ from "GBNet.TestNet" instead.
 newtype NetT m a = NetT {unNetT :: StateT NetState m a}
   deriving (Functor, Applicative, Monad)
 

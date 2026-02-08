@@ -5,7 +5,7 @@
 -- Description : Template Haskell for zero-allocation Storable instances
 --
 -- Generates 'Storable' instances for product types, enabling zero-allocation
--- serialization via 'serialize'. Wire format is always little-endian for
+-- serialization via @serialize@. Wire format is always little-endian for
 -- cross-platform compatibility. On LE platforms, the generated code compiles
 -- to native memory operations with zero overhead.
 --

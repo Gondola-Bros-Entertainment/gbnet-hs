@@ -195,6 +195,8 @@ peerDisconnect peerId now peer =
 --
 -- This is the core of the game loop - it's completely pure and deterministic.
 -- Use 'peerRecvAllM' to get incoming packets and 'peerSendAllM' to send outgoing.
+--
+-- See 'peerTick' for a convenience wrapper that combines receive, process, and send.
 peerProcess :: MonoTime -> [IncomingPacket] -> NetPeer -> PeerResult
 peerProcess now packets peer0 =
   let -- Process incoming packets

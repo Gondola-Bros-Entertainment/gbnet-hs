@@ -68,84 +68,111 @@ import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- Constants
 
+-- | Default protocol identifier for packet validation.
 defaultProtocolId :: Word32
 defaultProtocolId = 0x12345678
 
+-- | Default maximum simultaneous client connections.
 defaultMaxClients :: Int
 defaultMaxClients = 64
 
+-- | Default connection timeout in milliseconds.
 defaultConnectionTimeoutMs :: Double
 defaultConnectionTimeoutMs = 10000.0
 
+-- | Default keepalive interval in milliseconds.
 defaultKeepaliveIntervalMs :: Double
 defaultKeepaliveIntervalMs = 1000.0
 
+-- | Default connection request timeout in milliseconds.
 defaultConnectionRequestTimeoutMs :: Double
 defaultConnectionRequestTimeoutMs = 5000.0
 
+-- | Default maximum connection request retries before giving up.
 defaultConnectionRequestMaxRetries :: Int
 defaultConnectionRequestMaxRetries = 5
 
+-- | Default maximum transmission unit in bytes.
 defaultMtu :: Int
 defaultMtu = 1200
 
+-- | Default fragment threshold in bytes; messages above this are fragmented.
 defaultFragmentThreshold :: Int
 defaultFragmentThreshold = 1024
 
+-- | Default fragment reassembly timeout in milliseconds.
 defaultFragmentTimeoutMs :: Double
 defaultFragmentTimeoutMs = 5000.0
 
+-- | Default maximum fragments per message.
 defaultMaxFragments :: Int
 defaultMaxFragments = 256
 
+-- | Default maximum reassembly buffer size in bytes.
 defaultMaxReassemblyBufferSize :: Int
 defaultMaxReassemblyBufferSize = 1024 * 1024
 
+-- | Default packet buffer size (number of entries).
 defaultPacketBufferSize :: Int
 defaultPacketBufferSize = 256
 
+-- | Default ACK buffer size (number of entries).
 defaultAckBufferSize :: Int
 defaultAckBufferSize = 256
 
+-- | Default maximum sequence distance before treating packets as stale.
 defaultMaxSequenceDistance :: Word16
 defaultMaxSequenceDistance = 32768
 
+-- | Default reliable retry time in milliseconds.
 defaultReliableRetryTimeMs :: Double
 defaultReliableRetryTimeMs = 100.0
 
+-- | Default maximum reliable message retries before dropping.
 defaultMaxReliableRetries :: Int
 defaultMaxReliableRetries = 10
 
+-- | Default maximum channel count.
 defaultMaxChannels :: Int
 defaultMaxChannels = 8
 
+-- | Default send rate in packets per second.
 defaultSendRateHz :: Double
 defaultSendRateHz = 60.0
 
+-- | Default maximum packet rate in packets per second.
 defaultMaxPacketRateHz :: Double
 defaultMaxPacketRateHz = 120.0
 
+-- | Default congestion detection threshold (fraction of budget used).
 defaultCongestionThreshold :: Double
 defaultCongestionThreshold = 0.1
 
+-- | Default RTT threshold in milliseconds for "good" congestion mode.
 defaultCongestionGoodRttThresholdMs :: Double
 defaultCongestionGoodRttThresholdMs = 250.0
 
+-- | Default packet loss threshold for "bad" congestion mode.
 defaultCongestionBadLossThreshold :: Double
 defaultCongestionBadLossThreshold = 0.1
 
+-- | Default congestion recovery time in milliseconds.
 defaultCongestionRecoveryTimeMs :: Double
 defaultCongestionRecoveryTimeMs = 10000.0
 
+-- | Default number of disconnect packet retries.
 defaultDisconnectRetries :: Int
 defaultDisconnectRetries = 3
 
+-- | Default disconnect retry timeout in milliseconds.
 defaultDisconnectRetryTimeoutMs :: Double
 defaultDisconnectRetryTimeoutMs = 500.0
 
+-- | Default maximum packets in flight before back-pressure.
 defaultMaxInFlight :: Int
 defaultMaxInFlight = 256
 
+-- | Default channel priority (0 = lowest, 255 = highest).
 defaultChannelPriority :: Word8
 defaultChannelPriority = 128
 
@@ -153,9 +180,11 @@ defaultChannelPriority = 128
 maxBackoffExponent :: Int
 maxBackoffExponent = 5
 
+-- | Minimum allowed MTU (RFC 791 minimum IP datagram size).
 minMtu :: Int
 minMtu = 576
 
+-- | Maximum allowed MTU.
 maxMtu :: Int
 maxMtu = 65535
 

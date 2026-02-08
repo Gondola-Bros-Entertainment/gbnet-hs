@@ -26,6 +26,8 @@ module GBNet.Replication.Interest
   )
 where
 
+import Control.DeepSeq (NFData (..))
+
 -- | 3D position as (x, y, z).
 type Position = (Float, Float, Float)
 
@@ -51,6 +53,9 @@ data RadiusInterest = RadiusInterest
     riRadiusSq :: !Float
   }
   deriving (Show)
+
+instance NFData RadiusInterest where
+  rnf (RadiusInterest r rs) = rnf r `seq` rnf rs
 
 -- | Create a radius-based interest manager.
 newRadiusInterest :: Float -> RadiusInterest
@@ -93,6 +98,9 @@ data GridInterest = GridInterest
     giInvCellSize :: !Float
   }
   deriving (Show)
+
+instance NFData GridInterest where
+  rnf (GridInterest c i) = rnf c `seq` rnf i
 
 -- | Create a grid-based interest manager.
 newGridInterest :: Float -> GridInterest

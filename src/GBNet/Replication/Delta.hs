@@ -48,6 +48,7 @@ module GBNet.Replication.Delta
   )
 where
 
+import Control.DeepSeq (NFData (..))
 import qualified Data.ByteString as BS
 import Data.Int (Int32)
 import Data.Sequence (Seq)
@@ -122,6 +123,9 @@ data DeltaTracker a = DeltaTracker
   }
 
 makeFieldLabelsNoPrefix ''DeltaTracker
+
+instance (NFData a) => NFData (DeltaTracker a) where
+  rnf (DeltaTracker p c m) = rnf p `seq` rnf c `seq` rnf m
 
 -- | Create a new delta tracker with the given maximum pending snapshot count.
 newDeltaTracker :: Int -> DeltaTracker a
@@ -209,6 +213,9 @@ data BaselineManager a = BaselineManager
   }
 
 makeFieldLabelsNoPrefix ''BaselineManager
+
+instance (NFData a) => NFData (BaselineManager a) where
+  rnf (BaselineManager s m t) = rnf s `seq` rnf m `seq` rnf t
 
 -- | Create a new baseline manager with the given capacity and expiration timeout.
 newBaselineManager ::

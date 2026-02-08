@@ -67,6 +67,7 @@ module GBNet.Congestion
   )
 where
 
+import Control.DeepSeq (NFData (..))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BSB
 import qualified Data.ByteString.Lazy as BSL
@@ -80,36 +81,47 @@ import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- Constants
 
+-- | Multiplicative decrease factor on congestion (halve rate).
 congestionRateReduction :: Double
 congestionRateReduction = 0.5
 
+-- | Minimum send rate floor in packets per second.
 minSendRate :: Double
 minSendRate = 1.0
 
+-- | Batch header overhead: 1 byte for message count.
 batchHeaderSize :: Int
 batchHeaderSize = 1
 
+-- | Per-message length prefix size in a batch: 2 bytes (big-endian u16).
 batchLengthSize :: Int
 batchLengthSize = 2
 
+-- | Maximum messages per batch (limited by u8 count field).
 maxBatchMessages :: Word8
 maxBatchMessages = 255
 
+-- | Initial congestion window in packets (slow start).
 initialCwndPackets :: Int
 initialCwndPackets = 10
 
+-- | Minimum congestion window in bytes (one MTU).
 minCwndBytes :: Int
 minCwndBytes = 1200
 
+-- | Minimum adaptive recovery time in seconds.
 minRecoverySecs :: Double
 minRecoverySecs = 1.0
 
+-- | Maximum adaptive recovery time in seconds.
 maxRecoverySecs :: Double
 maxRecoverySecs = 60.0
 
+-- | Interval in seconds of sustained good conditions before halving recovery time.
 recoveryHalveIntervalSecs :: Double
 recoveryHalveIntervalSecs = 10.0
 
+-- | If Good mode lasts less than this (seconds) before re-entering Bad, double recovery time.
 quickDropThresholdSecs :: Double
 quickDropThresholdSecs = 10.0
 
@@ -131,12 +143,16 @@ data CongestionMode
   | CongestionBad
   deriving (Eq, Show)
 
+instance NFData CongestionMode where rnf x = x `seq` ()
+
 -- | Phase for window-based congestion control.
 data CongestionPhase
   = SlowStart
   | Avoidance
   | Recovery
   deriving (Eq, Show)
+
+instance NFData CongestionPhase where rnf x = x `seq` ()
 
 -- | Binary congestion controller (Gaffer-style).
 data CongestionController = CongestionController
@@ -155,6 +171,11 @@ data CongestionController = CongestionController
   deriving (Show)
 
 makeFieldLabelsNoPrefix ''CongestionController
+
+instance NFData CongestionController where
+  rnf (CongestionController m gs lt rt br cr bb bt ar lg lb) =
+    rnf m `seq` rnf gs `seq` rnf lt `seq` rnf rt `seq` rnf br `seq`
+      rnf cr `seq` rnf bb `seq` rnf bt `seq` rnf ar `seq` rnf lg `seq` rnf lb
 
 -- | Create a new congestion controller.
 newCongestionController :: Double -> Double -> Double -> Double -> CongestionController
@@ -309,6 +330,10 @@ data CongestionWindow = CongestionWindow
   deriving (Show)
 
 makeFieldLabelsNoPrefix ''CongestionWindow
+
+instance NFData CongestionWindow where
+  rnf (CongestionWindow p c s b m l d) =
+    rnf p `seq` rnf c `seq` rnf s `seq` rnf b `seq` rnf m `seq` rnf l `seq` rnf d
 
 -- | Create a new congestion window.
 newCongestionWindow :: Int -> CongestionWindow
