@@ -6,6 +6,7 @@
 <p>
 
 [![CI](https://github.com/gondola-bros-entertainment/gbnet-hs/actions/workflows/ci.yml/badge.svg)](https://github.com/gondola-bros-entertainment/gbnet-hs/actions/workflows/ci.yml)
+[![Hackage](https://img.shields.io/hackage/v/gbnet-hs.svg)](https://hackage.haskell.org/package/gbnet-hs)
 ![Haskell](https://img.shields.io/badge/haskell-GHC%209.6-purple)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
