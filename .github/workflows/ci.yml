@@ -116,7 +116,8 @@ jobs:
           ghc-version: '9.6.7'
           cabal-version: '3.14'
       - run: cabal sdist
-      - run: cabal upload --publish dist-newstyle/sdist/gbnet-hs-*.tar.gz
+      - name: Upload to Hackage
+        run: |
+          cabal upload --publish --username="" --password="${HACKAGE_TOKEN}" dist-newstyle/sdist/gbnet-hs-*.tar.gz
         env:
-          CABAL_UPLOAD_USERNAME: ''
-          CABAL_UPLOAD_PASSWORD: ${{ secrets.HACKAGE_TOKEN }}
+          HACKAGE_TOKEN: ${{ secrets.HACKAGE_TOKEN }}
