@@ -118,6 +118,10 @@ jobs:
       - run: cabal sdist
       - name: Upload to Hackage
         run: |
-          cabal upload --publish --username="" --password="${HACKAGE_TOKEN}" dist-newstyle/sdist/gbnet-hs-*.tar.gz
+          SDIST=$(ls dist-newstyle/sdist/gbnet-hs-*.tar.gz)
+          curl --fail --silent --show-error \
+            --header "Authorization: X-ApiKey ${HACKAGE_TOKEN}" \
+            --form "package=@${SDIST}" \
+            https://hackage.haskell.org/packages/
         env:
           HACKAGE_TOKEN: ${{ secrets.HACKAGE_TOKEN }}
