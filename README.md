@@ -411,9 +411,9 @@ Optimized for game networking:
 ### Benchmarks
 
 ```
-storable/vec3               14.26 ns   (70M ops/sec)  -- user types
-storable/transform/nested   14.23 ns   (70M ops/sec)  -- nested types
-packetheader/serialize      16.64 ns   (60M ops/sec)
+storable/vec3/serialize      18.98 ns   (52M ops/sec)  -- user types
+storable/transform/serialize 20.80 ns  (48M ops/sec)  -- nested types
+packetheader/serialize      16.49 ns   (60M ops/sec)
 packetheader/deserialize    15.95 ns   (62M ops/sec)
 ```
 
@@ -424,7 +424,7 @@ Run with `cabal bench --enable-benchmarks`.
 ## Features
 
 ### Core Transport
-- [x] Zero-copy Storable serialization (14ns, 17x faster)
+- [x] Zero-copy Storable serialization (sub-20ns roundtrips)
 - [x] Nested type composition via Storable typeclass
 - [x] Template Haskell `deriveStorable` for automatic instances
 - [x] Type-safe newtypes (`ChannelId`, `SequenceNum`, `MonoTime`, `MessageId`)

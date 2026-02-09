@@ -73,14 +73,14 @@ library
 
   hs-source-dirs:   src
   default-language:  Haskell2010
-  -- Game networking hot paths (bitpacking, congestion control, sequence
-  -- arithmetic) benefit measurably from -O2 and aggressive specialisation.
+  -- Aggressive specialisation monomorphises MonadNetwork/MonadTime at call
+  -- sites, eliminating dictionary overhead.  Users wanting -O2 can add it
+  -- in their own cabal.project (package gbnet-hs ghc-options: -O2).
   ghc-options:
     -Wall
     -Wcompat
     -Wincomplete-record-updates
     -Wincomplete-uni-patterns
-    -O2
     -fspecialise-aggressively
     -fexpose-all-unfoldings
 
@@ -103,7 +103,7 @@ benchmark gbnet-bench
   main-is:          Main.hs
   hs-source-dirs:   bench
   default-language: Haskell2010
-  ghc-options:      -O2 -rtsopts -Wall -Wcompat
+  ghc-options:      -rtsopts -Wall -Wcompat -O2
   build-depends:
       base                >= 4.16 && < 5
     , bytestring          >= 0.11 && < 0.13
