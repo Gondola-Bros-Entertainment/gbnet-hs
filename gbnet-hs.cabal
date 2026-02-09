@@ -10,7 +10,7 @@ description:
 license:            MIT
 license-file:       LICENSE
 author:             Devon Tomlin
-maintainer:         devon@novavero.ai
+maintainer:         devon.tomlin@novavero.ai
 homepage:           https://github.com/Gondola-Bros-Entertainment/gbnet-hs
 bug-reports:        https://github.com/Gondola-Bros-Entertainment/gbnet-hs/issues
 category:           Network, Game
