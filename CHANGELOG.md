@@ -22,6 +22,12 @@
 - Extracted focused helpers from monolithic functions (Simulator, Connection)
 - Comprehensive test coverage: channel modes, fragment edge cases, security, config validation, delta compression, simulator
 
+## 0.1.1.0
+
+- Drop `-O2` from benchmark ghc-options (users set optimization in their own cabal.project)
+- Add automated Hackage publish to CI pipeline (tag-gated with version validation)
+- Add Hackage badge to README
+
 ## 0.1.0.0
 
 Initial release.
