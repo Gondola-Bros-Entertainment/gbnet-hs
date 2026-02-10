@@ -85,7 +85,7 @@ import qualified Data.Sequence as Seq
 import Data.Word (Word32, Word64, Word8)
 import GBNet.Channel (Channel, ChannelError (..), ChannelMessage (..))
 import qualified GBNet.Channel as Channel
-import GBNet.Config (NetworkConfig (..))
+import GBNet.Config (NetworkConfig (..), smallReliableThreshold)
 import GBNet.Congestion
   ( BandwidthTracker,
     CongestionController,
@@ -598,65 +598,69 @@ processChannelIdx now conn chIdx =
     else conn
 
 processChannelMessages :: MonoTime -> Connection -> Int -> Connection
-processChannelMessages now conn chIdx =
-  let mtu = ncMtu (connConfig conn)
-      canSendCong = ccCanSend 0 mtu (connCongestion conn)
-      canSendCwnd = case connCwnd conn of
-        Just cw -> cwCanSend mtu cw && cwCanSendPaced now cw
-        Nothing -> True
-   in if not canSendCong || not canSendCwnd
-        then conn
-        else case IntMap.lookup chIdx (connChannels conn) of
-          Nothing -> conn
-          Just channel ->
-            case Channel.getOutgoingMessage channel of
-              Nothing -> conn
-              Just (msg, channel') ->
-                let msgData = cmData msg
-                    msgSeqRaw = unSequenceNum (cmSequence msg)
-                    -- Prepend payload header: channel (3 bits) + is_fragment (1 bit)
-                    -- Format: [headerByte:1][channelSeqHi:1][channelSeqLo:1][msgData:N]
-                    headerByte = fromIntegral chIdx .&. 0x07 -- Not a fragment
-                    seqHi = fromIntegral (msgSeqRaw `shiftR` 8) :: Word8
-                    seqLo = fromIntegral (msgSeqRaw .&. 0xFF) :: Word8
-                    wireData = BS.cons headerByte $ BS.cons seqHi $ BS.cons seqLo msgData
-                    header = createHeaderInternal conn
-                    pkt =
-                      OutgoingPacket
-                        { opHeader = header {packetType = Payload},
-                          opType = Payload,
-                          opPayload = wireData
-                        }
-                    cong' = ccDeductBudget (BS.length wireData) (connCongestion conn)
-                    cwnd' = fmap (cwOnSend (BS.length wireData) now) (connCwnd conn)
-                    rel' =
-                      if Channel.channelIsReliable channel
-                        then
-                          Rel.onPacketSent
-                            (connLocalSeq conn)
-                            now
-                            (ChannelId (fromIntegral chIdx))
-                            (cmSequence msg)
-                            (BS.length wireData)
-                            (connReliability conn)
-                        else connReliability conn
-                    conn' =
-                      conn
-                        & #connChannels
-                        %~ IntMap.insert chIdx channel'
-                        & #connSendQueue
-                        %~ (Seq.|> pkt)
-                        & #connLocalSeq
-                        %~ (+ 1)
-                        & #connCongestion
-                        .~ cong'
-                        & #connCwnd
-                        .~ cwnd'
-                        & #connReliability
-                        .~ rel'
-                        & #connDataSentThisTick
-                        .~ True
-                 in processChannelMessages now conn' chIdx
+processChannelMessages now conn chIdx
+  | not canSendBinary = conn
+  | otherwise = case tryDequeue of
+      Nothing -> conn
+      Just (msg, channel', wireData, wireSize, isReliable)
+        | not (cwndAllows isReliable wireSize) -> conn
+        | otherwise ->
+            processChannelMessages now (emitPacket conn msg channel' wireData wireSize isReliable) chIdx
+  where
+    mtu = ncMtu (connConfig conn)
+    canSendBinary = ccCanSend 0 mtu (connCongestion conn)
+
+    -- Small reliable packets bypass cwnd to prevent upgrade stalls
+    cwndAllows isReliable wireSize
+      | isReliable && wireSize <= smallReliableThreshold = True
+      | otherwise = maybe True (\cw -> cwCanSend mtu cw && cwCanSendPaced now cw) (connCwnd conn)
+
+    tryDequeue = do
+      channel <- IntMap.lookup chIdx (connChannels conn)
+      (msg, channel') <- Channel.getOutgoingMessage channel
+      let msgSeqRaw = unSequenceNum (cmSequence msg)
+          -- Payload header: channel (3 bits) | is_fragment (1 bit), then 16-bit channel seq
+          headerByte = fromIntegral chIdx .&. 0x07
+          seqHi = fromIntegral (msgSeqRaw `shiftR` 8) :: Word8
+          seqLo = fromIntegral (msgSeqRaw .&. 0xFF) :: Word8
+          wireData = BS.cons headerByte $ BS.cons seqHi $ BS.cons seqLo (cmData msg)
+      pure (msg, channel', wireData, BS.length wireData, Channel.channelIsReliable channel)
+
+    emitPacket c msg channel' wireData wireSize isReliable =
+      let header = createHeaderInternal c
+          pkt =
+            OutgoingPacket
+              { opHeader = header {packetType = Payload},
+                opType = Payload,
+                opPayload = wireData
+              }
+          cong' = ccDeductBudget wireSize (connCongestion c)
+          cwnd' = fmap (cwOnSend wireSize now) (connCwnd c)
+          rel'
+            | isReliable =
+                Rel.onPacketSent
+                  (connLocalSeq c)
+                  now
+                  (ChannelId (fromIntegral chIdx))
+                  (cmSequence msg)
+                  wireSize
+                  (connReliability c)
+            | otherwise = connReliability c
+       in c
+            & #connChannels
+            %~ IntMap.insert chIdx channel'
+            & #connSendQueue
+            %~ (Seq.|> pkt)
+            & #connLocalSeq
+            %~ (+ 1)
+            & #connCongestion
+            .~ cong'
+            & #connCwnd
+            .~ cwnd'
+            & #connReliability
+            .~ rel'
+            & #connDataSentThisTick
+            .~ True
 
 -- | Enqueue an empty keepalive/ack-only packet.
 -- Both keepalive and ack-only use the same wire format (Keepalive with empty payload).

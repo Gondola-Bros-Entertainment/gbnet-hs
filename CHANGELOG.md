@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.1.0
+
+### Bug Fixes
+
+- **Congestion bypass for small reliable packets**: Small reliable messages (<= 64 bytes) now bypass the congestion window, preventing upgrade/command stalls when heavy unreliable traffic fills the cwnd. Binary rate limit still applies to all traffic.
+
+### New
+
+- `smallReliableThreshold` constant exported from `GBNet.Config`
+
+### Internal
+
+- Refactored `processChannelMessages` from nested if/else to guards + Maybe-monadic pipeline with named where-helpers
+
 ## 0.2.0.0
 
 ### Breaking Changes

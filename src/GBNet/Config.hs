@@ -47,6 +47,7 @@ module GBNet.Config
     maxChannelCount,
     defaultDeltaBaselineTimeoutMs,
     defaultMaxBaselineSnapshots,
+    smallReliableThreshold,
 
     -- * Configuration
     NetworkConfig (..),
@@ -194,6 +195,14 @@ defaultMaxPending = 256
 -- | Default rate limit for connection requests per second.
 defaultRateLimitPerSecond :: Int
 defaultRateLimitPerSecond = 10
+
+-- | Maximum wire size (bytes) for a reliable message to bypass the
+-- congestion window.  Small reliable packets (e.g. upgrade commands)
+-- are latency-sensitive and must not be starved by heavy unreliable
+-- state traffic that fills the cwnd.  The binary rate limit still
+-- applies to all traffic.
+smallReliableThreshold :: Int
+smallReliableThreshold = 64
 
 -- | Default delta baseline timeout in milliseconds.
 defaultDeltaBaselineTimeoutMs :: Double
