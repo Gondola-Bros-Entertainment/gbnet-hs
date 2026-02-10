@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               gbnet-hs
-version:            0.1.1.0
+version:            0.2.0.0
 synopsis:           Transport-level networking library with zero-copy Storable serialization
 description:
   A transport-level networking library providing reliable UDP with
@@ -24,6 +24,7 @@ extra-doc-files:
 library
   exposed-modules:
     GBNet
+    GBNet.Crypto
     GBNet.Serialize
     GBNet.Serialize.TH
     GBNet.Packet
@@ -61,14 +62,16 @@ library
     , bytestring          >= 0.11 && < 0.13
     , containers          >= 0.6 && < 0.8
     , crc32c              >= 0.2 && < 0.3
+    , crypton             >= 1.0 && < 2
     , deepseq             >= 1.4 && < 1.6
+    , memory              >= 0.18 && < 1
     , mtl                 >= 2.2 && < 2.4
     , network             >= 3.1 && < 3.3
+    , optics              >= 0.4.2 && < 0.5
+    , optics-th           >= 0.4.1 && < 0.5
     , stm                 >= 2.5 && < 2.6
     , template-haskell    >= 2.18 && < 2.23
     , transformers        >= 0.5 && < 0.7
-    , optics             >= 0.4.2 && < 0.5
-    , optics-th          >= 0.4.1 && < 0.5
     , vector              >= 0.12 && < 0.14
 
   hs-source-dirs:   src

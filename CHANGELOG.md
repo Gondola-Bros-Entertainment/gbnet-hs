@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.2.0.0
+
+### Breaking Changes
+
+- `NetworkConfig` gains `ncEncryptionKey :: !(Maybe EncryptionKey)` field (defaults to `Nothing`)
+- `NetworkStats` gains `nsDecryptionFailures :: !Word64` field
+- `TestNetConfig` gains `tncDuplicateChance` and `tncOutOfOrderChance` fields
+- `Connection` gains `connEncryptionKey`, `connSendNonce`, `connRecvNonceMax` fields
+
+### New Features
+
+- **ChaCha20-Poly1305 AEAD encryption** (`GBNet.Crypto` module): pre-shared key encryption for post-handshake packets with anti-replay nonce tracking
+- **IPv6 socket support**: `newUdpSocket` now detects address family from `SockAddr`; new helpers `localhost6`, `ipv6`, `anyAddr6`
+- **TestNet simulation**: packet duplication (`tncDuplicateChance`) and out-of-order delivery (`tncOutOfOrderChance`)
+
+### Internal
+
+- New dependency: `crypton` (ChaCha20-Poly1305), `memory` (ByteArray conversion)
 
 ## 0.1.1.0
 

@@ -21,10 +21,12 @@ A transport-level networking library providing:
 
 - **Zero-copy serialization** — Storable-based, C-level speed (14ns per type)
 - **Reliable UDP** — Connection-oriented with ACKs, retransmits, and ordering
+- **AEAD encryption** — Optional ChaCha20-Poly1305 with anti-replay nonce tracking
 - **Unified Peer API** — Same code for client, server, or P2P mesh
 - **Effect abstraction** — `MonadNetwork` typeclass enables pure deterministic testing
 - **Congestion control** — Dual-layer: binary mode + TCP New Reno window, with application-level backpressure
 - **Zero-poll receive** — Dedicated receive thread via GHC IO manager (epoll/kqueue), STM TQueue delivery
+- **IPv4 and IPv6** — Automatic address family detection
 - **Connection migration** — Seamless IP address change handling
 
 ---
@@ -136,6 +138,7 @@ let config = defaultNetworkConfig
       , ncMtu = 1200
       , ncEnableConnectionMigration = True
       , ncChannelConfigs = [unreliableChannel, reliableChannel]
+      , ncEncryptionKey = Just (EncryptionKey myKey)  -- optional AEAD encryption
       }
 ```
 
@@ -234,6 +237,45 @@ simulateLatency 50
 
 -- 10% packet loss
 simulateLoss 0.1
+
+-- Packet duplication and out-of-order delivery
+let testCfg = defaultTestNetConfig
+      { tncDuplicateChance = 0.05    -- 5% chance of duplicating packets
+      , tncOutOfOrderChance = 0.1    -- 10% chance of reordering
+      }
+```
+
+---
+
+## Encryption
+
+Optional ChaCha20-Poly1305 AEAD encryption for post-handshake packets:
+
+```haskell
+import GBNet
+
+-- Pre-shared key (32 bytes) — both sides must use the same key
+let key = EncryptionKey mySharedKey
+let config = defaultNetworkConfig { ncEncryptionKey = Just key }
+
+-- Handshake packets remain plaintext; all data packets are encrypted
+-- Anti-replay: monotonic nonce counter rejects duplicate/old packets
+```
+
+Wire overhead: 24 bytes per encrypted packet (8-byte nonce + 16-byte auth tag).
+
+## IPv6
+
+IPv6 works out of the box — address family is detected automatically:
+
+```haskell
+-- IPv4 (existing)
+let addr4 = anyAddr 7777
+
+-- IPv6
+let addr6 = anyAddr6 7777           -- bind to [::]:7777
+let local = localhost6 7777          -- bind to [::1]:7777
+let custom = ipv6 (0,0,0,1) 7777    -- specific address
 ```
 
 ---
@@ -271,6 +313,8 @@ simulateLoss 0.1
 | `GBNet.Net` | `NetT` monad transformer with receive thread + TQueue |
 | `GBNet.Net.IO` | `initNetState` — create real UDP socket and start receive thread |
 | `GBNet.Peer` | `NetPeer`, `peerTick`, connection management |
+| `GBNet.Crypto` | ChaCha20-Poly1305 AEAD encryption and decryption |
+| `GBNet.Security` | CRC32C integrity, rate limiting, connect tokens |
 | `GBNet.Congestion` | Dual-layer congestion control and backpressure |
 | `GBNet.TestNet` | Pure test network, `TestWorld` for multi-peer |
 | `GBNet.Serialize.TH` | `deriveStorable` TH for zero-copy serialization |
@@ -286,6 +330,7 @@ import GBNet.Net (NetT, runNetT, evalNetT)
 import GBNet.Net.IO (initNetState)
 import GBNet.Peer (NetPeer, peerTick, PeerEvent(..))
 import GBNet.Config (NetworkConfig(..), defaultNetworkConfig)
+import GBNet.Crypto (EncryptionKey(..), NonceCounter(..))  -- optional encryption
 ```
 
 ---
@@ -412,10 +457,12 @@ Optimized for game networking:
 ### Benchmarks
 
 ```
-storable/vec3/serialize      18.98 ns   (52M ops/sec)  -- user types
-storable/transform/serialize 20.80 ns  (48M ops/sec)  -- nested types
-packetheader/serialize      16.49 ns   (60M ops/sec)
-packetheader/deserialize    15.95 ns   (62M ops/sec)
+storable/vec3/serialize       18.98 ns   (52M ops/sec)  -- user types
+storable/transform/serialize  20.80 ns   (48M ops/sec)  -- nested types
+packetheader/serialize        16.49 ns   (60M ops/sec)
+packetheader/deserialize      15.95 ns   (62M ops/sec)
+crypto/encrypt/64B             1.9 us   (526K ops/sec)  -- ChaCha20-Poly1305
+crypto/decrypt/1KB             4.2 us   (238K ops/sec)
 ```
 
 Run with `cabal bench --enable-benchmarks`.
@@ -435,6 +482,8 @@ Run with `cabal bench --enable-benchmarks`.
 - [x] Connection migration
 - [x] Hardware-accelerated CRC32C validation (SSE4.2/ARMv8/software fallback)
 - [x] Self-cleaning rate limiter
+- [x] ChaCha20-Poly1305 AEAD encryption with anti-replay
+- [x] IPv4 and IPv6 support
 
 ### Congestion Control
 - [x] Binary mode (Good/Bad with AIMD recovery)
@@ -449,6 +498,7 @@ Run with `cabal bench --enable-benchmarks`.
 - [x] `NetT` monad transformer with dedicated receive thread + STM TQueue
 - [x] `TestNet` pure deterministic network
 - [x] `TestWorld` multi-peer simulation
+- [x] TestNet packet duplication and out-of-order simulation
 
 ### Replication Helpers
 - [x] Delta compression

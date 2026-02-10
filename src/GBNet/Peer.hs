@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedLabels #-}
 
@@ -75,22 +76,29 @@ import qualified Data.ByteString as BS
 import Data.Either (fromRight)
 import Data.List (foldl')
 import qualified Data.Map.Strict as Map
+import Data.Word (Word32)
 import GBNet.Class (MonadNetwork (..), MonadTime (..), MonoTime)
 import GBNet.Config (NetworkConfig (..))
 import GBNet.Connection
   ( ConnectionError (..),
     DisconnectReason (..),
     OutgoingPacket (..),
+    connEncryptionKey,
+    connRecvNonceMax,
+    connSendNonce,
     processIncomingHeader,
     receiveIncomingPayload,
   )
 import qualified GBNet.Connection as Conn
+import GBNet.Crypto (NonceCounter (..), decrypt, encrypt)
+import qualified GBNet.Crypto
 import GBNet.Fragment (newFragmentAssembler, processFragment)
 import GBNet.Packet
   ( Packet (..),
     PacketHeader (..),
     PacketType (..),
     deserializePacket,
+    packetHeaderByteSize,
     serializePacket,
   )
 import GBNet.Peer.Handshake
@@ -124,7 +132,7 @@ import GBNet.Stats (NetworkStats)
 import GBNet.Types (ChannelId (..))
 import GBNet.Util (nextRandom)
 import Network.Socket (SockAddr)
-import Optics ((%~), (&), (.~))
+import Optics ((%), (%~), (&), (.~), (?~))
 
 -- | Create a new peer bound to the given address.
 -- Returns the peer and socket. The socket is also stored in the peer for
@@ -216,21 +224,64 @@ peerProcess now packets peer0 =
 
 -- | Drain send queues from all connections into the peer's send queue.
 -- Single-pass over the connection map via foldlWithKey'.
+-- Post-handshake packets (Payload, Keepalive, Disconnect) are encrypted
+-- when the connection has an encryption key configured.
 drainAllConnectionQueues :: MonoTime -> NetPeer -> NetPeer
 drainAllConnectionQueues _now peer =
   Map.foldlWithKey' drainOne (peer & #npConnections .~ Map.empty) (npConnections peer)
   where
+    protocolId = ncProtocolId (npConfig peer)
+
     drainOne p peerId conn =
       let (connPackets, conn') = Conn.drainSendQueue conn
-          rawPackets = map (outgoingToRaw peerId) connPackets
-          p' = p & #npConnections %~ Map.insert peerId conn'
+          (rawPackets, conn'') = encryptOutgoing peerId protocolId conn' connPackets
+          p' = p & #npConnections %~ Map.insert peerId conn''
        in foldl' (flip queueRawPacket) p' rawPackets
 
-    outgoingToRaw peerId (OutgoingPacket hdr ptype payload) =
+-- | Encrypt outgoing packets and update connection nonce state.
+-- Handshake packets remain plaintext; post-handshake packets are encrypted
+-- when the connection has a key.
+encryptOutgoing ::
+  PeerId ->
+  Word32 ->
+  Conn.Connection ->
+  [OutgoingPacket] ->
+  ([RawPacket], Conn.Connection)
+encryptOutgoing peerId protocolId conn0 =
+  foldl' encryptOne ([], conn0)
+  where
+    encryptOne (!acc, !conn) (OutgoingPacket hdr ptype payload) =
       let header = hdr {packetType = ptype}
           pkt = Packet {pktHeader = header, pktPayload = payload}
-          raw = appendCrc32 (serializePacket pkt)
-       in RawPacket peerId raw
+          serialized = serializePacket pkt
+       in case (connEncryptionKey conn, isPostHandshake ptype) of
+            (Just key, True) ->
+              let nonce = connSendNonce conn
+                  headerBytes = BS.take packetHeaderByteSize serialized
+                  payloadBytes = BS.drop packetHeaderByteSize serialized
+               in case encrypt key nonce protocolId payloadBytes of
+                    Left _ ->
+                      -- Encryption failed; send plaintext as fallback
+                      let raw = appendCrc32 serialized
+                       in (acc ++ [RawPacket peerId raw], conn)
+                    Right encrypted ->
+                      let raw = appendCrc32 (headerBytes <> encrypted)
+                          conn' =
+                            conn
+                              & #connSendNonce
+                              .~ NonceCounter (unNonceCounter nonce + 1)
+                       in (acc ++ [RawPacket peerId raw], conn')
+            _ ->
+              -- Plaintext: no key or handshake packet
+              let raw = appendCrc32 serialized
+               in (acc ++ [RawPacket peerId raw], conn)
+
+-- | Whether a packet type is post-handshake (should be encrypted).
+isPostHandshake :: PacketType -> Bool
+isPostHandshake Payload = True
+isPostHandshake Keepalive = True
+isPostHandshake Disconnect = True
+isPostHandshake _ = False
 
 -- -----------------------------------------------------------------------------
 -- Polymorphic IO helpers
@@ -317,6 +368,9 @@ processPacketsPure packets now peer = foldl' go ([], peer) packets
        in (evts ++ evts', p')
 
 -- | Handle a single received packet (pure).
+-- For post-handshake packets from connections with encryption keys,
+-- the payload is decrypted before dispatch. Anti-replay is enforced
+-- by checking the nonce counter.
 handlePacket ::
   PeerId ->
   BS.ByteString ->
@@ -326,7 +380,51 @@ handlePacket ::
 handlePacket peerId dat now peer =
   case parsePacket dat of
     Nothing -> ([], peer)
-    Just pkt -> handlePacketByType peerId pkt now (packetType (pktHeader pkt)) peer
+    Just pkt ->
+      let ptype = packetType (pktHeader pkt)
+       in case (isPostHandshake ptype, lookupConnectionKey peerId peer) of
+            (True, Just (key, conn)) ->
+              let protocolId = ncProtocolId (npConfig peer)
+                  encPayload = pktPayload pkt
+               in case decrypt key protocolId encPayload of
+                    Left _ ->
+                      -- Decryption failed: increment stat, drop packet
+                      let conn' =
+                            conn
+                              & #connStats
+                              % #nsDecryptionFailures
+                              %~ (+ 1)
+                          peer' = peer & #npConnections %~ Map.insert peerId conn'
+                       in ([], peer')
+                    Right (plaintext, NonceCounter recvNonce) ->
+                      -- Anti-replay check
+                      case connRecvNonceMax conn of
+                        Just maxNonce
+                          | recvNonce <= maxNonce ->
+                              ([], peer) -- Nonce replay, drop
+                        _ ->
+                          let conn' =
+                                conn
+                                  & #connRecvNonceMax
+                                  ?~ recvNonce
+                              peer' = peer & #npConnections %~ Map.insert peerId conn'
+                              decryptedPkt = pkt {pktPayload = plaintext}
+                           in handlePacketByType peerId decryptedPkt now ptype peer'
+            _ ->
+              -- No encryption or handshake packet: process as plaintext
+              handlePacketByType peerId pkt now ptype peer
+
+-- | Look up a connection's encryption key and connection for a peer.
+lookupConnectionKey ::
+  PeerId ->
+  NetPeer ->
+  Maybe (GBNet.Crypto.EncryptionKey, Conn.Connection)
+lookupConnectionKey peerId peer =
+  case Map.lookup peerId (npConnections peer) of
+    Nothing -> Nothing
+    Just conn -> case connEncryptionKey conn of
+      Nothing -> Nothing
+      Just key -> Just (key, conn)
 
 -- | Parse packet from raw data.
 parsePacket :: BS.ByteString -> Maybe Packet
@@ -533,6 +631,8 @@ peerBroadcast ::
 peerBroadcast channel dat except now peer =
   let peerIds = filter (\p -> Just p /= except) $ Map.keys (npConnections peer)
       -- Queue message to each connection's channel
+      -- Best-effort: per-peer send failures (channel full, disconnected) are
+      -- intentionally ignored so one failing peer doesn't block the broadcast.
       peer' = foldl' (\p pid -> fromRight p (peerSend pid channel dat now p)) peer peerIds
    in -- Drain connection queues to npSendQueue so packets are ready
       drainAllConnectionQueues now peer'

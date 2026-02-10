@@ -64,7 +64,11 @@ makeFieldLabelsNoPrefix ''UdpSocket
 -- Uses bracket-style cleanup to avoid leaking the socket FD if bind fails.
 newUdpSocket :: SockAddr -> IO (Either SocketError UdpSocket)
 newUdpSocket addr = do
-  sockResult <- tryIO $ NS.socket NS.AF_INET NS.Datagram NS.defaultProtocol
+  let family = case addr of
+        NS.SockAddrInet {} -> NS.AF_INET
+        NS.SockAddrInet6 {} -> NS.AF_INET6
+        _ -> NS.AF_INET
+  sockResult <- tryIO $ NS.socket family NS.Datagram NS.defaultProtocol
   case sockResult of
     Left err -> return $ Left (SocketIoError err)
     Right sock -> do

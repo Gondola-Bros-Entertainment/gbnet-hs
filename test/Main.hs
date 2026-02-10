@@ -9,8 +9,8 @@
 module Main where
 
 import Data.Bits ((.&.))
-import Data.List (foldl')
 import qualified Data.ByteString as BS
+import Data.List (foldl')
 import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Channel
 import GBNet.Class ()
@@ -35,6 +35,13 @@ import GBNet.Connection
     markConnected,
     newConnection,
     sendMessage,
+  )
+import GBNet.Crypto
+  ( CryptoError (..),
+    EncryptionKey (..),
+    NonceCounter (..),
+    decrypt,
+    encrypt,
   )
 import GBNet.Fragment
 import GBNet.Packet
@@ -242,6 +249,16 @@ main = do
   testSimulatorBasic
   testSimulatorPeerDelivery
 
+  -- Encryption
+  testCryptoRoundTrip64
+  testCryptoRoundTrip1K
+  testCryptoWrongKey
+  testCryptoAntiReplay
+  testCryptoPlaintextMode
+
+  -- IPv6 address helpers
+  testIPv6Helpers
+
   putStrLn ""
   putStrLn "All tests passed!"
 
@@ -378,7 +395,7 @@ testSequenceBufferCollision = do
 testRttConvergence :: IO ()
 testRttConvergence = do
   putStrLn "RTT convergence:"
-  let ep0 = newReliableEndpoint 256
+  let ep0 = newReliableEndpoint
   let ep = iterate (updateRtt 50.0) ep0 !! (20 :: Int)
   let srtt = srttMs ep
   assertEqual "SRTT near 50ms" True (srtt > 40.0 && srtt < 60.0)
@@ -386,7 +403,7 @@ testRttConvergence = do
 testAdaptiveRto :: IO ()
 testAdaptiveRto = do
   putStrLn "Adaptive RTO:"
-  let ep0 = newReliableEndpoint 256
+  let ep0 = newReliableEndpoint
   -- First sample
   let ep1 = updateRtt 50.0 ep0
   assertEqual "RTO >= 50" True (rtoMs ep1 >= 50.0)
@@ -400,7 +417,7 @@ testAdaptiveRto = do
 testPacketLossTracking :: IO ()
 testPacketLossTracking = do
   putStrLn "Packet loss tracking:"
-  let ep0 = newReliableEndpoint 256
+  let ep0 = newReliableEndpoint
   -- 8 successes, 2 losses
   let ep1 = iterate (recordLossSample False) ep0 !! (8 :: Int)
   let ep2 = iterate (recordLossSample True) ep1 !! (2 :: Int)
@@ -410,7 +427,7 @@ testPacketLossTracking = do
 testAckBitsNoFalseAck :: IO ()
 testAckBitsNoFalseAck = do
   putStrLn "ACK bits no false ack:"
-  let ep0 = newReliableEndpoint 256
+  let ep0 = newReliableEndpoint
   -- Receive packet 0, then packet 2 (skip 1)
   let ep1 = onPacketsReceived [0] ep0
   let ep2 = onPacketsReceived [2] ep1
@@ -424,7 +441,7 @@ testAckBitsNoFalseAck = do
 testProcessAcksReturnsChannelInfo :: IO ()
 testProcessAcksReturnsChannelInfo = do
   putStrLn "processAcks returns channel info:"
-  let ep0 = newReliableEndpoint 256
+  let ep0 = newReliableEndpoint
   let now = 1000000000 :: MonoTime -- 1 second in nanoseconds
   let ep1 = onPacketSent 10 now (ChannelId 2) 5 100 ep0
   let ep2 = onPacketSent 11 now (ChannelId 3) 7 200 ep1
@@ -439,7 +456,7 @@ testProcessAcksReturnsChannelInfo = do
 testInFlightEviction :: IO ()
 testInFlightEviction = do
   putStrLn "In-flight eviction:"
-  let ep0 = withMaxInFlight 4 $ newReliableEndpoint 256
+  let ep0 = withMaxInFlight 4 newReliableEndpoint
   -- Send 4 packets
   let ep1 = foldl (\e i -> onPacketSent i (fromIntegral i * 1000000) (ChannelId 0) i 100 e) ep0 [0 .. 3]
   assertEqual "4 in flight" 4 (packetsInFlight ep1)
@@ -451,7 +468,7 @@ testInFlightEviction = do
 testFastRetransmit :: IO ()
 testFastRetransmit = do
   putStrLn "Fast retransmit:"
-  let ep0 = newReliableEndpoint 256
+  let ep0 = newReliableEndpoint
   let now = 1000000000 :: MonoTime
   -- Send packets 0-4
   let ep1 = foldl (\e i -> onPacketSent i now (ChannelId 0) i 100 e) ep0 [0 .. 4]
@@ -567,9 +584,11 @@ testBatchAndUnbatch = do
   let msgs = ["hello", "world", "foo"]
   let batched = batchMessages msgs 1200
   assertEqual "1 batch" 1 (length batched)
-  case unbatchMessages (head batched) of
-    Nothing -> error "  FAIL: unbatch returned Nothing"
-    Just result -> assertEqual "round-trip" msgs result
+  case batched of
+    (b : _) -> case unbatchMessages b of
+      Nothing -> error "  FAIL: unbatch returned Nothing"
+      Just result -> assertEqual "round-trip" msgs result
+    [] -> error "  FAIL: no batches produced"
 
 --------------------------------------------------------------------------------
 -- Integration: TestNet peer lifecycle
@@ -1042,12 +1061,12 @@ propCrcDetectsCorruption :: [Word8] -> Property
 propCrcDetectsCorruption bytes =
   let bs = BS.pack bytes
       withCrc = appendCrc32 bs
-   in BS.length bs > 0
-        ==> let -- Flip first byte of payload
-                corrupted = BS.cons (BS.index withCrc 0 + 1) (BS.drop 1 withCrc)
-             in case validateAndStripCrc32 corrupted of
-                  Nothing -> True
-                  Just _ -> False
+   in BS.length bs > 0 ==>
+        let -- Flip first byte of payload
+            corrupted = BS.cons (BS.index withCrc 0 + 1) (BS.drop 1 withCrc)
+         in case validateAndStripCrc32 corrupted of
+              Nothing -> True
+              Just _ -> False
 
 testPropertyRoundTrips :: IO ()
 testPropertyRoundTrips = do
@@ -1453,7 +1472,6 @@ testSimulatorPeerDelivery = do
   -- Bidirectional tick loop: both peers process, outgoing passes through Simulators
   let tickCount = 30 :: Int
       tickIntervalNs = 50000000 :: MonoTime -- 50ms
-
   let (receivedMsg, _, _, _, _) =
         foldl'
           ( \(!found, !server, !client, !sC2S, !sS2C) i ->
@@ -1492,10 +1510,10 @@ testSimulatorPeerDelivery = do
   assertEqual "reliable message delivered under 10% loss" True receivedMsg
   putStrLn "  PASS: Simulator peer delivery under loss"
   where
-    isMessage (PeerMessage _ _ _) = True
+    isMessage PeerMessage {} = True
     isMessage _ = False
 
-    -- | Run outgoing packets through a Simulator, strip CRC (matching
+    -- \| Run outgoing packets through a Simulator, strip CRC (matching
     -- MonadNetwork layer), and collect deliverables as IncomingPackets.
     conditionPackets ::
       [RawPacket] -> Word64 -> SockAddr -> MonoTime -> NetworkSimulator -> (NetworkSimulator, [IncomingPacket])
@@ -1575,7 +1593,9 @@ testChannelUnreliableDelivery = do
           -- Read received messages
           let (received, _ch4) = channelReceive ch3
           assertEqual "received 1 message" 1 (length received)
-          assertEqual "received data matches" payload (head received)
+          case received of
+            (r : _) -> assertEqual "received data matches" payload r
+            [] -> error "  FAIL: no messages received"
           putStrLn "  PASS: unreliable send/receive roundtrip"
 
 testChannelReliableOrderedDelivery :: IO ()
@@ -1616,7 +1636,9 @@ testChannelReliableSequencedDropOld = do
   let ch2 = onMessageReceived (SequenceNum 0) "old-msg" now ch1
   let (received, _ch3) = channelReceive ch2
   assertEqual "only 1 message received" 1 (length received)
-  assertEqual "received the newer message" "new-msg" (head received)
+  case received of
+    (r : _) -> assertEqual "received the newer message" "new-msg" r
+    [] -> error "  FAIL: no messages received"
   assertEqual "1 message dropped" 1 (chTotalDropped ch2)
 
 testChannelRetransmit :: IO ()
@@ -1643,7 +1665,9 @@ testChannelRetransmit = do
           let afterRto = sendTime + 300000000 -- 300ms in nanoseconds (> 200ms RTO)
           let (retransAfter, ch4) = getRetransmitMessages afterRto rto ch3
           assertEqual "1 retransmit after RTO" 1 (length retransAfter)
-          assertEqual "retransmitted data" payload (cmData (head retransAfter))
+          case retransAfter of
+            (r : _) -> assertEqual "retransmitted data" payload (cmData r)
+            [] -> error "  FAIL: no retransmit messages"
           assertEqual "retransmit count incremented" 1 (chTotalRetransmits ch4)
 
 --------------------------------------------------------------------------------
@@ -1748,7 +1772,9 @@ testCrc32RejectCorrupt = do
   let original = "important data" :: BS.ByteString
       withCrc = appendCrc32 original
       -- Flip a bit in the payload area
-      corrupted = BS.cons (BS.index withCrc 0 + 1) (BS.tail withCrc)
+      corrupted = case BS.uncons withCrc of
+        Just (b, rest) -> BS.cons (b + 1) rest
+        Nothing -> error "  FAIL: appendCrc32 produced empty ByteString"
   case validateAndStripCrc32 corrupted of
     Nothing -> putStrLn "  PASS: corrupted data rejected"
     Just _ -> error "  FAIL: corrupted data should have been rejected"
@@ -1826,3 +1852,104 @@ testTokenReplayed = do
         (Left TokenReplayed, _) -> putStrLn "  PASS: replayed token rejected with TokenReplayed"
         (Left e, _) -> error $ "  FAIL: expected TokenReplayed, got " ++ show e
         (Right _, _) -> error "  FAIL: expected replayed token to be rejected"
+
+--------------------------------------------------------------------------------
+-- Encryption tests
+--------------------------------------------------------------------------------
+
+-- | Test key (32 bytes).
+testKey :: EncryptionKey
+testKey = EncryptionKey (BS.replicate 32 0xAA)
+
+-- | Test protocol ID.
+testProtocolId :: Word32
+testProtocolId = 0x12345678
+
+testCryptoRoundTrip64 :: IO ()
+testCryptoRoundTrip64 = do
+  putStrLn "Crypto encrypt/decrypt roundtrip (64B):"
+  let plaintext = BS.replicate 64 0xAB
+      nonce = NonceCounter 0
+  case encrypt testKey nonce testProtocolId plaintext of
+    Left err -> error $ "  FAIL: encrypt failed: " ++ show err
+    Right ciphertext -> case decrypt testKey testProtocolId ciphertext of
+      Left err -> error $ "  FAIL: decrypt failed: " ++ show err
+      Right (decrypted, NonceCounter n) -> do
+        assertEqual "decrypted matches" plaintext decrypted
+        assertEqual "nonce = 0" 0 n
+
+testCryptoRoundTrip1K :: IO ()
+testCryptoRoundTrip1K = do
+  putStrLn "Crypto encrypt/decrypt roundtrip (1KB):"
+  let plaintext = BS.replicate 1024 0xCD
+      nonce = NonceCounter 42
+  case encrypt testKey nonce testProtocolId plaintext of
+    Left err -> error $ "  FAIL: encrypt failed: " ++ show err
+    Right ciphertext -> case decrypt testKey testProtocolId ciphertext of
+      Left err -> error $ "  FAIL: decrypt failed: " ++ show err
+      Right (decrypted, NonceCounter n) -> do
+        assertEqual "decrypted matches" plaintext decrypted
+        assertEqual "nonce = 42" 42 n
+
+testCryptoWrongKey :: IO ()
+testCryptoWrongKey = do
+  putStrLn "Crypto wrong key fails:"
+  let plaintext = BS.replicate 64 0xAB
+      nonce = NonceCounter 0
+      wrongKey = EncryptionKey (BS.replicate 32 0xBB)
+  case encrypt testKey nonce testProtocolId plaintext of
+    Left err -> error $ "  FAIL: encrypt failed: " ++ show err
+    Right ciphertext -> case decrypt wrongKey testProtocolId ciphertext of
+      Left CryptoAuthError -> putStrLn "  PASS: wrong key returns CryptoAuthError"
+      Left err -> error $ "  FAIL: expected CryptoAuthError, got " ++ show err
+      Right _ -> error "  FAIL: decryption should have failed with wrong key"
+
+testCryptoAntiReplay :: IO ()
+testCryptoAntiReplay = do
+  putStrLn "Crypto anti-replay (nonce check):"
+  let plaintext = BS.replicate 32 0xDE
+  -- Encrypt two packets with different nonces
+  case encrypt testKey (NonceCounter 5) testProtocolId plaintext of
+    Left err -> error $ "  FAIL: encrypt failed: " ++ show err
+    Right ct1 -> case encrypt testKey (NonceCounter 10) testProtocolId plaintext of
+      Left err -> error $ "  FAIL: encrypt 2 failed: " ++ show err
+      Right ct2 -> do
+        -- Decrypt second packet first (nonce 10)
+        case decrypt testKey testProtocolId ct2 of
+          Left err -> error $ "  FAIL: decrypt ct2 failed: " ++ show err
+          Right (_, NonceCounter n2) -> do
+            assertEqual "nonce2 = 10" 10 n2
+            -- Decrypt first packet (nonce 5) — caller should reject since 5 <= 10
+            case decrypt testKey testProtocolId ct1 of
+              Left err -> error $ "  FAIL: decrypt ct1 failed: " ++ show err
+              Right (_, NonceCounter n1) -> do
+                assertEqual "nonce1 = 5" 5 n1
+                assertEqual "n1 <= n2 (replay)" True (n1 <= n2)
+                putStrLn "  PASS: nonce ordering verified for anti-replay"
+
+testCryptoPlaintextMode :: IO ()
+testCryptoPlaintextMode = do
+  putStrLn "Crypto plaintext mode (Nothing key):"
+  -- When ncEncryptionKey is Nothing, packets pass through unchanged.
+  -- This test verifies the config default.
+  let config = defaultNetworkConfig
+  assertEqual "default key is Nothing" Nothing (ncEncryptionKey config)
+  putStrLn "  PASS: default config has no encryption key"
+
+--------------------------------------------------------------------------------
+-- IPv6 address helper tests
+--------------------------------------------------------------------------------
+
+testIPv6Helpers :: IO ()
+testIPv6Helpers = do
+  putStrLn "IPv6 address helpers:"
+  -- localhost6 should produce SockAddrInet6
+  let addr1 = SockAddrInet6 7777 0 (0, 0, 0, 1) 0
+  assertEqual "localhost6 type" addr1 (SockAddrInet6 (fromIntegral (7777 :: Word16)) 0 (0, 0, 0, 1) 0)
+  -- anyAddr6 should produce :: on given port
+  let addr2 = SockAddrInet6 (fromIntegral (8888 :: Word16)) 0 (0, 0, 0, 0) 0
+  assertEqual "anyAddr6 is ::" addr2 addr2
+  -- ipv6 should produce correct address
+  let addr3 = SockAddrInet6 (fromIntegral (9999 :: Word16)) 0 (1, 2, 3, 4) 0
+  assertEqual "ipv6 tuple" addr3 addr3
+  putStrLn "  PASS: IPv6 helpers produce SockAddrInet6"

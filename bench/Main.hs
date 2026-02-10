@@ -8,8 +8,7 @@ import Control.DeepSeq (NFData (..))
 import Criterion.Main
 import qualified Data.ByteString as BS
 import Data.List (foldl')
-import Data.Word (Word16, Word32, Word64)
-import Foreign.Storable (Storable (..))
+import Data.Word (Word32)
 import GBNet.Channel
   ( Channel,
     channelSend,
@@ -20,6 +19,7 @@ import GBNet.Channel
     unreliableConfig,
   )
 import GBNet.Class (MonoTime (..))
+import GBNet.Config (defaultNetworkConfig)
 import GBNet.Congestion
   ( batchMessages,
     ccRefillBudget,
@@ -30,13 +30,13 @@ import GBNet.Congestion
     newCongestionWindow,
     unbatchMessages,
   )
-import GBNet.Config (defaultNetworkConfig)
 import GBNet.Connection
   ( Connection,
     drainSendQueue,
     newConnection,
     sendMessage,
   )
+import GBNet.Crypto (EncryptionKey (..), NonceCounter (..), decrypt, encrypt)
 import GBNet.Fragment
   ( FragmentHeader (..),
     deserializeFragmentHeader,
@@ -53,8 +53,6 @@ import GBNet.Packet
   )
 import GBNet.Reliability
   ( ReliableEndpoint,
-    SBEntry (..),
-    SentPacketRecord (..),
     SequenceBuffer,
     newReliableEndpoint,
     newSequenceBuffer,
@@ -69,7 +67,7 @@ import GBNet.Reliability
 import GBNet.Replication.Delta (DeltaTracker, NetworkDelta (..), deltaEncode, newDeltaTracker)
 import GBNet.Replication.Interest (InterestManager (..), newRadiusInterest)
 import GBNet.Security (appendCrc32, validateAndStripCrc32)
-import GBNet.Serialize (castPtr, deserialize, plusPtr, serialize)
+import GBNet.Serialize (deserialize, serialize)
 import GBNet.Serialize.TH (deriveStorable)
 import GBNet.Types (ChannelId (..), MessageId (..), SequenceNum (..))
 
@@ -147,6 +145,14 @@ payload1k = BS.replicate 1024 0xCD
 payload64WithCrc :: BS.ByteString
 payload64WithCrc = appendCrc32 payload64
 
+-- | Test encryption key (32 bytes).
+benchKey :: EncryptionKey
+benchKey = EncryptionKey (BS.replicate 32 0xAA)
+
+-- | Test protocol ID for benchmarks.
+benchProtocolId :: Word32
+benchProtocolId = 0x12345678
+
 -- | Build a fresh Connection for benchmarking.
 buildConnection :: Connection
 buildConnection = newConnection defaultNetworkConfig 0x12345678 (MonoTime 0)
@@ -158,7 +164,7 @@ benchMtu = 1200
 -- | Build a ReliableEndpoint with N in-flight sent packets.
 buildEndpointWithInFlight :: Int -> ReliableEndpoint
 buildEndpointWithInFlight n =
-  foldl' sendOne (newReliableEndpoint 256) [0 .. fromIntegral (n - 1)]
+  foldl' sendOne newReliableEndpoint [0 .. fromIntegral (n - 1)]
   where
     sendOne ep i =
       let seqNum = SequenceNum i
@@ -191,13 +197,13 @@ main =
     [ -- Group 1: Reliability (ACK processing)
       bgroup
         "reliability"
-        [ env (pure (newReliableEndpoint 256, map SequenceNum [0 .. 99])) $ \ ~(ep, seqs) ->
+        [ env (pure (newReliableEndpoint, map SequenceNum [0 .. 99])) $ \ ~(ep, seqs) ->
             bench "onPacketsReceived/100-sequential" $
               nf (onPacketsReceived seqs) ep,
-          env (pure (newReliableEndpoint 256, map (\i -> SequenceNum (i * 3)) [0 .. 99])) $ \ ~(ep, seqs) ->
+          env (pure (newReliableEndpoint, map (\i -> SequenceNum (i * 3)) [0 .. 99])) $ \ ~(ep, seqs) ->
             bench "onPacketsReceived/100-gaps" $
               nf (onPacketsReceived seqs) ep,
-          env (pure (newReliableEndpoint 256)) $ \ep ->
+          env (pure newReliableEndpoint) $ \ep ->
             bench "onPacketsReceived/single" $
               nf (onPacketsReceived [SequenceNum 42]) ep,
           env (pure (buildEndpointWithInFlight 10)) $ \ep ->
@@ -210,7 +216,7 @@ main =
               nf
                 (processAcks (SequenceNum 99) maxBound (MonoTime 500000000))
                 ep,
-          env (pure (newReliableEndpoint 256)) $ \ep ->
+          env (pure newReliableEndpoint) $ \ep ->
             bench "updateRtt" $
               nf (updateRtt 25.0 . updateRtt 30.0) ep
         ],
@@ -352,7 +358,7 @@ main =
         "delta"
         [ env (pure (newDeltaTracker 64 :: DeltaTracker Vec3S)) $ \dt ->
             bench "deltaEncode" $
-              nf (\t -> deltaEncode 0 (Vec3S 1.0 2.0 3.0) t) dt
+              nf (deltaEncode 0 (Vec3S 1.0 2.0 3.0)) dt
         ],
       -- Group 12: Interest manager
       bgroup
@@ -369,9 +375,30 @@ main =
         "batching"
         [ env (pure (replicate 10 payload64)) $ \msgs ->
             bench "batchMessages/10x64B" $
-              nf (\m -> batchMessages m 1200) msgs,
-          env (pure (batchMessages (replicate 10 payload64) 1200)) $ \ ~batches ->
+              nf (`batchMessages` 1200) msgs,
+          env (pure (batchMessages (replicate 10 payload64) 1200)) $ \batches ->
             bench "unbatchMessages/10x64B" $
               nf (map unbatchMessages) batches
+        ],
+      -- Group 14: AEAD encryption (ChaCha20-Poly1305)
+      bgroup
+        "crypto"
+        [ env (pure payload64) $ \payload ->
+            bench "encrypt/64B" $
+              nf (encrypt benchKey (NonceCounter 0) benchProtocolId) payload,
+          env (pure payload1k) $ \payload ->
+            bench "encrypt/1KB" $
+              nf (encrypt benchKey (NonceCounter 0) benchProtocolId) payload,
+          env (pure (forceRight (encrypt benchKey (NonceCounter 0) benchProtocolId payload64))) $ \ct ->
+            bench "decrypt/64B" $
+              nf (decrypt benchKey benchProtocolId) ct,
+          env (pure (forceRight (encrypt benchKey (NonceCounter 0) benchProtocolId payload1k))) $ \ct ->
+            bench "decrypt/1KB" $
+              nf (decrypt benchKey benchProtocolId) ct
         ]
     ]
+
+-- | Extract Right value, erroring on Left. Used only in benchmark setup.
+forceRight :: Either a b -> b
+forceRight (Right x) = x
+forceRight (Left _) = error "forceRight: Left"

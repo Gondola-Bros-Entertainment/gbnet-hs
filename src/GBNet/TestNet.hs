@@ -79,11 +79,21 @@ makeFieldLabelsNoPrefix ''InFlightPacket
 nsPerMs :: Word64
 nsPerMs = 1000000
 
+-- | Maximum extra delay for out-of-order simulation (50ms in nanoseconds).
+testNetOutOfOrderMaxDelayNs :: Word64
+testNetOutOfOrderMaxDelayNs = 50000000
+
+-- | Extra jitter for duplicate packet copies (10ms in nanoseconds).
+testNetDuplicateJitterNs :: Word64
+testNetDuplicateJitterNs = 10000000
+
 -- | Test network configuration.
 data TestNetConfig = TestNetConfig
   { tncLatencyNs :: !Word64, -- Simulated one-way latency in nanoseconds
     tncLossRate :: !Double, -- Packet loss probability (0.0 - 1.0)
-    tncJitterNs :: !Word64 -- Random jitter range in nanoseconds
+    tncJitterNs :: !Word64, -- Random jitter range in nanoseconds
+    tncDuplicateChance :: !Double, -- Probability of duplicating a packet (0.0 - 1.0)
+    tncOutOfOrderChance :: !Double -- Probability of reordering a packet (0.0 - 1.0)
   }
   deriving (Show)
 
@@ -95,7 +105,9 @@ defaultTestNetConfig =
   TestNetConfig
     { tncLatencyNs = 0,
       tncLossRate = 0.0,
-      tncJitterNs = 0
+      tncJitterNs = 0,
+      tncDuplicateChance = 0.0,
+      tncOutOfOrderChance = 0.0
     }
 
 -- | State of the test network.
@@ -152,7 +164,13 @@ instance MonadNetwork TestNet where
             let (r2, rng'') = nextRandom rng'
                 jitterRange = tncJitterNs cfg
                 jitter = if jitterRange == 0 then 0 else r2 `mod` (jitterRange + 1)
-                deliverAt = tnsCurrentTime st + MonoTime (tncLatencyNs cfg) + MonoTime jitter
+                -- Out-of-order: add extra random delay
+                (r3, rng3) = nextRandom rng''
+                oooDelay =
+                  if randomDouble r3 < tncOutOfOrderChance cfg
+                    then MonoTime (r3 `mod` (testNetOutOfOrderMaxDelayNs + 1))
+                    else 0
+                deliverAt = tnsCurrentTime st + MonoTime (tncLatencyNs cfg) + MonoTime jitter + oooDelay
                 pkt =
                   InFlightPacket
                     { ifpFrom = tnsLocalAddr st,
@@ -161,7 +179,16 @@ instance MonadNetwork TestNet where
                       ifpDeliverAt = deliverAt
                     }
             #tnsInFlight %= (Seq.|> pkt)
-            #tnsRng .= rng''
+            -- Duplicate: clone packet with extra jitter
+            let (r4, rng4) = nextRandom rng3
+            if randomDouble r4 < tncDuplicateChance cfg
+              then do
+                let (r5, rng5) = nextRandom rng4
+                    dupJitter = MonoTime (r5 `mod` (testNetDuplicateJitterNs + 1))
+                    dupPkt = pkt {ifpDeliverAt = deliverAt + dupJitter}
+                #tnsInFlight %= (Seq.|> dupPkt)
+                #tnsRng .= rng5
+              else #tnsRng .= rng4
             pure (Right ())
 
   netRecv = do

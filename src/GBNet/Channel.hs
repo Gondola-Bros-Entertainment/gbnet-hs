@@ -11,7 +11,7 @@
 -- Module      : GBNet.Channel
 -- Description : Channel-based message delivery with multiple reliability modes
 --
--- Implements LiteNetLib-style delivery modes: Unreliable, UnreliableSequenced,
+-- Multiple delivery modes: Unreliable, UnreliableSequenced,
 -- ReliableUnordered, ReliableOrdered, and ReliableSequenced. Each channel
 -- manages its own sequence numbers, buffering, and retransmission.
 module GBNet.Channel

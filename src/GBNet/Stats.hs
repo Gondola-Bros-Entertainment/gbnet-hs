@@ -29,6 +29,7 @@ module GBNet.Stats
   )
 where
 
+import Control.DeepSeq (NFData (..), rwhnf)
 import Data.Word (Word64)
 import GBNet.Reliability (MonoTime)
 import Optics.TH (makeFieldLabelsNoPrefix)
@@ -41,6 +42,8 @@ data ConnectionQuality
   | QualityPoor
   | QualityBad
   deriving (Eq, Show, Ord)
+
+instance NFData ConnectionQuality where rnf = rwhnf
 
 -- Quality thresholds: (lossPercent, rttMs)
 badLossThreshold, poorLossThreshold, fairLossThreshold, goodLossThreshold :: Double
@@ -79,6 +82,8 @@ data CongestionLevel
   | CongestionCritical
   deriving (Eq, Show, Ord)
 
+instance NFData CongestionLevel where rnf = rwhnf
+
 -- | Network statistics for a connection.
 data NetworkStats = NetworkStats
   { nsPacketsSent :: !Word64,
@@ -90,9 +95,24 @@ data NetworkStats = NetworkStats
     nsBandwidthUp :: !Double,
     nsBandwidthDown :: !Double,
     nsConnectionQuality :: !ConnectionQuality,
-    nsCongestionLevel :: !CongestionLevel
+    nsCongestionLevel :: !CongestionLevel,
+    nsDecryptionFailures :: !Word64
   }
   deriving (Show)
+
+instance NFData NetworkStats where
+  rnf ns =
+    rnf (nsPacketsSent ns) `seq`
+      rnf (nsPacketsReceived ns) `seq`
+        rnf (nsBytesSent ns) `seq`
+          rnf (nsBytesReceived ns) `seq`
+            rnf (nsRtt ns) `seq`
+              rnf (nsPacketLoss ns) `seq`
+                rnf (nsBandwidthUp ns) `seq`
+                  rnf (nsBandwidthDown ns) `seq`
+                    rnf (nsConnectionQuality ns) `seq`
+                      rnf (nsCongestionLevel ns) `seq`
+                        rnf (nsDecryptionFailures ns)
 
 -- | Default (zero) network statistics.
 defaultNetworkStats :: NetworkStats
@@ -107,7 +127,8 @@ defaultNetworkStats =
       nsBandwidthUp = 0.0,
       nsBandwidthDown = 0.0,
       nsConnectionQuality = QualityExcellent,
-      nsCongestionLevel = CongestionNone
+      nsCongestionLevel = CongestionNone,
+      nsDecryptionFailures = 0
     }
 
 -- | Socket-level statistics.

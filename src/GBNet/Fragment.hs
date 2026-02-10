@@ -59,10 +59,9 @@ import Data.Bits (shiftL, shiftR, (.|.))
 import qualified Data.ByteString as BS
 import Data.ByteString.Internal (unsafeCreate)
 import qualified Data.ByteString.Unsafe as BSU
-import Data.List (minimumBy)
+import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Ord (comparing)
 import Data.Word (Word32, Word8)
 import Foreign.Storable (pokeByteOff)
 import GBNet.Reliability (MonoTime, elapsedMs)
@@ -182,6 +181,9 @@ data FragmentBuffer = FragmentBuffer
   }
   deriving (Show)
 
+instance NFData FragmentBuffer where
+  rnf (FragmentBuffer f c t s) = rnf f `seq` rnf c `seq` rnf t `seq` rnf s
+
 makeFieldLabelsNoPrefix ''FragmentBuffer
 
 -- | Create a new fragment buffer.
@@ -230,7 +232,8 @@ data FragmentAssembler = FragmentAssembler
   }
   deriving (Show)
 
-instance NFData FragmentAssembler where rnf = rwhnf
+instance NFData FragmentAssembler where
+  rnf (FragmentAssembler b t m c) = rnf b `seq` rnf t `seq` rnf m `seq` rnf c
 
 makeFieldLabelsNoPrefix ''FragmentAssembler
 
@@ -313,10 +316,11 @@ expireOldest asm =
         %~ subtract (fbTotalSize oldestBuf)
   where
     findOldest :: Map MessageId FragmentBuffer -> Maybe (MessageId, FragmentBuffer)
-    findOldest m =
-      case Map.toList m of
-        [] -> Nothing
-        xs -> Just $ minimumBy (comparing (fbCreatedAt . snd)) xs
+    findOldest = foldl' pickOlder Nothing . Map.toList
+    pickOlder Nothing x = Just x
+    pickOlder acc@(Just (_, b1)) x@(_, b2)
+      | fbCreatedAt b2 < fbCreatedAt b1 = Just x
+      | otherwise = acc
 
 -- | MTU discovery state.
 data MtuState

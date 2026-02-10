@@ -11,7 +11,7 @@
 -- Module      : GBNet.Congestion
 -- Description : Binary congestion control and bandwidth tracking
 --
--- Gaffer-style Good/Bad mode congestion control, byte-budget gating,
+-- Good\/Bad mode congestion control, byte-budget gating,
 -- adaptive recovery timer, message batching, and bandwidth tracking.
 module GBNet.Congestion
   ( -- * Constants
@@ -154,7 +154,7 @@ data CongestionPhase
 
 instance NFData CongestionPhase where rnf x = x `seq` ()
 
--- | Binary congestion controller (Gaffer-style).
+-- | Binary congestion controller (Good\/Bad mode with AIMD).
 data CongestionController = CongestionController
   { ccMode :: !CongestionMode,
     ccGoodConditionsStart :: !(Maybe MonoTime),
@@ -174,8 +174,17 @@ makeFieldLabelsNoPrefix ''CongestionController
 
 instance NFData CongestionController where
   rnf (CongestionController m gs lt rt br cr bb bt ar lg lb) =
-    rnf m `seq` rnf gs `seq` rnf lt `seq` rnf rt `seq` rnf br `seq`
-      rnf cr `seq` rnf bb `seq` rnf bt `seq` rnf ar `seq` rnf lg `seq` rnf lb
+    rnf m `seq`
+      rnf gs `seq`
+        rnf lt `seq`
+          rnf rt `seq`
+            rnf br `seq`
+              rnf cr `seq`
+                rnf bb `seq`
+                  rnf bt `seq`
+                    rnf ar `seq`
+                      rnf lg `seq`
+                        rnf lb
 
 -- | Create a new congestion controller.
 newCongestionController :: Double -> Double -> Double -> Double -> CongestionController
@@ -443,6 +452,9 @@ data BandwidthTracker = BandwidthTracker
     btTotalBytes :: !Int
   }
   deriving (Show)
+
+instance NFData BandwidthTracker where
+  rnf (BandwidthTracker w d t) = rnf w `seq` rnf d `seq` rnf t
 
 makeFieldLabelsNoPrefix ''BandwidthTracker
 

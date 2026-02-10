@@ -36,6 +36,9 @@ module GBNet.Connection
     connRemoteSeq,
     connLocalSeq,
     connClientSalt,
+    connEncryptionKey,
+    connSendNonce,
+    connRecvNonceMax,
 
     -- * Operations
     connect,
@@ -106,6 +109,7 @@ import GBNet.Congestion
     newCongestionController,
     newCongestionWindow,
   )
+import GBNet.Crypto (EncryptionKey, NonceCounter (..))
 import GBNet.Packet (PacketHeader (..), PacketType (..))
 import GBNet.Reliability (MonoTime, ReliableEndpoint, elapsedMs)
 import qualified GBNet.Reliability as Rel
@@ -172,6 +176,10 @@ data ConnectionError
   | ErrMessageTooLarge
   deriving (Eq, Show)
 
+instance NFData ConnectionState where rnf = rwhnf
+
+instance NFData DisconnectReason where rnf = rwhnf
+
 instance NFData ConnectionError where rnf = rwhnf
 
 -- | Packet waiting to be sent.
@@ -182,7 +190,8 @@ data OutgoingPacket = OutgoingPacket
   }
   deriving (Show)
 
-instance NFData OutgoingPacket where rnf = rwhnf
+instance NFData OutgoingPacket where
+  rnf (OutgoingPacket h t p) = rnf h `seq` rnf t `seq` rnf p
 
 makeFieldLabelsNoPrefix ''OutgoingPacket
 
@@ -216,13 +225,46 @@ data Connection = Connection
     -- Disconnect tracking
     connDisconnectTime :: !(Maybe MonoTime),
     connDisconnectRetries :: !Int,
+    -- | Optional AEAD encryption key ('Nothing' = plaintext mode).
+    connEncryptionKey :: !(Maybe EncryptionKey),
+    -- | Monotonic send nonce counter for anti-replay.
+    connSendNonce :: !NonceCounter,
+    -- | Highest received nonce for anti-replay detection.
+    connRecvNonceMax :: !(Maybe Word64),
     -- Flags
     connPendingAck :: !Bool,
     connDataSentThisTick :: !Bool
   }
   deriving (Show)
 
-instance NFData Connection where rnf = rwhnf
+instance NFData Connection where
+  rnf c =
+    rnf (connConfig c) `seq`
+      rnf (connState c) `seq`
+        rnf (connClientSalt c) `seq`
+          rnf (connServerSalt c) `seq`
+            rnf (connLastSendTime c) `seq`
+              rnf (connLastRecvTime c) `seq`
+                rnf (connStartTime c) `seq`
+                  rnf (connRequestTime c) `seq`
+                    rnf (connRetryCount c) `seq`
+                      rnf (connLocalSeq c) `seq`
+                        rnf (connReliability c) `seq`
+                          rnf (connChannels c) `seq`
+                            rnf (connChannelPriority c) `seq`
+                              rnf (connCongestion c) `seq`
+                                rnf (connCwnd c) `seq`
+                                  rnf (connBandwidthUp c) `seq`
+                                    rnf (connBandwidthDown c) `seq`
+                                      rnf (connSendQueue c) `seq`
+                                        rnf (connStats c) `seq`
+                                          rnf (connDisconnectTime c) `seq`
+                                            rnf (connDisconnectRetries c) `seq`
+                                              rnf (connEncryptionKey c) `seq`
+                                                rnf (connSendNonce c) `seq`
+                                                  rnf (connRecvNonceMax c) `seq`
+                                                    rnf (connPendingAck c) `seq`
+                                                      rnf (connDataSentThisTick c)
 
 makeFieldLabelsNoPrefix ''Connection
 
@@ -264,7 +306,7 @@ newConnection config clientSalt now =
           connRequestTime = Nothing,
           connRetryCount = 0,
           connLocalSeq = 0,
-          connReliability = Rel.newReliableEndpoint (ncPacketBufferSize config),
+          connReliability = Rel.newReliableEndpoint,
           connChannels = channels,
           connChannelPriority = priorityOrder,
           connCongestion = congestion,
@@ -275,6 +317,9 @@ newConnection config clientSalt now =
           connStats = defaultNetworkStats,
           connDisconnectTime = Nothing,
           connDisconnectRetries = 0,
+          connEncryptionKey = ncEncryptionKey config,
+          connSendNonce = NonceCounter 0,
+          connRecvNonceMax = Nothing,
           connPendingAck = False,
           connDataSentThisTick = False
         }

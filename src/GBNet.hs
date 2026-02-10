@@ -52,6 +52,9 @@ module GBNet
     localhost,
     ipv4,
     anyAddr,
+    localhost6,
+    ipv6,
+    anyAddr6,
 
     -- * Socket
     SocketError (..),
@@ -138,6 +141,13 @@ module GBNet
     deserialize,
     deriveStorable,
 
+    -- * Encryption
+    EncryptionKey (..),
+    NonceCounter (..),
+    CryptoError (..),
+    encrypt,
+    decrypt,
+
     -- * Statistics
     NetworkStats (..),
     CongestionLevel (..),
@@ -183,11 +193,12 @@ module GBNet
   )
 where
 
-import Data.Word (Word16, Word8)
+import Data.Word (Word16, Word32, Word8)
 import GBNet.Channel (ChannelConfig (..), ChannelError (..), DeliveryMode (..), defaultChannelConfig, reliableOrderedConfig, reliableSequencedConfig, unreliableConfig)
 import GBNet.Class
 import GBNet.Config (ConfigError (..), NetworkConfig (..), SimulationConfig (..), defaultNetworkConfig, defaultSimulationConfig, validateConfig)
 import GBNet.Connection (ConnectionError (..), ConnectionState (..), DisconnectReason (..))
+import GBNet.Crypto (CryptoError (..), EncryptionKey (..), NonceCounter (..), decrypt, encrypt)
 import GBNet.Net
 import GBNet.Net.IO (initNetState)
 import GBNet.Peer
@@ -244,6 +255,30 @@ filterRelevant ::
   [b]
 filterRelevant mgr observerPos =
   map snd . filter (\(entPos, _) -> Interest.relevant mgr entPos observerPos)
+
+-- | Create an IPv6 localhost address (@::1@) on the given port.
+--
+-- @
+-- let addr = localhost6 7777
+-- @
+localhost6 :: Word16 -> SockAddr
+localhost6 port = SockAddrInet6 (fromIntegral port) 0 (0, 0, 0, 1) 0
+
+-- | Create an IPv6 address from a 4-tuple of 32-bit words and a port.
+--
+-- @
+-- let addr = ipv6 (0x20010db8, 0, 0, 1) 7777
+-- @
+ipv6 :: (Word32, Word32, Word32, Word32) -> Word16 -> SockAddr
+ipv6 (a, b, c, d) port = SockAddrInet6 (fromIntegral port) 0 (a, b, c, d) 0
+
+-- | Bind to any IPv6 interface (@::@) on the given port.
+--
+-- @
+-- let addr = anyAddr6 7777
+-- @
+anyAddr6 :: Word16 -> SockAddr
+anyAddr6 port = SockAddrInet6 (fromIntegral port) 0 (0, 0, 0, 0) 0
 
 -- | Get the network configuration from a peer.
 peerConfig :: NetPeer -> NetworkConfig

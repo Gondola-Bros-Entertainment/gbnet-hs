@@ -191,7 +191,7 @@ elapsedMs start now = fromIntegral (unMonoTime (now - start)) / 1e6
 -- | Ring buffer entry. Stores sequence number for validation.
 data SBEntry a
   = SBEmpty
-  | SBEntry !SequenceNum a
+  | SBEntry !SequenceNum !a
   deriving (Show)
 
 instance (NFData a) => NFData (SBEntry a) where
@@ -343,11 +343,11 @@ rbInsertMany seqs buf =
 
 -- | Record of a sent packet, tracked for ACK processing and RTT estimation.
 data SentPacketRecord = SentPacketRecord
-  { sprChannelId :: !ChannelId,
-    sprChannelSequence :: !SequenceNum,
-    sprSendTime :: !MonoTime,
-    sprSize :: !Int,
-    sprNackCount :: !Word8
+  { sprChannelId :: {-# UNPACK #-} !ChannelId,
+    sprChannelSequence :: {-# UNPACK #-} !SequenceNum,
+    sprSendTime :: {-# UNPACK #-} !MonoTime,
+    sprSize :: {-# UNPACK #-} !Int,
+    sprNackCount :: {-# UNPACK #-} !Word8
   }
   deriving (Show)
 
@@ -384,9 +384,9 @@ ringBufferSize :: Int
 ringBufferSize = 256
 {-# INLINE ringBufferSize #-}
 
--- | Create empty sent packet buffer.
-newSentPacketBuffer :: Int -> SentPacketBuffer
-newSentPacketBuffer _ =
+-- | Create empty sent packet buffer. Fixed at 'ringBufferSize' (256) entries.
+newSentPacketBuffer :: SentPacketBuffer
+newSentPacketBuffer =
   SentPacketBuffer
     { spbEntries = V.replicate ringBufferSize RingEmpty,
       spbCount = 0
@@ -518,14 +518,14 @@ instance NFData ReliableEndpoint where
 
 makeFieldLabelsNoPrefix ''ReliableEndpoint
 
--- | Create a new reliable endpoint with the given buffer size.
-newReliableEndpoint :: Int -> ReliableEndpoint
-newReliableEndpoint bufferSize =
+-- | Create a new reliable endpoint.
+newReliableEndpoint :: ReliableEndpoint
+newReliableEndpoint =
   ReliableEndpoint
     { reLocalSequence = 0,
       reRemoteSequence = 0,
       reAckBits = 0,
-      reSentPackets = newSentPacketBuffer bufferSize,
+      reSentPackets = newSentPacketBuffer,
       reReceivedPackets = newReceivedBuffer,
       reMaxSequenceDistance = defaultMaxSequenceDistance,
       reMaxInFlight = defaultMaxInFlight,

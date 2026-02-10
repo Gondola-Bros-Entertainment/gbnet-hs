@@ -13,7 +13,7 @@
 -- Description : CRC32C integrity, rate limiting, and connect tokens
 --
 -- Packet integrity via CRC32C (Castagnoli), connection rate limiting,
--- and netcode.io-style connect token validation.
+-- and connect token validation.
 module GBNet.Security
   ( -- * CRC32C
     crc32c,
@@ -42,10 +42,9 @@ import qualified Data.ByteString as BS
 import Data.ByteString.Internal (unsafeCreate)
 import qualified Data.ByteString.Unsafe as BSU
 import qualified Data.Digest.CRC32C as CRC
-import Data.List (minimumBy)
+import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Ord (comparing)
 import Data.Word (Word32, Word64, Word8)
 import Foreign.Storable (pokeByteOff)
 import GBNet.Reliability (MonoTime, elapsedMs)
@@ -251,5 +250,8 @@ evictOldest tv =
         & #tvTokensEvicted
         %~ (+ 1)
   where
-    findOldest [] = Nothing
-    findOldest xs = Just $ minimumBy (comparing snd) xs
+    findOldest = foldl' pickOlder Nothing
+    pickOlder Nothing x = Just x
+    pickOlder acc@(Just (_, t1)) x@(_, t2)
+      | t2 < t1 = Just x
+      | otherwise = acc

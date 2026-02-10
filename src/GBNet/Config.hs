@@ -62,8 +62,11 @@ module GBNet.Config
   )
 where
 
+import Control.DeepSeq (NFData (..))
 import Data.Word (Word16, Word32, Word8)
 import GBNet.Channel (ChannelConfig, defaultChannelConfig)
+import GBNet.Crypto (EncryptionKey)
+import GBNet.Reliability (defaultMaxInFlight, defaultMaxSequenceDistance)
 import Optics.TH (makeFieldLabelsNoPrefix)
 
 -- Constants
@@ -120,10 +123,6 @@ defaultPacketBufferSize = 256
 defaultAckBufferSize :: Int
 defaultAckBufferSize = 256
 
--- | Default maximum sequence distance before treating packets as stale.
-defaultMaxSequenceDistance :: Word16
-defaultMaxSequenceDistance = 32768
-
 -- | Default reliable retry time in milliseconds.
 defaultReliableRetryTimeMs :: Double
 defaultReliableRetryTimeMs = 100.0
@@ -167,10 +166,6 @@ defaultDisconnectRetries = 3
 -- | Default disconnect retry timeout in milliseconds.
 defaultDisconnectRetryTimeoutMs :: Double
 defaultDisconnectRetryTimeoutMs = 500.0
-
--- | Default maximum packets in flight before back-pressure.
-defaultMaxInFlight :: Int
-defaultMaxInFlight = 256
 
 -- | Default channel priority (0 = lowest, 255 = highest).
 defaultChannelPriority :: Word8
@@ -261,9 +256,49 @@ data NetworkConfig = NetworkConfig
     ncSimulation :: !(Maybe SimulationConfig),
     ncEnableConnectionMigration :: !Bool,
     ncDeltaBaselineTimeoutMs :: !Double,
-    ncMaxBaselineSnapshots :: !Int
+    ncMaxBaselineSnapshots :: !Int,
+    ncEncryptionKey :: !(Maybe EncryptionKey)
   }
   deriving (Eq, Show)
+
+instance NFData NetworkConfig where
+  rnf nc =
+    rnf (ncProtocolId nc) `seq`
+      rnf (ncMaxClients nc) `seq`
+        rnf (ncConnectionTimeoutMs nc) `seq`
+          rnf (ncKeepaliveIntervalMs nc) `seq`
+            rnf (ncConnectionRequestTimeoutMs nc) `seq`
+              rnf (ncConnectionRequestMaxRetries nc) `seq`
+                rnf (ncMtu nc) `seq`
+                  rnf (ncFragmentThreshold nc) `seq`
+                    rnf (ncFragmentTimeoutMs nc) `seq`
+                      rnf (ncMaxFragments nc) `seq`
+                        rnf (ncMaxReassemblyBufferSize nc) `seq`
+                          rnf (ncPacketBufferSize nc) `seq`
+                            rnf (ncAckBufferSize nc) `seq`
+                              rnf (ncMaxSequenceDistance nc) `seq`
+                                rnf (ncReliableRetryTimeMs nc) `seq`
+                                  rnf (ncMaxReliableRetries nc) `seq`
+                                    rnf (ncMaxInFlight nc) `seq`
+                                      rnf (ncMaxChannels nc) `seq`
+                                        rnf (ncDefaultChannelConfig nc) `seq`
+                                          rnf (ncChannelConfigs nc) `seq`
+                                            rnf (ncSendRate nc) `seq`
+                                              rnf (ncMaxPacketRate nc) `seq`
+                                                rnf (ncCongestionThreshold nc) `seq`
+                                                  rnf (ncCongestionGoodRttThreshold nc) `seq`
+                                                    rnf (ncCongestionBadLossThreshold nc) `seq`
+                                                      rnf (ncCongestionRecoveryTimeMs nc) `seq`
+                                                        rnf (ncDisconnectRetries nc) `seq`
+                                                          rnf (ncDisconnectRetryTimeoutMs nc) `seq`
+                                                            rnf (ncMaxPending nc) `seq`
+                                                              rnf (ncRateLimitPerSecond nc) `seq`
+                                                                rnf (ncUseCwndCongestion nc) `seq`
+                                                                  rnf (ncSimulation nc) `seq`
+                                                                    rnf (ncEnableConnectionMigration nc) `seq`
+                                                                      rnf (ncDeltaBaselineTimeoutMs nc) `seq`
+                                                                        rnf (ncMaxBaselineSnapshots nc) `seq`
+                                                                          rnf (ncEncryptionKey nc)
 
 -- | Default network configuration.
 defaultNetworkConfig :: NetworkConfig
@@ -303,7 +338,8 @@ defaultNetworkConfig =
       ncSimulation = Nothing,
       ncEnableConnectionMigration = True,
       ncDeltaBaselineTimeoutMs = defaultDeltaBaselineTimeoutMs,
-      ncMaxBaselineSnapshots = defaultMaxBaselineSnapshots
+      ncMaxBaselineSnapshots = defaultMaxBaselineSnapshots,
+      ncEncryptionKey = Nothing
     }
 
 -- | Validate configuration, returning an error if invalid.
@@ -352,6 +388,10 @@ data SimulationConfig = SimulationConfig
     simBandwidthLimitBytesPerSec :: !Int
   }
   deriving (Eq, Show)
+
+instance NFData SimulationConfig where
+  rnf (SimulationConfig pl lat jit dup ooo bw) =
+    rnf pl `seq` rnf lat `seq` rnf jit `seq` rnf dup `seq` rnf ooo `seq` rnf bw
 
 -- | Default simulation config (no simulation).
 defaultSimulationConfig :: SimulationConfig
