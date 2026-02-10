@@ -75,7 +75,7 @@ jobs:
           version: '3.8'
       - uses: haskell-actions/hlint-run@v2
         with:
-          path: '["src/", "test/"]'
+          path: '["src/", "test/", "bench/"]'
           fail-on: warning
 
   format:
@@ -85,7 +85,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: haskell-actions/run-ormolu@v16
         with:
-          pattern: "src/**/*.hs test/**/*.hs"
+          pattern: "src/**/*.hs test/**/*.hs bench/**/*.hs"
 
   cabal-check:
     name: Cabal Check
