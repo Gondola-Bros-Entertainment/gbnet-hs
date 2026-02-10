@@ -1,0 +1,39 @@
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to Hackage
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches cabal version
+        run: |
+          CABAL_VERSION=$(sed -n 's/^version:[[:space:]]*//p' gbnet-hs.cabal | tr -d '[:space:]')
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          if [ "$CABAL_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag v$TAG_VERSION does not match cabal version $CABAL_VERSION"
+            exit 1
+          fi
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6.7'
+          cabal-version: '3.14'
+      - run: cabal sdist
+      - name: Upload to Hackage
+        run: |
+          SDIST=$(ls dist-newstyle/sdist/gbnet-hs-*.tar.gz)
+          curl --fail --silent --show-error \
+            --header "Authorization: X-ApiKey ${HACKAGE_TOKEN}" \
+            --form "package=@${SDIST}" \
+            https://hackage.haskell.org/packages/
+        env:
+          HACKAGE_TOKEN: ${{ secrets.HACKAGE_TOKEN }}
