@@ -43,6 +43,7 @@ build-depends:
 ### Simple Game Loop
 
 ```haskell
+{-# LANGUAGE LambdaCase #-}
 import GBNet
 import Control.Monad.IO.Class (liftIO)
 
@@ -63,12 +64,12 @@ gameLoop :: NetPeer -> NetT IO ()
 gameLoop peer = do
   -- Single call: receive, process, broadcast, send
   let outgoing = [(ChannelId 0, encodeMyState myState)]
-  (events, peer') <- peerTick outgoing peer
+  (events, updated) <- peerTick outgoing peer
 
   -- Handle events
   liftIO $ mapM_ handleEvent events
 
-  gameLoop peer'
+  gameLoop updated
 
 handleEvent :: PeerEvent -> IO ()
 handleEvent = \case
@@ -82,7 +83,7 @@ handleEvent = \case
 
 ```haskell
 -- Initiate connection (handshake happens automatically)
-let peer' = peerConnect (peerIdFromAddr remoteAddr) now peer
+let connecting = peerConnect (peerIdFromAddr remoteAddr) now peer
 
 -- The PeerConnected event fires when handshake completes
 ```
@@ -130,16 +131,20 @@ let sequenced = defaultChannelConfig { ccDeliveryMode = ReliableSequenced }
 
 ### Configuration
 
+All config types have [optics](https://hackage.haskell.org/package/optics) labels via `OverloadedLabels`:
+
 ```haskell
+{-# LANGUAGE OverloadedLabels #-}
+import Optics ((&), (.~), (?~))
+
 let config = defaultNetworkConfig
-      { ncMaxClients = 32
-      , ncConnectionTimeoutMs = 10000.0
-      , ncKeepaliveIntervalMs = 1000.0
-      , ncMtu = 1200
-      , ncEnableConnectionMigration = True
-      , ncChannelConfigs = [unreliableChannel, reliableChannel]
-      , ncEncryptionKey = Just (EncryptionKey myKey)  -- optional AEAD encryption
-      }
+      & #ncMaxClients .~ 32
+      & #ncConnectionTimeoutMs .~ 10000.0
+      & #ncKeepaliveIntervalMs .~ 1000.0
+      & #ncMtu .~ 1200
+      & #ncEnableConnectionMigration .~ True
+      & #ncChannelConfigs .~ [unreliableChannel, reliableChannel]
+      & #ncEncryptionKey ?~ EncryptionKey myKey  -- optional AEAD encryption
 ```
 
 ---
@@ -238,11 +243,10 @@ simulateLatency 50
 -- 10% packet loss
 simulateLoss 0.1
 
--- Packet duplication and out-of-order delivery
+-- Packet duplication and out-of-order delivery (optics)
 let testCfg = defaultTestNetConfig
-      { tncDuplicateChance = 0.05    -- 5% chance of duplicating packets
-      , tncOutOfOrderChance = 0.1    -- 10% chance of reordering
-      }
+      & #tncDuplicateChance  .~ 0.05    -- 5% chance of duplicating packets
+      & #tncOutOfOrderChance .~ 0.1     -- 10% chance of reordering
 ```
 
 ---
@@ -373,7 +377,7 @@ import GBNet.Replication.Priority
 let acc = register npcId 2.0
         $ register playerId 10.0
           newPriorityAccumulator
-let (selected, acc') = drainTop 1200 entitySize acc
+let (selected, drained) = drainTop 1200 entitySize acc
 ```
 
 ### Snapshot Interpolation
@@ -383,8 +387,8 @@ Smooth client-side rendering:
 ```haskell
 import GBNet.Replication.Interpolation
 
-let buffer' = pushSnapshot serverTime state buffer
-case sampleSnapshot renderTime buffer' of
+let updated = pushSnapshot serverTime state buffer
+case sampleSnapshot renderTime updated of
   Nothing -> waitForMoreSnapshots
   Just interpolated -> render interpolated
 ```
@@ -417,9 +421,11 @@ A cwnd-based controller layered alongside binary mode:
 Applications can query congestion pressure and adapt:
 
 ```haskell
+import Optics (view)
+
 case peerStats peerId peer of
   Nothing -> pure ()  -- Peer not connected
-  Just stats -> case nsCongestionLevel stats of
+  Just stats -> case view #nsCongestionLevel stats of
     CongestionNone     -> sendFreely
     CongestionElevated -> reduceNonEssential
     CongestionHigh     -> dropLowPriority

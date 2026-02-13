@@ -10,7 +10,6 @@ These examples use the Peer API with the MTL-based network monad.
 
 ```haskell
 import GBNet
-import GBNet.Net (newNetState)
 import Control.Monad (foldM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent (threadDelay)
@@ -37,14 +36,16 @@ runServer = do
 serverLoop :: NetPeer -> NetT IO ()
 serverLoop peer = do
   -- Process network (receive packets, handle connections, send queued)
-  (events, peer') <- peerTick [] peer  -- [] = no outgoing messages this tick
+  (events, ticked) <- peerTick [] peer  -- [] = no outgoing messages this tick
 
   -- Handle events
-  peer'' <- foldM handleEvent peer' events
+  handled <- foldM handleEvent ticked events
 
   -- Tick at ~60hz
-  liftIO $ threadDelay 16667
-  serverLoop peer''
+  liftIO $ threadDelay tickIntervalUs
+  serverLoop handled
+  where
+    tickIntervalUs = 16667
 
 handleEvent :: NetPeer -> PeerEvent -> NetT IO NetPeer
 handleEvent peer event = do
@@ -65,7 +66,7 @@ handleEvent peer event = do
         Left err -> do
           liftIO $ putStrLn ("Send error: " ++ show err)
           pure peer
-        Right peer' -> pure peer'
+        Right echoed -> pure echoed
 
     PeerMigrated oldPid newPid -> do
       liftIO $ putStrLn ("Peer migrated: " ++ show oldPid ++ " -> " ++ show newPid)
@@ -87,20 +88,22 @@ runClient = do
     Left err -> putStrLn $ "Failed to create peer: " ++ show err
     Right (peer, sock) -> do
       -- Initiate connection
-      let peer' = peerConnect (peerIdFromAddr serverAddr) now peer
+      let connecting = peerConnect (peerIdFromAddr serverAddr) now peer
       netState <- newNetState sock localAddr
-      evalNetT (clientLoop peer' False) netState
+      evalNetT (clientLoop connecting False) netState
 
 clientLoop :: NetPeer -> Bool -> NetT IO ()
 clientLoop peer connected = do
-  (events, peer') <- peerTick [] peer
+  (events, ticked) <- peerTick [] peer
 
   -- Check for connection event
-  (peer'', connected') <- foldM handleClientEvent (peer', connected) events
+  (handled, isConnected) <- foldM handleClientEvent (ticked, connected) events
 
   -- Tick
-  liftIO $ threadDelay 16667
-  clientLoop peer'' connected'
+  liftIO $ threadDelay tickIntervalUs
+  clientLoop handled isConnected
+  where
+    tickIntervalUs = 16667
 
 handleClientEvent :: (NetPeer, Bool) -> PeerEvent -> NetT IO (NetPeer, Bool)
 handleClientEvent (peer, connected) event = do
@@ -114,7 +117,7 @@ handleClientEvent (peer, connected) event = do
         Left err -> do
           liftIO $ putStrLn ("Send error: " ++ show err)
           pure (peer, True)
-        Right peer' -> pure (peer', True)
+        Right sent -> pure (sent, True)
 
     PeerMessage _ _ msg -> do
       liftIO $ putStrLn $ "Server replied: " ++ show msg
@@ -145,20 +148,22 @@ runP2PPeer port remotes = do
     Left err -> putStrLn $ "Failed: " ++ show err
     Right (peer, sock) -> do
       -- Connect to all known peers
-      let peer' = foldl (\p remote -> peerConnect (peerIdFromAddr remote) now p) peer remotes
+      let connecting = foldl (\p remote -> peerConnect (peerIdFromAddr remote) now p) peer remotes
       netState <- newNetState sock addr
-      evalNetT (p2pLoop peer') netState
+      evalNetT (p2pLoop connecting) netState
 
 p2pLoop :: NetPeer -> NetT IO ()
 p2pLoop peer = do
-  (events, peer') <- peerTick [] peer
+  (events, ticked) <- peerTick [] peer
 
   -- Broadcast any received message to all other peers
   now <- getMonoTime
-  let peer'' = foldl (broadcastMessage now) peer' events
+  let broadcasted = foldl (broadcastMessage now) ticked events
 
-  liftIO $ threadDelay 16667
-  p2pLoop peer''
+  liftIO $ threadDelay tickIntervalUs
+  p2pLoop broadcasted
+  where
+    tickIntervalUs = 16667
 
 broadcastMessage :: MonoTime -> NetPeer -> PeerEvent -> NetPeer
 broadcastMessage now peer event = case event of
@@ -168,29 +173,51 @@ broadcastMessage now peer event = case event of
   _ -> peer
 ```
 
-### Channel Configuration
+### Channel Configuration (with Optics)
+
+All gbnet-hs types use [optics](https://hackage.haskell.org/package/optics) labels
+via `OverloadedLabels`. Config construction, stats queries, and deep updates compose
+cleanly without prime variables or manual record update syntax:
 
 ```haskell
+{-# LANGUAGE OverloadedLabels #-}
+import Optics ((&), (.~), (?~), (%), view)
+
 -- Configure different delivery modes per channel
-let config = defaultNetworkConfig
-      { ncChannelConfigs =
-          [ -- Channel 0: Position updates (unreliable, latest-only)
-            defaultChannelConfig
-              { ccDeliveryMode = Unreliable
-              , ccPriority = 200  -- High priority
-              }
-          , -- Channel 1: Player actions (reliable, ordered)
-            defaultChannelConfig
-              { ccDeliveryMode = ReliableOrdered
-              , ccPriority = 150
-              }
-          , -- Channel 2: Chat (reliable, but order doesn't matter)
-            defaultChannelConfig
-              { ccDeliveryMode = ReliableSequenced
-              , ccPriority = 50  -- Low priority
-              }
-          ]
-      }
+let positionChannel = defaultChannelConfig
+      & #ccDeliveryMode .~ Unreliable
+      & #ccPriority     .~ 200  -- High priority
+
+    actionChannel = defaultChannelConfig
+      & #ccDeliveryMode .~ ReliableOrdered
+      & #ccPriority     .~ 150
+
+    chatChannel = defaultChannelConfig
+      & #ccDeliveryMode .~ ReliableSequenced
+      & #ccPriority     .~ 50   -- Low priority
+
+    config = defaultNetworkConfig
+      & #ncMaxClients              .~ 32
+      & #ncConnectionTimeoutMs     .~ 10000.0
+      & #ncEnableConnectionMigration .~ True
+      & #ncChannelConfigs          .~ [positionChannel, actionChannel, chatChannel]
+      & #ncEncryptionKey           ?~ EncryptionKey myKey
+
+-- Query stats with composed optics
+case peerStats peerId peer of
+  Just stats -> do
+    let bytesSent = view #nsBytesSent stats
+    let congestion = view #nsCongestionLevel stats
+    putStrLn $ "Sent: " ++ show bytesSent ++ " bytes, congestion: " ++ show congestion
+  Nothing -> pure ()
+
+-- TestNet config: simulate harsh network conditions
+let harshNet = defaultTestNetConfig
+      & #tncLatencyNs       .~ 50000000   -- 50ms one-way
+      & #tncJitterNs        .~ 10000000   -- 10ms jitter
+      & #tncLossRate        .~ 0.05       -- 5% packet loss
+      & #tncDuplicateChance .~ 0.02       -- 2% duplicates
+      & #tncOutOfOrderChance .~ 0.1       -- 10% reordering
 ```
 
 ---
@@ -212,7 +239,7 @@ import Foreign.Storable (sizeOf)
 
 ---
 
-## 1. FPS Player Snapshot
+## FPS Player Snapshot
 
 A player state using Storable for C-level serialization speed (~14ns):
 
@@ -265,7 +292,7 @@ data GameEvent
 For complex sum types, consider using a tagged union pattern with a
 Word8 discriminator followed by payload bytes.
 
-## 2. Packet Header
+## Packet Header
 
 The built-in `PacketHeader` uses Storable for fast serialization:
 
@@ -292,7 +319,7 @@ case deserializeHeader bytes of
 
 ## Replication Examples
 
-### 7. Delta Compression
+### Delta Compression
 
 Send only changed fields to minimize bandwidth:
 
@@ -346,7 +373,7 @@ clientReceive encoded baselines = deltaDecode encoded baselines
 
 ---
 
-### 8. Interest Management
+### Interest Management
 
 Only replicate entities within area-of-interest:
 
@@ -387,7 +414,7 @@ gridExample = do
 
 ---
 
-### 9. Priority-Based Replication
+### Priority-Based Replication
 
 Fair bandwidth allocation when you can't send everything:
 
@@ -406,16 +433,16 @@ replicationExample = do
             newPriorityAccumulator
 
   -- Simulate 100ms tick - priorities accumulate
-  let acc' = accumulate 0.1 acc
+  let accumulated = accumulate tickDeltaSec acc
 
   -- Check accumulated priorities
-  print $ getPriority "player1" acc'  -- Just 2.0 (20 * 0.1)
-  print $ getPriority "tree1" acc'    -- Just 0.1 (1 * 0.1)
+  print $ getPriority "player1" accumulated  -- Just 2.0 (20 * 0.1)
+  print $ getPriority "tree1" accumulated    -- Just 0.1 (1 * 0.1)
 
   -- Drain what fits in 500 byte budget
   -- Assume each entity is ~100 bytes
-  let entitySize _ = 100
-  let (selected, acc'') = drainTop 500 entitySize acc'
+  let entitySize _ = entityByteCost
+  let (selected, drained) = drainTop budgetBytes entitySize accumulated
 
   -- selected will prioritize players, then NPCs
   print selected  -- ["player1", "player2", "npc1", "npc2", "tree1"]
@@ -423,12 +450,16 @@ replicationExample = do
 
   -- Selected entities have priority reset to 0
   -- Unselected entities keep accumulating
-  print $ getPriority "tree2" acc''  -- Still has accumulated priority
+  print $ getPriority "tree2" drained  -- Still has accumulated priority
+  where
+    tickDeltaSec = 0.1
+    budgetBytes = 500
+    entityByteCost = 100
 ```
 
 ---
 
-### 10. Snapshot Interpolation
+### Snapshot Interpolation
 
 Smooth rendering despite network jitter:
 

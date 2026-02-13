@@ -12,6 +12,7 @@
 ### Internal
 
 - Codebase-wide elimination of prime-mark variable naming (`x'`, `x''`) in favour of descriptive names and optics composition across all 31 source files, tests, and benchmarks.
+- README and EXAMPLES: removed all prime-mark variables, added optics-based configuration examples, fixed section numbering, added `LambdaCase` pragma.
 
 ## 0.2.1.0
 
