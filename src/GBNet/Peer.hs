@@ -227,7 +227,7 @@ peerProcess now packets peer0 =
 -- Post-handshake packets (Payload, Keepalive, Disconnect) are encrypted
 -- when the connection has an encryption key configured.
 drainAllConnectionQueues :: MonoTime -> NetPeer -> NetPeer
-drainAllConnectionQueues _now peer =
+drainAllConnectionQueues now peer =
   Map.foldlWithKey' drainOne (peer & #npConnections .~ Map.empty) (npConnections peer)
   where
     protocolId = ncProtocolId (npConfig peer)
@@ -235,7 +235,9 @@ drainAllConnectionQueues _now peer =
     drainOne p peerId conn =
       let (connPackets, conn') = Conn.drainSendQueue conn
           (rawPackets, conn'') = encryptOutgoing peerId protocolId conn' connPackets
-          p' = p & #npConnections %~ Map.insert peerId conn''
+          !bytesSent = sum (map (BS.length . rpData) rawPackets)
+          conn''' = Conn.recordBytesSent bytesSent now conn''
+          p' = p & #npConnections %~ Map.insert peerId conn'''
        in foldl' (flip queueRawPacket) p' rawPackets
 
 -- | Encrypt outgoing packets and update connection nonce state.
@@ -381,10 +383,17 @@ handlePacket peerId dat now peer =
   case parsePacket dat of
     Nothing -> ([], peer)
     Just pkt ->
-      let ptype = packetType (pktHeader pkt)
-       in case (isPostHandshake ptype, lookupConnectionKey peerId peer) of
+      let -- Record incoming bytes on connection if one exists
+          !bytesReceived = BS.length dat
+          peer0 = case Map.lookup peerId (npConnections peer) of
+            Nothing -> peer
+            Just conn ->
+              let conn' = Conn.recordBytesReceived bytesReceived now conn
+               in peer & #npConnections %~ Map.insert peerId conn'
+          ptype = packetType (pktHeader pkt)
+       in case (isPostHandshake ptype, lookupConnectionKey peerId peer0) of
             (True, Just (key, conn)) ->
-              let protocolId = ncProtocolId (npConfig peer)
+              let protocolId = ncProtocolId (npConfig peer0)
                   encPayload = pktPayload pkt
                in case decrypt key protocolId encPayload of
                     Left _ ->
@@ -394,25 +403,25 @@ handlePacket peerId dat now peer =
                               & #connStats
                               % #nsDecryptionFailures
                               %~ (+ 1)
-                          peer' = peer & #npConnections %~ Map.insert peerId conn'
+                          peer' = peer0 & #npConnections %~ Map.insert peerId conn'
                        in ([], peer')
                     Right (plaintext, NonceCounter recvNonce) ->
                       -- Anti-replay check
                       case connRecvNonceMax conn of
                         Just maxNonce
                           | recvNonce <= maxNonce ->
-                              ([], peer) -- Nonce replay, drop
+                              ([], peer0) -- Nonce replay, drop
                         _ ->
                           let conn' =
                                 conn
                                   & #connRecvNonceMax
                                   ?~ recvNonce
-                              peer' = peer & #npConnections %~ Map.insert peerId conn'
+                              peer' = peer0 & #npConnections %~ Map.insert peerId conn'
                               decryptedPkt = pkt {pktPayload = plaintext}
                            in handlePacketByType peerId decryptedPkt now ptype peer'
             _ ->
               -- No encryption or handshake packet: process as plaintext
-              handlePacketByType peerId pkt now ptype peer
+              handlePacketByType peerId pkt now ptype peer0
 
 -- | Look up a connection's encryption key and connection for a peer.
 lookupConnectionKey ::
