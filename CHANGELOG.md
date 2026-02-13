@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2.0
+
+### Bug Fixes
+
+- **Bandwidth tracking now functional**: `recordBytesSent` and `recordBytesReceived` were implemented in `Connection` but never called. Wired into `peerTick`: outgoing bytes recorded after encryption in `drainAllConnectionQueues`, incoming bytes recorded per-packet in `handlePacket`. `BandwidthTracker` and `NetworkStats` byte counters now report real values.
+
 ## 0.2.1.0
 
 ### Bug Fixes
