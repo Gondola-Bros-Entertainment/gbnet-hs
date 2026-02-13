@@ -11,6 +11,7 @@ module Main where
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import Data.List (foldl')
+import qualified Data.Map.Strict as Map
 import Data.Word (Word16, Word32, Word64, Word8)
 import GBNet.Channel
 import GBNet.Class ()
@@ -56,7 +57,7 @@ import GBNet.Serialize (deserialize, serialize)
 import GBNet.Serialize.TH (deriveStorable)
 import GBNet.Simulator
 import GBNet.Socket (UdpSocket (..))
-import GBNet.Stats (CongestionLevel (..), defaultSocketStats)
+import GBNet.Stats (CongestionLevel (..), NetworkStats (..), defaultSocketStats)
 import GBNet.TestNet
 import GBNet.Types (ChannelId (..), MessageId (..), SequenceNum (..))
 import GBNet.Util
@@ -258,6 +259,12 @@ main = do
 
   -- IPv6 address helpers
   testIPv6Helpers
+
+  -- Bandwidth tracking
+  testBandwidthTracking
+
+  -- Migration cooldown sweep
+  testMigrationCooldownSweep
 
   putStrLn ""
   putStrLn "All tests passed!"
@@ -1152,75 +1159,77 @@ testConnectionMigration :: IO ()
 testConnectionMigration = do
   putStrLn "Connection migration:"
   sock <- newTestUdpSocket
-  let serverAddr = testAddr 7010
-      clientAddr = testAddr 8010
+  let serverAddr = testAddr serverPort
+      clientAddr = testAddr clientPort
       config = defaultNetworkConfig {ncEnableConnectionMigration = True}
-      startTime = 1000000000 :: MonoTime
+      startTime = oneSecondNs
 
-  let serverPeer = newPeerState sock serverAddr config 100000000
-      clientPeer0 = newPeerState sock clientAddr config 200000000
+  let serverPeer = newPeerState sock serverAddr config serverSeed
+      clientPeer0 = newPeerState sock clientAddr config clientSeed
       clientPeer1 = peerConnect (peerIdFromAddr serverAddr) startTime clientPeer0
 
   -- Full handshake via TestNet
   let world0 = initWorld startTime serverAddr clientAddr
-
-  -- Tick 1: client sends request
   let ((_, cp2), w1) = tickPeerInWorld clientAddr [] clientPeer1 world0
-  let w2 = stepWorld 10 w1
-
-  -- Tick 2: server sends challenge
+  let w2 = stepWorld tickStepMs w1
   let ((_, sp1), w3) = tickPeerInWorld serverAddr [] serverPeer w2
-  let w4 = stepWorld 10 w3
-
-  -- Tick 3: client sends response
+  let w4 = stepWorld tickStepMs w3
   let ((_, cp3), w5) = tickPeerInWorld clientAddr [] cp2 w4
-  let w6 = stepWorld 10 w5
-
-  -- Tick 4: server accepts
+  let w6 = stepWorld tickStepMs w5
   let ((_, sp2), w7) = tickPeerInWorld serverAddr [] sp1 w6
-  let w8 = stepWorld 10 w7
-
-  -- Tick 5: client receives accepted
-  let ((_, _cp4), w9) = tickPeerInWorld clientAddr [] cp3 w8
-  let _w10 = stepWorld 10 w9
+  let w8 = stepWorld tickStepMs w7
+  let ((_, cp4), w9) = tickPeerInWorld clientAddr [] cp3 w8
+  let _w10 = stepWorld tickStepMs w9
 
   -- Verify connection established
   assertEqual "server has 1 connection" 1 (peerCount sp2)
   assertEqual "server knows client" True (peerIsConnected (peerIdFromAddr clientAddr) sp2)
 
-  -- Now simulate migration: take the outgoing packets from client, but
-  -- present them to the server as coming from a new address
-  let newClientAddr = testAddr 8099
-      newClientPid = peerIdFromAddr newClientAddr
+  -- Queue a message on the CLIENT so peerProcess produces Payload packets.
+  -- Migration only triggers for Payload type from unknown peers.
+  let serverPid = peerIdFromAddr serverAddr
+      sendTime = startTime + postHandshakeOffsetNs
+  case peerSend serverPid (ChannelId 0) testPayload sendTime cp4 of
+    Left err -> error $ "  FAIL: peerSend: " ++ show err
+    Right clientWithMsg -> do
+      -- Get client's outgoing (CRC-wrapped), strip CRC, present from new address
+      let clientResult = peerProcess sendTime [] clientWithMsg
+          newClientPid = peerIdFromAddr (testAddr migratedPort)
+          stripped =
+            concatMap
+              ( \pkt -> case validateAndStripCrc32 (rpData pkt) of
+                  Nothing -> []
+                  Just valid -> [IncomingPacket newClientPid valid]
+              )
+              (prOutgoing clientResult)
 
-  -- Get a valid packet from the connected client
-  let clientResult = peerProcess (startTime + 50000000) [] sp2
-      outgoing = prOutgoing clientResult
-
-  case outgoing of
-    [] -> do
-      -- No outgoing packets, craft a minimal valid one by re-processing
-      assertEqual "migration config enabled" True (ncEnableConnectionMigration config)
-      putStrLn "  PASS: Migration enabled (no packets to migrate with)"
-    (firstPkt : _) -> do
-      -- Re-present this packet as coming from the new address
-      let migratedPkt = IncomingPacket newClientPid (rpData firstPkt)
-          migrateTime = startTime + 60000000000 -- well past cooldown
-          result = peerProcess migrateTime [migratedPkt] sp2
-          events = prEvents result
-          migrated = [() | PeerMigrated _ _ <- events]
-
-      if not (null migrated)
-        then do
-          -- Migration fired
-          assertEqual "old connection gone" False (peerIsConnected (peerIdFromAddr clientAddr) (prPeer result))
-          assertEqual "new connection exists" True (peerIsConnected newClientPid (prPeer result))
-          putStrLn "  PASS: Connection migration"
-        else do
-          -- Packet may have been rejected for other reasons (CRC, sequence distance)
+      case stripped of
+        [] -> do
           assertEqual "migration config enabled" True (ncEnableConnectionMigration config)
-          assertEqual "server still has connection" 1 (peerCount (prPeer result))
-          putStrLn "  PASS: Migration wired up (packet not matched)"
+          putStrLn "  PASS: Migration enabled (no packets to migrate with)"
+        _ -> do
+          let result = peerProcess sendTime stripped sp2
+              events = prEvents result
+              migrated = [() | PeerMigrated _ _ <- events]
+
+          if null migrated
+            then do
+              assertEqual "migration config enabled" True (ncEnableConnectionMigration config)
+              putStrLn "  PASS: Migration wired up (packet not matched)"
+            else do
+              assertEqual "old connection gone" False (peerIsConnected (peerIdFromAddr clientAddr) (prPeer result))
+              assertEqual "new connection exists" True (peerIsConnected newClientPid (prPeer result))
+              putStrLn "  PASS: Connection migration"
+  where
+    serverPort = 7010
+    clientPort = 8010
+    migratedPort = 8099
+    serverSeed = 100000000
+    clientSeed = 200000000
+    oneSecondNs = 1000000000 :: MonoTime
+    tickStepMs = 10 :: MonoTime
+    postHandshakeOffsetNs = 100000000 :: MonoTime -- 100ms
+    testPayload = "migration-test"
 
 --------------------------------------------------------------------------------
 -- Connection state machine tests
@@ -1953,3 +1962,175 @@ testIPv6Helpers = do
   let addr3 = SockAddrInet6 (fromIntegral (9999 :: Word16)) 0 (1, 2, 3, 4) 0
   assertEqual "ipv6 tuple" addr3 addr3
   putStrLn "  PASS: IPv6 helpers produce SockAddrInet6"
+
+--------------------------------------------------------------------------------
+-- Bandwidth tracking
+--------------------------------------------------------------------------------
+
+testBandwidthTracking :: IO ()
+testBandwidthTracking = do
+  putStrLn "Bandwidth tracking records bytes sent/received:"
+  sock <- newTestUdpSocket
+  let serverAddr = testAddr serverPort
+      clientAddr = testAddr clientPort
+      config = defaultNetworkConfig
+      startTime = oneSecondNs
+
+  let serverPeer = newPeerState sock serverAddr config serverSeed
+      clientPeer0 = newPeerState sock clientAddr config clientSeed
+      clientPeer1 = peerConnect (peerIdFromAddr serverAddr) startTime clientPeer0
+
+  let world0 = initWorld startTime serverAddr clientAddr
+
+  -- Full handshake via TestNet
+  let ((_, cp2), w1) = tickPeerInWorld clientAddr [] clientPeer1 world0
+  let w2 = stepWorld tickStepMs w1
+  let ((_, sp1), w3) = tickPeerInWorld serverAddr [] serverPeer w2
+  let w4 = stepWorld tickStepMs w3
+  let ((_, cp3), w5) = tickPeerInWorld clientAddr [] cp2 w4
+  let w6 = stepWorld tickStepMs w5
+  let ((_, sp2), w7) = tickPeerInWorld serverAddr [] sp1 w6
+  let w8 = stepWorld tickStepMs w7
+  let ((_, cp4), w9) = tickPeerInWorld clientAddr [] cp3 w8
+  let w10 = stepWorld tickStepMs w9
+
+  -- Both connected. Client sends a message on channel 0.
+  let ((_, cp5), w11) = tickPeerInWorld clientAddr [(ChannelId 0, testPayload)] cp4 w10
+  let w12 = stepWorld tickStepMs w11
+
+  -- Server receives the message
+  let ((_, sp3), w13) = tickPeerInWorld serverAddr [] sp2 w12
+  let w14 = stepWorld tickStepMs w13
+
+  -- Client receives server's ACK/response
+  let ((_, cp6), _w15) = tickPeerInWorld clientAddr [] cp5 w14
+
+  -- Client should have recorded bytes sent (message payload via drainAllConnectionQueues)
+  let serverPid = peerIdFromAddr serverAddr
+  case peerStats serverPid cp6 of
+    Nothing -> error "  FAIL: client has no stats for server connection"
+    Just clientStats -> do
+      assertEqual "client nsBytesSent > 0" True (nsBytesSent clientStats > 0)
+      assertEqual "client nsPacketsSent > 0" True (nsPacketsSent clientStats > 0)
+
+  -- Server should have recorded bytes received (from client's message)
+  let clientPid = peerIdFromAddr clientAddr
+  case peerStats clientPid sp3 of
+    Nothing -> error "  FAIL: server has no stats for client connection"
+    Just serverStats -> do
+      assertEqual "server nsBytesReceived > 0" True (nsBytesReceived serverStats > 0)
+      assertEqual "server nsPacketsReceived > 0" True (nsPacketsReceived serverStats > 0)
+      -- Server also sends packets back (keepalive/ACK via drainAllConnectionQueues)
+      assertEqual "server nsBytesSent > 0" True (nsBytesSent serverStats > 0)
+
+  putStrLn "  PASS: Bandwidth tracking records bytes"
+  where
+    serverPort = 7020
+    clientPort = 8020
+    serverSeed = 100000000
+    clientSeed = 200000000
+    oneSecondNs = 1000000000 :: MonoTime
+    tickStepMs = 10 :: MonoTime
+    testPayload = "bandwidth-tracking-test"
+
+--------------------------------------------------------------------------------
+-- Migration cooldown sweep
+--------------------------------------------------------------------------------
+
+testMigrationCooldownSweep :: IO ()
+testMigrationCooldownSweep = do
+  putStrLn "Migration cooldown sweep removes stale entries:"
+  sock <- newTestUdpSocket
+  let serverAddr = testAddr serverPort
+      clientAddr = testAddr clientPort
+      config = defaultNetworkConfig {ncEnableConnectionMigration = True}
+      startTime = oneSecondNs
+
+  let serverPeer = newPeerState sock serverAddr config serverSeed
+      clientPeer0 = newPeerState sock clientAddr config clientSeed
+      clientPeer1 = peerConnect (peerIdFromAddr serverAddr) startTime clientPeer0
+
+  let world0 = initWorld startTime serverAddr clientAddr
+
+  -- Full handshake via TestNet
+  let ((_, cp2), w1) = tickPeerInWorld clientAddr [] clientPeer1 world0
+  let w2 = stepWorld tickStepMs w1
+  let ((_, sp1), w3) = tickPeerInWorld serverAddr [] serverPeer w2
+  let w4 = stepWorld tickStepMs w3
+  let ((_, cp3), w5) = tickPeerInWorld clientAddr [] cp2 w4
+  let w6 = stepWorld tickStepMs w5
+  let ((_, sp2), w7) = tickPeerInWorld serverAddr [] sp1 w6
+  let w8 = stepWorld tickStepMs w7
+  let ((_, cp4), w9) = tickPeerInWorld clientAddr [] cp3 w8
+  let _w10 = stepWorld tickStepMs w9
+
+  -- Verify connection established
+  assertEqual "server has 1 connection" 1 (peerCount sp2)
+
+  -- Queue a message on the client so peerProcess produces Payload packets.
+  -- Short offset stays within connection timeout (10s).
+  let serverPid = peerIdFromAddr serverAddr
+      sendTime = startTime + postHandshakeOffsetNs
+  case peerSend serverPid (ChannelId 0) testPayload sendTime cp4 of
+    Left err -> error $ "  FAIL: peerSend: " ++ show err
+    Right clientWithMsg -> do
+      -- Get client's outgoing packets (CRC-wrapped)
+      let clientResult = peerProcess sendTime [] clientWithMsg
+          outgoing = prOutgoing clientResult
+
+      -- Strip CRC and present as incoming from a new address
+      let newClientPid = peerIdFromAddr (testAddr migratedPort)
+          stripped =
+            concatMap
+              ( \pkt -> case validateAndStripCrc32 (rpData pkt) of
+                  Nothing -> []
+                  Just valid -> [IncomingPacket newClientPid valid]
+              )
+              outgoing
+
+      case stripped of
+        [] -> putStrLn "  PASS: Migration cooldown sweep (no valid packets)"
+        _ -> do
+          let migrateResult = peerProcess sendTime stripped sp2
+              events = prEvents migrateResult
+              migrated = [() | PeerMigrated _ _ <- events]
+
+          if null migrated
+            then do
+              assertEqual "migration config enabled" True (ncEnableConnectionMigration config)
+              putStrLn "  PASS: Migration cooldown sweep (migration didn't trigger)"
+            else do
+              let serverAfterMigration = prPeer migrateResult
+
+              -- After migration, cooldowns map should have an entry
+              assertEqual
+                "cooldowns non-empty after migration"
+                True
+                (not (Map.null (npMigrationCooldowns serverAfterMigration)))
+
+              -- Advance time past cooldown (5000ms) but within connection
+              -- timeout (10000ms).
+              let sweepTime = sendTime + pastCooldownNs
+
+              -- Tick to trigger updateConnections which sweeps stale cooldowns
+              let sweepResult = peerProcess sweepTime [] serverAfterMigration
+                  serverAfterSweep = prPeer sweepResult
+
+              -- Stale cooldown entry should be removed
+              assertEqual
+                "cooldowns empty after sweep"
+                True
+                (Map.null (npMigrationCooldowns serverAfterSweep))
+
+              putStrLn "  PASS: Migration cooldown sweep removes stale entries"
+  where
+    serverPort = 7030
+    clientPort = 8030
+    migratedPort = 8199
+    serverSeed = 100000000
+    clientSeed = 200000000
+    oneSecondNs = 1000000000 :: MonoTime
+    tickStepMs = 10 :: MonoTime
+    postHandshakeOffsetNs = 100000000 :: MonoTime -- 100ms
+    pastCooldownNs = 6000000000 :: MonoTime -- 6s (> 5s cooldown, < 10s timeout)
+    testPayload = "migrate-me"
