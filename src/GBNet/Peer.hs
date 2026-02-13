@@ -174,10 +174,15 @@ peerConnect peerId now peer
                 pcRetryCount = 0,
                 pcLastRetry = now
               }
-       in queueControlPacket ConnectionRequest BS.empty peerId
+       in queueControlPacket
+            ConnectionRequest
+            BS.empty
+            peerId
             ( peer
-                & #npPending %~ Map.insert peerId pending
-                & #npRngState .~ rng
+                & #npPending
+                %~ Map.insert peerId pending
+                & #npRngState
+                .~ rng
             )
 
 -- | Disconnect a specific peer (pure).
@@ -264,8 +269,8 @@ encryptOutgoing peerId protocolId conn0 packets =
                     Left _ ->
                       (raw serialized : revAcc, conn)
                     Right encrypted ->
-                      ( raw (headerBytes <> encrypted) : revAcc
-                      , conn & #connSendNonce .~ NonceCounter (unNonceCounter nonce + 1)
+                      ( raw (headerBytes <> encrypted) : revAcc,
+                        conn & #connSendNonce .~ NonceCounter (unNonceCounter nonce + 1)
                       )
             _ ->
               (raw serialized : revAcc, conn)
@@ -383,7 +388,11 @@ handlePacket peerId dat now peer =
             (True, Just (key, conn)) ->
               dispatchEncrypted pkt ptype key (recordBytes conn)
             _ ->
-              handlePacketByType peerId pkt now ptype
+              handlePacketByType
+                peerId
+                pkt
+                now
+                ptype
                 (withConnection peerId recordBytes peer)
   where
     putConn c = peer & #npConnections %~ Map.insert peerId c
@@ -399,7 +408,11 @@ handlePacket peerId dat now peer =
                   | recvNonce <= maxNonce -> ([], putConn conn)
                 _ ->
                   let decryptedPkt = pkt {pktPayload = plaintext}
-                   in handlePacketByType peerId decryptedPkt now ptype
+                   in handlePacketByType
+                        peerId
+                        decryptedPkt
+                        now
+                        ptype
                         (putConn (conn & #connRecvNonceMax ?~ recvNonce))
 
 -- | Look up a connection's encryption key and connection for a peer.
@@ -573,7 +586,10 @@ retryPendingConnectionsPure now peer =
           retryInterval = ncConnectionRequestTimeoutMs (npConfig acc) / fromIntegral (ncConnectionRequestMaxRetries (npConfig acc) + 1)
        in if elapsed > retryInterval && pcRetryCount pending < ncConnectionRequestMaxRetries (npConfig acc)
             then
-              queueControlPacket ConnectionRequest BS.empty peerId
+              queueControlPacket
+                ConnectionRequest
+                BS.empty
+                peerId
                 ( acc
                     & #npPending
                     %~ Map.insert peerId (pending & #pcRetryCount %~ (+ 1) & #pcLastRetry .~ t)

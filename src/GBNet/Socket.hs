@@ -115,9 +115,15 @@ socketSendTo dat addr now sock = do
       Right
         ( sent,
           sock
-            & #usStats % #ssBytesSent %~ (+ fromIntegral sent)
-            & #usStats % #ssPacketsSent %~ (+ 1)
-            & #usStats % #ssLastSendTime ?~ now
+            & #usStats
+            % #ssBytesSent
+            %~ (+ fromIntegral sent)
+            & #usStats
+            % #ssPacketsSent
+            %~ (+ 1)
+            & #usStats
+            % #ssLastSendTime
+            ?~ now
         )
 
 -- | Try an IO action, catching IOExceptions.
