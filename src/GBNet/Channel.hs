@@ -237,7 +237,7 @@ channelSend :: BS.ByteString -> MonoTime -> Channel -> Either ChannelError (Sequ
 channelSend payload now ch
   | BS.length payload > ccMaxMessageSize (chConfig ch) = Left ChannelMessageTooLarge
   | bufferFull && ccBlockOnFull (chConfig ch) = Left ChannelBufferFull
-  | otherwise = Right (seqNum, ch')
+  | otherwise = Right (seqNum, queued)
   where
     bufferFull = Map.size (chSendBuffer ch) >= ccMessageBufferSize (chConfig ch)
     seqNum = chLocalSequence ch
@@ -255,7 +255,7 @@ channelSend payload now ch
       if bufferFull
         then Map.deleteMin (chSendBuffer ch)
         else chSendBuffer ch
-    ch' =
+    queued =
       ch
         & #chLocalSequence
         .~ (seqNum + 1)
@@ -278,13 +278,11 @@ getOutgoingMessage ch =
           if cmReliable msg
             then
               -- Reliable: keep in buffer for retransmit
-              let msg' = msg & #cmRetryCount .~ 1
-                  ch' = ch & #chSendBuffer %~ Map.insert seqNum msg'
-               in Just (msg, ch')
+              let marked = msg & #cmRetryCount .~ 1
+               in Just (msg, ch & #chSendBuffer %~ Map.insert seqNum marked)
             else
               -- Unreliable: remove from buffer immediately (fire and forget)
-              let ch' = ch & #chSendBuffer %~ Map.delete seqNum
-               in Just (msg, ch')
+              Just (msg, ch & #chSendBuffer %~ Map.delete seqNum)
       | otherwise -> Nothing -- Already sent, waiting for ack or retransmit
 
 -- | Get messages that need retransmission based on RTO.
@@ -309,14 +307,14 @@ getRetransmitMessages now rtoMs ch
           )
       | elapsedMs (cmSendTime msg) now >= rtoMs =
           -- Needs retransmit
-          let msg' = msg & #cmSendTime .~ now & #cmRetryCount %~ (+ 1)
-              c' =
+          let retried = msg & #cmSendTime .~ now & #cmRetryCount %~ (+ 1)
+           in ( msg : acc,
                 c
                   & #chSendBuffer
-                  %~ Map.insert seqNum msg'
+                  %~ Map.insert seqNum retried
                   & #chTotalRetransmits
                   %~ (+ 1)
-           in (msg : acc, c')
+              )
       | otherwise = (acc, c)
 
 -- | Process a received message. Returns updated channel.
@@ -349,10 +347,10 @@ onMessageReceived seqNum payload now ch =
         & #chTotalReceived
         %~ (+ 1)
     ReliableOrdered ->
-      let ch' = ch & #chPendingAck %~ (seqNum :)
-       in if seqNum == chOrderedExpected ch'
-            then deliverOrdered payload ch'
-            else bufferOrdered seqNum payload now ch'
+      let withAck = ch & #chPendingAck %~ (seqNum :)
+       in if seqNum == chOrderedExpected withAck
+            then deliverOrdered payload withAck
+            else bufferOrdered seqNum payload now withAck
     ReliableSequenced ->
       if sequenceGreaterThan seqNum (chRemoteSequence ch)
         then
@@ -375,7 +373,7 @@ onMessageReceived seqNum payload now ch =
 -- | Deliver message and flush any buffered consecutive messages.
 deliverOrdered :: BS.ByteString -> Channel -> Channel
 deliverOrdered payload ch =
-  let ch' =
+  let delivered =
         ch
           & #chReceiveBuffer
           %~ (|> payload)
@@ -383,7 +381,7 @@ deliverOrdered payload ch =
           %~ (+ 1)
           & #chTotalReceived
           %~ (+ 1)
-   in flushOrderedBuffer ch'
+   in flushOrderedBuffer delivered
 
 -- | Buffer an out-of-order message for later delivery.
 bufferOrdered :: SequenceNum -> BS.ByteString -> MonoTime -> Channel -> Channel
@@ -399,7 +397,7 @@ flushOrderedBuffer ch =
   case Map.lookup (chOrderedExpected ch) (chOrderedReceiveBuffer ch) of
     Nothing -> ch
     Just (payload, _) ->
-      let ch' =
+      let flushed =
             ch
               & #chOrderedReceiveBuffer
               %~ Map.delete (chOrderedExpected ch)
@@ -409,7 +407,7 @@ flushOrderedBuffer ch =
               %~ (+ 1)
               & #chTotalReceived
               %~ (+ 1)
-       in flushOrderedBuffer ch'
+       in flushOrderedBuffer flushed
 
 -- | Acknowledge a message by sequence number.
 acknowledgeMessage :: SequenceNum -> Channel -> Channel

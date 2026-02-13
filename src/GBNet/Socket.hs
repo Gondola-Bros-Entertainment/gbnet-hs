@@ -112,17 +112,13 @@ socketSendTo dat addr now sock = do
   return $ case result of
     Left err -> Left (SocketIoError err)
     Right sent ->
-      let sock' =
-            sock
-              & #usStats
-              % #ssBytesSent
-              %~ (+ fromIntegral sent)
-              & #usStats
-              % #ssPacketsSent
-              %~ (+ 1)
-              & (#usStats % #ssLastSendTime)
-              ?~ now
-       in Right (sent, sock')
+      Right
+        ( sent,
+          sock
+            & #usStats % #ssBytesSent %~ (+ fromIntegral sent)
+            & #usStats % #ssPacketsSent %~ (+ 1)
+            & #usStats % #ssLastSendTime ?~ now
+        )
 
 -- | Try an IO action, catching IOExceptions.
 tryIO :: IO a -> IO (Either String a)

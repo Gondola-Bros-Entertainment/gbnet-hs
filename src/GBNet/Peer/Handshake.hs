@@ -58,8 +58,8 @@ handleConnectionRequest peerId now peer =
 handleNewConnectionRequest :: PeerId -> MonoTime -> NetPeer -> ([PeerEvent], NetPeer)
 handleNewConnectionRequest peerId now peer =
   let addrKey = sockAddrToKey (unPeerId peerId)
-      (allowed, rl') = rateLimiterAllow addrKey now (npRateLimiter peer)
-      peer1 = peer & #npRateLimiter .~ rl'
+      (allowed, limiter) = rateLimiterAllow addrKey now (npRateLimiter peer)
+      peer1 = peer & #npRateLimiter .~ limiter
       pendingSize = Map.size (npPending peer1)
       connSize = Map.size (npConnections peer1)
       maxClients = ncMaxClients (npConfig peer1)
@@ -72,7 +72,7 @@ handleNewConnectionRequest peerId now peer =
             let reason = encodeDenyReason DenyServerFull
              in ([], queueControlPacket ConnectionDenied reason peerId peer1)
         | otherwise ->
-            let (salt, rng') = nextRandom (npRngState peer1)
+            let (salt, rng) = nextRandom (npRngState peer1)
                 newPend =
                   PendingConnection
                     { pcDirection = Inbound,
@@ -87,7 +87,7 @@ handleNewConnectionRequest peerId now peer =
                     & #npPending
                     %~ Map.insert peerId newPend
                     & #npRngState
-                    .~ rng'
+                    .~ rng
                 saltPayload = encodeSalt salt
              in ([], queueControlPacket ConnectionChallenge saltPayload peerId peer2)
 
@@ -102,10 +102,12 @@ handleConnectionChallenge peerId pkt _now peer =
           case decodeSalt (pktPayload pkt) of
             Nothing -> ([], peer)
             Just serverSalt ->
-              let p' = p & #pcServerSalt .~ serverSalt
-                  peer' = peer & #npPending %~ Map.insert peerId p'
-                  saltPayload = encodeSalt (pcClientSalt p')
-               in ([], queueControlPacket ConnectionResponse saltPayload peerId peer')
+              let updated = p & #pcServerSalt .~ serverSalt
+                  saltPayload = encodeSalt (pcClientSalt updated)
+               in ( [],
+                    queueControlPacket ConnectionResponse saltPayload peerId $
+                      peer & #npPending %~ Map.insert peerId updated
+                  )
 
 -- | Handle connection response (we're inbound, received their response) (pure).
 handleConnectionResponse :: PeerId -> Packet -> MonoTime -> NetPeer -> ([PeerEvent], NetPeer)
@@ -120,22 +122,22 @@ handleConnectionResponse peerId pkt now peer =
             Just clientSalt
               | clientSalt == 0 || clientSalt == pcServerSalt p ->
                   let reason = encodeDenyReason DenyInvalidChallenge
-                      peer' =
+                   in ( [],
                         queueControlPacket ConnectionDenied reason peerId $
                           removePending peerId peer
-                   in ([], peer')
+                      )
               | otherwise ->
                   let conn =
                         Conn.markConnected now $
                           Conn.touchRecvTime now $
                             newConnection (npConfig peer) clientSalt now
-                      peer' =
+                      promoted =
                         peer
                           & #npConnections
                           %~ Map.insert peerId conn
                           & #npPending
                           %~ Map.delete peerId
-                   in ([PeerConnected peerId Inbound], queueControlPacket ConnectionAccepted BS.empty peerId peer')
+                   in ([PeerConnected peerId Inbound], queueControlPacket ConnectionAccepted BS.empty peerId promoted)
 
 -- | Handle connection accepted (we're outbound, they accepted) (pure).
 handleConnectionAccepted :: PeerId -> MonoTime -> NetPeer -> ([PeerEvent], NetPeer)
@@ -149,19 +151,19 @@ handleConnectionAccepted peerId now peer =
                 Conn.markConnected now $
                   Conn.touchRecvTime now $
                     newConnection (npConfig peer) (pcClientSalt p) now
-              peer' =
+              promoted =
                 peer
                   & #npConnections
                   %~ Map.insert peerId conn
                   & #npPending
                   %~ Map.delete peerId
-           in ([PeerConnected peerId Outbound], peer')
+           in ([PeerConnected peerId Outbound], promoted)
 
 -- | Handle disconnect packet (pure).
 handleDisconnect :: PeerId -> NetPeer -> ([PeerEvent], NetPeer)
 handleDisconnect peerId peer =
   if Map.member peerId (npConnections peer)
     then
-      let peer' = cleanupPeer peerId (peer & #npConnections %~ Map.delete peerId)
-       in ([PeerDisconnected peerId ReasonRequested], peer')
+      let disconnected = cleanupPeer peerId (peer & #npConnections %~ Map.delete peerId)
+       in ([PeerDisconnected peerId ReasonRequested], disconnected)
     else ([], removePending peerId peer)

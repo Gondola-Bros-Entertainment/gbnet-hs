@@ -202,13 +202,13 @@ insertFragment idx dat buf
   | idx >= fbFragmentCount buf = (False, buf)
   | Map.member idx (fbFragments buf) = (isComplete buf, buf) -- Already have this fragment
   | otherwise =
-      let buf' =
+      let inserted =
             buf
               & #fbFragments
               %~ Map.insert idx dat
               & #fbTotalSize
               %~ (+ BS.length dat)
-       in (isComplete buf', buf')
+       in (isComplete inserted, inserted)
 
 -- | Check if all fragments received.
 isComplete :: FragmentBuffer -> Bool
@@ -272,22 +272,22 @@ processFragment dat now asm0 =
                         Just b -> b
                         Nothing -> newFragmentBuffer (fhFragmentCount header) now
                       -- Insert fragment
-                      (complete, buf') = insertFragment (fhFragmentIndex header) fragData buf
+                      (complete, inserted) = insertFragment (fhFragmentIndex header) fragData buf
                       asm3 =
                         asm2
                           & #faBuffers
-                          %~ Map.insert msgId buf'
+                          %~ Map.insert msgId inserted
                           & #faCurrentBufferSize
                           %~ (+ fragSize)
                    in if complete
                         then
-                          let result = assembleFragments buf'
+                          let result = assembleFragments inserted
                               asm4 =
                                 asm3
                                   & #faBuffers
                                   %~ Map.delete msgId
                                   & #faCurrentBufferSize
-                                  %~ subtract (fbTotalSize buf')
+                                  %~ subtract (fbTotalSize inserted)
                            in (result, asm4)
                         else (Nothing, asm3)
 
@@ -378,7 +378,7 @@ nextProbe now md
               (Nothing, md)
         _ ->
           let probe = (mdMinMtu md + mdMaxMtu md) `div` 2
-              md' =
+              probing =
                 md
                   & #mdCurrentProbe
                   .~ probe
@@ -386,7 +386,7 @@ nextProbe now md
                   ?~ now
                   & #mdAttempts
                   %~ (+ 1)
-           in (Just probe, md')
+           in (Just probe, probing)
 
 -- | Called when probe succeeded (ack received).
 onProbeSuccess :: Int -> MtuDiscovery -> MtuDiscovery

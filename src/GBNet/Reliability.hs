@@ -241,25 +241,25 @@ sbInsert seqNum val buf =
       newHighest
         | sequenceGreaterThan seqNum (sbSequence buf) = seqNum
         | otherwise = sbSequence buf
-      entries' = zeroCopyMutate (sbEntries buf) $ \mv ->
+      mutated = zeroCopyMutate (sbEntries buf) $ \mv ->
         MV.unsafeWrite mv idx (SBEntry seqNum val)
-   in buf & #sbEntries .~ entries' & #sbSequence .~ newHighest
+   in buf & #sbEntries .~ mutated & #sbSequence .~ newHighest
 {-# INLINE sbInsert #-}
 
 -- | Batched insert - O(n) with single thaw/freeze for n entries.
 sbInsertMany :: [(SequenceNum, a)] -> SequenceBuffer a -> SequenceBuffer a
 sbInsertMany [] buf = buf
 sbInsertMany items buf =
-  let (entries', newHighest) = zeroCopyMutate' (sbEntries buf) $ \mv ->
+  let (mutated, newHighest) = zeroCopyMutate' (sbEntries buf) $ \mv ->
         let go _ !highest [] = return highest
-            go mv' !highest ((seqNum, val) : rest) = do
+            go vec !highest ((seqNum, val) : rest) = do
               let !idx = seqToIndex seqNum buf
-              MV.unsafeWrite mv' idx (SBEntry seqNum val)
-              let !highest' =
+              MV.unsafeWrite vec idx (SBEntry seqNum val)
+              let !next =
                     if sequenceGreaterThan seqNum highest then seqNum else highest
-              go mv' highest' rest
+              go vec next rest
          in go mv (sbSequence buf) items
-   in buf & #sbEntries .~ entries' & #sbSequence .~ newHighest
+   in buf & #sbEntries .~ mutated & #sbSequence .~ newHighest
 {-# INLINE sbInsertMany #-}
 
 -- | O(1) existence check via direct index.
@@ -328,15 +328,15 @@ rbExists (SequenceNum s) (ReceivedBuffer v _) =
 rbInsertMany :: [SequenceNum] -> ReceivedBuffer -> ReceivedBuffer
 rbInsertMany [] buf = buf
 rbInsertMany seqs buf =
-  let (v', newHighest) = zeroCopyMutateU' (rbSeqs buf) $ \mv ->
+  let (mutated, newHighest) = zeroCopyMutateU' (rbSeqs buf) $ \mv ->
         go mv (rbHighest buf) seqs
-   in ReceivedBuffer v' newHighest
+   in ReceivedBuffer mutated newHighest
   where
     go _ !highest [] = return highest
     go mv !highest (sn@(SequenceNum s) : rest) = do
       VUM.unsafeWrite mv (fromIntegral s .&. receivedBufferMask) s
-      let highest' = if sequenceGreaterThan sn highest then sn else highest
-      go mv highest' rest
+      let next = if sequenceGreaterThan sn highest then sn else highest
+      go mv next rest
 {-# INLINE rbInsertMany #-}
 
 -- SentPacketRecord
@@ -434,9 +434,9 @@ spbDelete seqNum buf =
   case V.unsafeIndex (spbEntries buf) idx of
     RingEntry storedSeq _
       | storedSeq == seqNum ->
-          let entries' = zeroCopyMutate (spbEntries buf) $ \mvec ->
+          let cleared = zeroCopyMutate (spbEntries buf) $ \mvec ->
                 MV.unsafeWrite mvec idx RingEmpty
-           in buf & #spbEntries .~ entries' & #spbCount %~ subtract 1
+           in buf & #spbEntries .~ cleared & #spbCount %~ subtract 1
     _ -> buf
   where
     idx = seqToIdx seqNum
@@ -564,7 +564,7 @@ onPacketSent ::
   ReliableEndpoint ->
   ReliableEndpoint
 onPacketSent seqNum sendTime channelId channelSeq size ep =
-  let ep' =
+  let withRoom =
         if spbCount (reSentPackets ep) >= reMaxInFlight ep
           then evictWorstInFlight ep
           else ep
@@ -576,7 +576,7 @@ onPacketSent seqNum sendTime channelId channelSeq size ep =
             sprSize = size,
             sprNackCount = 0
           }
-   in ep'
+   in withRoom
         & #reSentPackets
         %~ spbInsert seqNum record
         & #reTotalSent
@@ -635,22 +635,22 @@ processAcks ackSeq ackBitsVal now ep =
       (acked, retrans, mutations, rttSum, rttCount, bytesAcked) =
         foldl' (processOne buf) ([], [], [], 0.0, 0 :: Int, 0) [0 .. fromIntegral ackBitsWindow]
       -- Phase 2: Apply all mutations in one ST block
-      buf' = applyMutations mutations buf
+      mutatedBuf = applyMutations mutations buf
       -- Update RTT with average of all samples
-      ep' = case rttCount of
+      withRtt = case rttCount of
         0 -> ep
         _ -> updateRtt (rttSum / fromIntegral rttCount) ep
       -- Record loss samples for each ack (success = not lost)
-      ep'' = foldl' (\e _ -> recordLossSample False e) ep' acked
-      ep''' =
-        ep''
+      withLoss = foldl' (\e _ -> recordLossSample False e) withRtt acked
+   in ( AckResult acked retrans,
+        withLoss
           & #reSentPackets
-          .~ buf'
+          .~ mutatedBuf
           & #reTotalAcked
           .~ (reTotalAcked ep + fromIntegral (length acked))
           & #reBytesAcked
           .~ (reBytesAcked ep + fromIntegral bytesAcked)
-   in (AckResult acked retrans, ep''')
+      )
   where
     processOne buf (!acked, !retrans, !muts, !rttSum, !rttCnt, !bytes) i
       | i == 0 = checkSeq ackSeq True buf acked retrans muts rttSum rttCnt bytes
@@ -671,11 +671,11 @@ processAcks ackSeq ackBitsVal now ep =
           | otherwise ->
               let idx = seqToIdx seqNum
                   newNack = min 255 (sprNackCount record + 1)
-                  retrans' =
+                  updatedRetrans =
                     if newNack == fastRetransmitThreshold
                       then (sprChannelId record, sprChannelSequence record) : retrans
                       else retrans
-               in (acked, retrans', MutNack idx seqNum record newNack : muts, rttSum, rttCnt, bytes)
+               in (acked, updatedRetrans, MutNack idx seqNum record newNack : muts, rttSum, rttCnt, bytes)
 
 -- | Apply all mutations in one ST block via zero-copy mutation.
 applyMutations :: [BufferMutation] -> SentPacketBuffer -> SentPacketBuffer

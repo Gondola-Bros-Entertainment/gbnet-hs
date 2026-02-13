@@ -396,8 +396,8 @@ sendMessage channelId payload now conn
         Just channel ->
           case Channel.channelSend payload now channel of
             Left chErr -> Left (ErrChannelError chErr)
-            Right (_msgSeq, channel') ->
-              Right $ modifyChannel idx (const channel') conn
+            Right (_msgSeq, queued) ->
+              Right $ modifyChannel idx (const queued) conn
   where
     idx = channelIdToInt channelId
 
@@ -407,8 +407,8 @@ receiveMessage channelId conn =
   case IntMap.lookup idx (connChannels conn) of
     Nothing -> ([], conn)
     Just channel ->
-      let (msgs, channel') = Channel.channelReceive channel
-       in (msgs, modifyChannel idx (const channel') conn)
+      let (msgs, drained) = Channel.channelReceive channel
+       in (msgs, modifyChannel idx (const drained) conn)
   where
     idx = channelIdToInt channelId
 
@@ -469,20 +469,20 @@ processIncomingHeader header now conn0 =
           .~ True
       -- Process ACKs (extend 32-bit wire format to 64-bit)
       ackBits64 = fromIntegral (ackBitfield header) :: Word64
-      (ackResult, rel') = Rel.processAcks (ack header) ackBits64 now (connReliability conn1)
+      (ackResult, updatedRel) = Rel.processAcks (ack header) ackBits64 now (connReliability conn1)
       ackedPairs = Rel.arAcked ackResult
       fastRetransmits = Rel.arFastRetransmit ackResult
-      conn2 = conn1 & #connReliability .~ rel'
+      conn2 = conn1 & #connReliability .~ updatedRel
       -- Feed ack/loss info to cwnd
       conn3 = case connCwnd conn2 of
         Just cwVal ->
           let hasLoss = not (null fastRetransmits)
               ackedBytes = length ackedPairs * ncMtu (connConfig conn2)
-              cwVal'
+              updatedCw
                 | hasLoss = cwOnLoss cwVal
                 | ackedBytes > 0 = cwOnAck ackedBytes cwVal
                 | otherwise = cwVal
-           in conn2 & #connCwnd ?~ cwVal'
+           in conn2 & #connCwnd ?~ updatedCw
         Nothing -> conn2
       -- Acknowledge messages on channels
       conn4 = foldl' (\c (chId, chSeq) -> modifyChannel (channelIdToInt chId) (Channel.acknowledgeMessage chSeq) c) conn3 ackedPairs
@@ -532,8 +532,8 @@ updateConnectedPure :: MonoTime -> Connection -> Connection
 updateConnectedPure now conn0 =
   let -- Update congestion
       cfg = connConfig conn0
-      cong' = ccRefillBudget (ncMtu cfg) $ ccUpdate (nsPacketLoss (connStats conn0)) (nsRtt (connStats conn0)) now (connCongestion conn0)
-      conn1 = conn0 & #connCongestion .~ cong'
+      congestion = ccRefillBudget (ncMtu cfg) $ ccUpdate (nsPacketLoss (connStats conn0)) (nsRtt (connStats conn0)) now (connCongestion conn0)
+      conn1 = conn0 & #connCongestion .~ congestion
       -- Update cwnd pacing and check for slow start restart
       conn2 = case connCwnd conn1 of
         Just cwVal ->
@@ -560,36 +560,34 @@ updateConnectedPure now conn0 =
       windowLevel = maybe CongestionNone cwCongestionLevel (connCwnd conn6)
       congLevel = max binaryLevel windowLevel
       -- Update stats
-      rel' = connReliability conn6
-      conn7 =
-        conn6
-          & #connStats
-          % #nsRtt
-          .~ Rel.srttMs rel'
-          & #connStats
-          % #nsPacketLoss
-          .~ Rel.packetLossPercent rel'
-          & #connStats
-          % #nsBandwidthUp
-          .~ btBytesPerSecond (connBandwidthUp conn6)
-          & #connStats
-          % #nsBandwidthDown
-          .~ btBytesPerSecond (connBandwidthDown conn6)
-          & #connStats
-          % #nsConnectionQuality
-          .~ assessConnectionQuality (Rel.srttMs rel') (Rel.packetLossPercent rel' * 100)
-          & #connStats
-          % #nsCongestionLevel
-          .~ congLevel
-          & #connPendingAck
-          .~ False
-   in conn7
+      reliability = connReliability conn6
+   in conn6
+        & #connStats
+        % #nsRtt
+        .~ Rel.srttMs reliability
+        & #connStats
+        % #nsPacketLoss
+        .~ Rel.packetLossPercent reliability
+        & #connStats
+        % #nsBandwidthUp
+        .~ btBytesPerSecond (connBandwidthUp conn6)
+        & #connStats
+        % #nsBandwidthDown
+        .~ btBytesPerSecond (connBandwidthDown conn6)
+        & #connStats
+        % #nsConnectionQuality
+        .~ assessConnectionQuality (Rel.srttMs reliability) (Rel.packetLossPercent reliability * 100)
+        & #connStats
+        % #nsCongestionLevel
+        .~ congLevel
+        & #connPendingAck
+        .~ False
 
 -- | Process outgoing messages from channels.
 processChannelOutput :: MonoTime -> Connection -> Connection
 processChannelOutput now conn =
-  let conn' = conn & #connDataSentThisTick .~ False
-   in foldl' (processChannelIdx now) conn' (connChannelPriority conn')
+  let reset = conn & #connDataSentThisTick .~ False
+   in foldl' (processChannelIdx now) reset (connChannelPriority reset)
 
 processChannelIdx :: MonoTime -> Connection -> Int -> Connection
 processChannelIdx now conn chIdx =
@@ -602,10 +600,10 @@ processChannelMessages now conn chIdx
   | not canSendBinary = conn
   | otherwise = case tryDequeue of
       Nothing -> conn
-      Just (msg, channel', wireData, wireSize, isReliable)
+      Just (msg, dequeued, wireData, wireSize, isReliable)
         | not (cwndAllows isReliable wireSize) -> conn
         | otherwise ->
-            processChannelMessages now (emitPacket conn msg channel' wireData wireSize isReliable) chIdx
+            processChannelMessages now (emitPacket conn msg dequeued wireData wireSize isReliable) chIdx
   where
     mtu = ncMtu (connConfig conn)
     canSendBinary = ccCanSend 0 mtu (connCongestion conn)
@@ -617,16 +615,16 @@ processChannelMessages now conn chIdx
 
     tryDequeue = do
       channel <- IntMap.lookup chIdx (connChannels conn)
-      (msg, channel') <- Channel.getOutgoingMessage channel
+      (msg, dequeued) <- Channel.getOutgoingMessage channel
       let msgSeqRaw = unSequenceNum (cmSequence msg)
           -- Payload header: channel (3 bits) | is_fragment (1 bit), then 16-bit channel seq
           headerByte = fromIntegral chIdx .&. 0x07
           seqHi = fromIntegral (msgSeqRaw `shiftR` 8) :: Word8
           seqLo = fromIntegral (msgSeqRaw .&. 0xFF) :: Word8
           wireData = BS.cons headerByte $ BS.cons seqHi $ BS.cons seqLo (cmData msg)
-      pure (msg, channel', wireData, BS.length wireData, Channel.channelIsReliable channel)
+      pure (msg, dequeued, wireData, BS.length wireData, Channel.channelIsReliable channel)
 
-    emitPacket c msg channel' wireData wireSize isReliable =
+    emitPacket c msg dequeued wireData wireSize isReliable =
       let header = createHeaderInternal c
           pkt =
             OutgoingPacket
@@ -634,9 +632,9 @@ processChannelMessages now conn chIdx
                 opType = Payload,
                 opPayload = wireData
               }
-          cong' = ccDeductBudget wireSize (connCongestion c)
-          cwnd' = fmap (cwOnSend wireSize now) (connCwnd c)
-          rel'
+          congestion = ccDeductBudget wireSize (connCongestion c)
+          cwnd = fmap (cwOnSend wireSize now) (connCwnd c)
+          reliability
             | isReliable =
                 Rel.onPacketSent
                   (connLocalSeq c)
@@ -648,17 +646,17 @@ processChannelMessages now conn chIdx
             | otherwise = connReliability c
        in c
             & #connChannels
-            %~ IntMap.insert chIdx channel'
+            %~ IntMap.insert chIdx dequeued
             & #connSendQueue
             %~ (Seq.|> pkt)
             & #connLocalSeq
             %~ (+ 1)
             & #connCongestion
-            .~ cong'
+            .~ congestion
             & #connCwnd
-            .~ cwnd'
+            .~ cwnd
             & #connReliability
-            .~ rel'
+            .~ reliability
             & #connDataSentThisTick
             .~ True
 

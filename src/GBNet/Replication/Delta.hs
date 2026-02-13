@@ -146,7 +146,7 @@ deltaEncode ::
   a ->
   DeltaTracker a ->
   (BS.ByteString, DeltaTracker a)
-deltaEncode seq' current tracker =
+deltaEncode seqNum current tracker =
   let -- Encode based on whether we have a confirmed baseline
       encoded = case dtConfirmed tracker of
         Just (baseSeq, baseline) ->
@@ -158,33 +158,33 @@ deltaEncode seq' current tracker =
 
       -- Store pending snapshot
       pending = dtPending tracker
-      pending' =
+      updated =
         if Seq.length pending >= dtMaxPending tracker
-          then Seq.drop 1 pending Seq.|> (seq', current)
-          else pending Seq.|> (seq', current)
-
-      tracker' = tracker & #dtPending .~ pending'
-   in (encoded, tracker')
+          then Seq.drop 1 pending Seq.|> (seqNum, current)
+          else pending Seq.|> (seqNum, current)
+   in (encoded, tracker & #dtPending .~ updated)
 
 -- | Called when a sequence is ACK'd.
 --
 -- Promotes the matching snapshot to confirmed baseline and discards
 -- older pending entries.
 deltaOnAck :: BaselineSeq -> DeltaTracker a -> DeltaTracker a
-deltaOnAck seq' tracker =
-  case Seq.findIndexL (\(s, _) -> s == seq') (dtPending tracker) of
+deltaOnAck seqNum tracker =
+  case Seq.findIndexL (\(s, _) -> s == seqNum) (dtPending tracker) of
     Nothing -> tracker
     Just idx ->
-      let (ackSeq, snapshot) = Seq.index (dtPending tracker) idx
+      case Seq.lookup idx (dtPending tracker) of
+        Nothing -> tracker
+        Just (ackSeq, snapshot) ->
           -- Drop everything older than the acked position
-          pending' =
-            Seq.filter (\(s, _) -> baselineSeqDiff s ackSeq >= 0) $
-              Seq.drop (idx + 1) (dtPending tracker)
-       in tracker
-            & #dtPending
-            .~ pending'
-            & #dtConfirmed
-            ?~ (ackSeq, snapshot)
+          let remaining =
+                Seq.filter (\(s, _) -> baselineSeqDiff s ackSeq >= 0) $
+                  Seq.drop (idx + 1) (dtPending tracker)
+           in tracker
+                & #dtPending
+                .~ remaining
+                & #dtConfirmed
+                ?~ (ackSeq, snapshot)
 
 -- | Reset tracker state (e.g. on reconnect).
 deltaReset :: DeltaTracker a -> DeltaTracker a
@@ -233,22 +233,23 @@ newBaselineManager maxSnapshots timeoutMs =
 
 -- | Store a confirmed snapshot at the given sequence.
 pushBaseline :: BaselineSeq -> a -> MonoTime -> BaselineManager a -> BaselineManager a
-pushBaseline seq' state now manager =
+pushBaseline seqNum state now manager =
   let evictExpired = Seq.filter (\(_, _, ts) -> elapsedMs ts now < bmTimeoutMs manager)
       evictOldest s
         | Seq.length s >= bmMaxSnapshots manager = Seq.drop 1 s
         | otherwise = s
-      snapshots = evictOldest (evictExpired (bmSnapshots manager)) Seq.|> (seq', state, now)
+      snapshots = evictOldest (evictExpired (bmSnapshots manager)) Seq.|> (seqNum, state, now)
    in manager & #bmSnapshots .~ snapshots
 
 -- | Look up a baseline by sequence number.
 getBaseline :: BaselineSeq -> BaselineManager a -> Maybe a
-getBaseline seq' manager =
-  case Seq.findIndexR (\(s, _, _) -> s == seq') (bmSnapshots manager) of
+getBaseline seqNum manager =
+  case Seq.findIndexR (\(s, _, _) -> s == seqNum) (bmSnapshots manager) of
     Nothing -> Nothing
     Just idx ->
-      let (_, state, _) = Seq.index (bmSnapshots manager) idx
-       in Just state
+      case Seq.lookup idx (bmSnapshots manager) of
+        Nothing -> Nothing
+        Just (_, state, _) -> Just state
 
 -- | Clear all stored baselines.
 baselineReset :: BaselineManager a -> BaselineManager a

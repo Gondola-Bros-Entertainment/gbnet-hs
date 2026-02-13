@@ -649,8 +649,8 @@ testPeerMessageDelivery = do
     Right _ -> error "  FAIL: should have failed"
 
   -- Broadcast to empty peer should be no-op
-  let peer' = peerBroadcast (ChannelId 0) "test" Nothing now peer
-  assertEqual "broadcast to empty" 0 (peerCount peer')
+  let broadcasted = peerBroadcast (ChannelId 0) "test" Nothing now peer
+  assertEqual "broadcast to empty" 0 (peerCount broadcasted)
   putStrLn "  PASS: broadcast to empty peer is no-op"
 
 testPeerDisconnect :: IO ()
@@ -663,8 +663,8 @@ testPeerDisconnect = do
       peer = newPeerState sock addr config now
 
   -- Disconnect from non-connected peer is no-op
-  let peer' = peerDisconnect (peerIdFromAddr (testAddr 1111)) now peer
-  assertEqual "disconnect non-existing" 0 (peerCount peer')
+  let disconnected = peerDisconnect (peerIdFromAddr (testAddr 1111)) now peer
+  assertEqual "disconnect non-existing" 0 (peerCount disconnected)
 
   -- Connect then disconnect
   let peer1 = peerConnect (peerIdFromAddr (testAddr 2222)) now peer
@@ -1250,14 +1250,14 @@ testConnectionStateMachine = do
         Right _ -> error "  FAIL: double connect should fail"
 
   -- createHeader increments local sequence
-  let conn0' = newConnection config clientSalt now
-  let seqBefore = connLocalSeq conn0'
-  let (_header, conn1') = createHeader conn0'
-  assertEqual "local seq incremented" (seqBefore + 1) (connLocalSeq conn1')
+  let connA = newConnection config clientSalt now
+  let seqBefore = connLocalSeq connA
+  let (_header, connB) = createHeader connA
+  assertEqual "local seq incremented" (seqBefore + 1) (connLocalSeq connB)
 
   -- Second createHeader increments again
-  let (_header2, conn2') = createHeader conn1'
-  assertEqual "local seq incremented again" (seqBefore + 2) (connLocalSeq conn2')
+  let (_header2, connC) = createHeader connB
+  assertEqual "local seq incremented again" (seqBefore + 2) (connLocalSeq connC)
 
 testConnectionSendReceive :: IO ()
 testConnectionSendReceive = do
@@ -1376,14 +1376,14 @@ testSimulatorBasic = do
 
   -- With 0% loss and 0 latency, packet should be delivered immediately
   let testData = "hello" :: BS.ByteString
-      testAddr' = 42 :: Word64
-      (immediate, sim1) = simulatorProcessSend testData testAddr' now sim0
+      testAddrKey = 42 :: Word64
+      (immediate, sim1) = simulatorProcessSend testData testAddrKey now sim0
 
   assertEqual "immediate delivery count" 1 (length immediate)
   case immediate of
     [(dat, addr)] -> do
       assertEqual "delivered data" testData dat
-      assertEqual "delivered addr" testAddr' addr
+      assertEqual "delivered addr" testAddrKey addr
     _ -> error "  FAIL: unexpected immediate result"
 
   -- Nothing should be queued since latency is 0
@@ -1392,7 +1392,7 @@ testSimulatorBasic = do
   -- Test with latency: packets should be delayed
   let configWithLatency = defaultSimulationConfig {simLatencyMs = 100}
       sim2 = newNetworkSimulator configWithLatency now
-      (immediate2, sim3) = simulatorProcessSend testData testAddr' now sim2
+      (immediate2, sim3) = simulatorProcessSend testData testAddrKey now sim2
 
   assertEqual "no immediate with latency" 0 (length immediate2)
   assertEqual "1 pending with latency" 1 (simulatorPendingCount sim3)
@@ -1412,7 +1412,7 @@ testSimulatorBasic = do
   case lateResults of
     [(dat, addr)] -> do
       assertEqual "received data" testData dat
-      assertEqual "received addr" testAddr' addr
+      assertEqual "received addr" testAddrKey addr
     _ -> error "  FAIL: unexpected late result"
 
 -- | Test that reliable messages survive loss + latency via Simulator.
@@ -1482,27 +1482,27 @@ testSimulatorPeerDelivery = do
 
                       -- Process client → get outgoing (includes queued message)
                       clientResult = peerProcess tickTime [] client
-                      client' = prPeer clientResult
+                      nextClient = prPeer clientResult
                       clientOut = prOutgoing clientResult
 
                       -- Feed client outgoing through C2S Simulator
-                      (sC2S', serverPkts) = conditionPackets clientOut clientAddrKey clientAddr tickTime sC2S
+                      (nextC2S, serverPkts) = conditionPackets clientOut clientAddrKey clientAddr tickTime sC2S
 
                       -- Process server with conditioned client packets
                       serverResult = peerProcess tickTime serverPkts server
-                      server' = prPeer serverResult
+                      nextServer = prPeer serverResult
                       serverOut = prOutgoing serverResult
                       events = prEvents serverResult
 
                       -- Feed server outgoing through S2C Simulator
-                      (sS2C', clientPkts) = conditionPackets serverOut serverAddrKey serverAddr tickTime sS2C
+                      (nextS2C, clientPkts) = conditionPackets serverOut serverAddrKey serverAddr tickTime sS2C
 
                       -- Feed server responses back to client
-                      clientResult2 = peerProcess tickTime clientPkts client'
-                      client'' = prPeer clientResult2
+                      clientResult2 = peerProcess tickTime clientPkts nextClient
+                      finalClient = prPeer clientResult2
 
                       gotMessage = any isMessage events
-                   in (gotMessage, server', client'', sC2S', sS2C')
+                   in (gotMessage, nextServer, finalClient, nextC2S, nextS2C)
           )
           (False, sp2, cp5, simC2S0, simS2C0)
           [1 .. tickCount]

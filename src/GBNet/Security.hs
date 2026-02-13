@@ -132,12 +132,12 @@ newRateLimiter maxReqs now =
 -- Automatically prunes stale entries when the cleanup interval has elapsed.
 rateLimiterAllow :: Word64 -> MonoTime -> RateLimiter -> (Bool, RateLimiter)
 rateLimiterAllow addrKey now rl
-  | recentCount >= rlMaxRequestsPerSecond rl' = (False, rl' & #rlRequests %~ Map.insert addrKey recent)
-  | otherwise = (True, rl' & #rlRequests %~ Map.insert addrKey (now : recent))
+  | recentCount >= rlMaxRequestsPerSecond cleaned = (False, cleaned & #rlRequests %~ Map.insert addrKey recent)
+  | otherwise = (True, cleaned & #rlRequests %~ Map.insert addrKey (now : recent))
   where
-    rl' = maybeCleanup now rl
-    window = rlWindowMs rl'
-    timestamps = Map.findWithDefault [] addrKey (rlRequests rl')
+    cleaned = maybeCleanup now rl
+    window = rlWindowMs cleaned
+    timestamps = Map.findWithDefault [] addrKey (rlRequests cleaned)
     -- Filter and count in single pass
     (recentCount, recent) = foldr countRecent (0, []) timestamps
     countRecent t (n, acc)
@@ -214,10 +214,8 @@ validateToken token now tv
   | isTokenExpired now token = (Left TokenExpired, tv)
   | Map.member (ctClientId token) (tvUsedTokens tv) = (Left TokenReplayed, tv)
   | otherwise =
-      let tv' =
-            tv & #tvUsedTokens %~ Map.insert (ctClientId token) now
-          tv'' = enforceLimit now tv'
-       in (Right (ctClientId token), tv'')
+      let tracked = tv & #tvUsedTokens %~ Map.insert (ctClientId token) now
+       in (Right (ctClientId token), enforceLimit now tracked)
 
 -- | Enforce maximum tracked tokens limit.
 enforceLimit :: MonoTime -> TokenValidator -> TokenValidator

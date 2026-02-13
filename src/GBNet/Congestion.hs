@@ -251,8 +251,8 @@ ccUpdate packetLoss rttMs now cc =
               let maxRate = ccBaseSendRate cc * maxSendRateMultiplier
                   newRate = min maxRate (ccCurrentSendRate cc + sendRateIncrease)
                   -- Halve recovery time after sustained good conditions
-                  cc' = cc & #ccCurrentSendRate .~ newRate
-               in case ccLastGoodEntry cc' of
+                  ramped = cc & #ccCurrentSendRate .~ newRate
+               in case ccLastGoodEntry ramped of
                     Just goodEntry ->
                       let elapsed = elapsedMs goodEntry now / 1000.0
                           intervals = floor (elapsed / recoveryHalveIntervalSecs) :: Int
@@ -261,14 +261,14 @@ ccUpdate packetLoss rttMs now cc =
                               let newRecovery =
                                     max
                                       minRecoverySecs
-                                      (ccAdaptiveRecoverySecs cc' / (2.0 ^ intervals))
-                               in cc'
+                                      (ccAdaptiveRecoverySecs ramped / (2.0 ^ intervals))
+                               in ramped
                                     & #ccAdaptiveRecoverySecs
                                     .~ newRecovery
                                     & #ccLastGoodEntry
                                     ?~ now
-                            else cc'
-                    Nothing -> cc'
+                            else ramped
+                    Nothing -> ramped
         CongestionBad
           | not isBad ->
               case ccGoodConditionsStart cc of
@@ -360,21 +360,21 @@ newCongestionWindow mtu =
 -- | Called when bytes are acknowledged.
 cwOnAck :: Int -> CongestionWindow -> CongestionWindow
 cwOnAck bytes cw =
-  let cw' = cw & #cwBytesInFlight %~ (\b -> b - fromIntegral (min bytes (fromIntegral b)))
-   in case cwPhase cw' of
+  let deflated = cw & #cwBytesInFlight %~ (\b -> b - fromIntegral (min bytes (fromIntegral b)))
+   in case cwPhase deflated of
         SlowStart ->
-          let newCwnd = cwCwnd cw' + fromIntegral bytes
-           in if newCwnd >= cwSsthresh cw'
-                then cw' & #cwCwnd .~ newCwnd & #cwPhase .~ Avoidance
-                else cw' & #cwCwnd .~ newCwnd
+          let newCwnd = cwCwnd deflated + fromIntegral bytes
+           in if newCwnd >= cwSsthresh deflated
+                then deflated & #cwCwnd .~ newCwnd & #cwPhase .~ Avoidance
+                else deflated & #cwCwnd .~ newCwnd
         Avoidance
-          | cwCwnd cw' > 0 ->
+          | cwCwnd deflated > 0 ->
               -- Additive increase: cwnd += mtu * bytes / cwnd
-              let increase = fromIntegral (cwMtu cw') * fromIntegral bytes / cwCwnd cw'
-               in cw' & #cwCwnd %~ (+ increase)
-          | otherwise -> cw'
+              let increase = fromIntegral (cwMtu deflated) * fromIntegral bytes / cwCwnd deflated
+               in deflated & #cwCwnd %~ (+ increase)
+          | otherwise -> deflated
         Recovery ->
-          cw' -- Conservative in recovery
+          deflated -- Conservative in recovery
 
 -- | Called on packet loss detection.
 cwOnLoss :: CongestionWindow -> CongestionWindow
@@ -470,8 +470,8 @@ newBandwidthTracker windowDurationMs =
 -- | Record bytes at the given time.
 btRecord :: Int -> MonoTime -> BandwidthTracker -> BandwidthTracker
 btRecord bytes now bt =
-  let bt' = bt & #btWindow %~ (Seq.|> (now, bytes)) & #btTotalBytes %~ (+ bytes)
-   in btCleanup now bt'
+  let recorded = bt & #btWindow %~ (Seq.|> (now, bytes)) & #btTotalBytes %~ (+ bytes)
+   in btCleanup now recorded
 
 -- | Get bytes per second.
 btBytesPerSecond :: BandwidthTracker -> Double

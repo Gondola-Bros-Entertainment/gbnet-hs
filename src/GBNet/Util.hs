@@ -1,4 +1,9 @@
--- | Shared utilities: sequence number wraparound and deterministic RNG.
+-- |
+-- Module      : GBNet.Util
+-- Description : Sequence number wraparound and deterministic RNG
+--
+-- Shared utilities used across the library: circular sequence number
+-- comparison, signed difference, and a pure SplitMix-based RNG.
 module GBNet.Util
   ( sequenceHalfRange,
     sequenceGreaterThan,

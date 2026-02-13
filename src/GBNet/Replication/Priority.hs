@@ -22,7 +22,7 @@
 --       & register npcId 2.0        -- low priority (2 units/sec)
 --
 -- -- Each tick, accumulate priority based on elapsed time
--- let acc' = accumulate 0.016 acc   -- 16ms tick
+-- let accumulated = accumulate 0.016 acc   -- 16ms tick
 --
 -- -- Drain entities that fit in budget
 -- let (selected, acc'') = drainTop 1200 entitySize acc'
@@ -139,12 +139,12 @@ drainTop budgetBytes sizeFunc (PriorityAccumulator entries) =
       (selected, _remaining) = selectWithinBudget budgetBytes sizeFunc sorted []
 
       -- Reset priority for selected entities
-      entries' =
+      resetEntries =
         foldr
           (Map.adjust (#peAccumulated .~ 0.0))
           entries
           selected
-   in (selected, PriorityAccumulator entries')
+   in (selected, PriorityAccumulator resetEntries)
 
 -- | Helper to select entities within budget.
 selectWithinBudget ::

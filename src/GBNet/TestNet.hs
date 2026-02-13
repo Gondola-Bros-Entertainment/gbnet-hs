@@ -263,9 +263,8 @@ runPeerInWorld addr action world =
           (initialTestNetState addr) {tnsCurrentTime = twGlobalTime world}
           addr
           (twPeers world)
-      (result, peerState') = runTestNet action peerState
-      world' = world & #twPeers %~ Map.insert addr peerState'
-   in (result, world')
+      (result, updated) = runTestNet action peerState
+   in (result, world & #twPeers %~ Map.insert addr updated)
 
 -- | Deliver all ready packets between peers.
 -- Packets are moved from sender's outFlight to receiver's inbox
@@ -301,9 +300,9 @@ deliverPackets world =
 -- | Advance time for all peers in the world.
 worldAdvanceTime :: MonoTime -> TestWorld -> TestWorld
 worldAdvanceTime newTime world =
-  let world' = world & #twGlobalTime .~ newTime
+  let timed = world & #twGlobalTime .~ newTime
       updatedPeers =
         Map.map
           (\ps -> ps & #tnsCurrentTime .~ newTime)
-          (twPeers world')
-   in deliverPackets (world' & #twPeers .~ updatedPeers)
+          (twPeers timed)
+   in deliverPackets (timed & #twPeers .~ updatedPeers)

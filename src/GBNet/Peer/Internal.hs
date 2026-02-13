@@ -255,7 +255,8 @@ queueControlPacket ptype payload pid peer =
       raw = appendCrc32 (serializePacket pkt)
    in queueRawPacket (RawPacket pid raw) peer
 
--- | Clean up per-peer state (fragment assemblers, migration cooldowns).
+-- | Clean up per-peer state (fragment assemblers).
+-- Migration cooldowns are swept separately in 'updateConnections'.
 cleanupPeer :: PeerId -> NetPeer -> NetPeer
 cleanupPeer peerId peer =
   peer & #npFragmentAssemblers %~ Map.delete peerId

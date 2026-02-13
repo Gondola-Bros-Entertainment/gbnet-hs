@@ -19,10 +19,10 @@
 --
 -- @
 -- -- On receiving server snapshot
--- let buffer' = pushSnapshot serverTimestamp playerState buffer
+-- let updated = pushSnapshot serverTimestamp playerState buffer
 --
 -- -- On render tick
--- case sampleSnapshot renderTime buffer' of
+-- case sampleSnapshot renderTime updated of
 --   Nothing -> renderLastKnown
 --   Just interpolated -> render interpolated
 -- @
@@ -137,17 +137,17 @@ pushSnapshot timestamp state buffer =
         EmptyR ->
           -- First snapshot
           buffer & #sbSnapshots .~ Seq.singleton (TimestampedSnapshot timestamp state)
-        _ :> last' ->
-          if timestamp <= tsTimestamp last'
+        _ :> newest ->
+          if timestamp <= tsTimestamp newest
             then buffer -- Drop out-of-order
             else
-              let snapshots' = snapshots |> TimestampedSnapshot timestamp state
+              let appended = snapshots |> TimestampedSnapshot timestamp state
                   -- Keep buffer bounded
                   maxEntries = sbBufferDepth buffer * 2
                   trimmed =
-                    if Seq.length snapshots' > maxEntries
-                      then Seq.drop (Seq.length snapshots' - maxEntries) snapshots'
-                      else snapshots'
+                    if Seq.length appended > maxEntries
+                      then Seq.drop (Seq.length appended - maxEntries) appended
+                      else appended
                in buffer & #sbSnapshots .~ trimmed
 
 -- | Sample an interpolated state at @renderTime@ (in milliseconds).

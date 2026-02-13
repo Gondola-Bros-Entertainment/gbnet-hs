@@ -5,6 +5,13 @@
 ### Bug Fixes
 
 - **Bandwidth tracking now functional**: `recordBytesSent` and `recordBytesReceived` were implemented in `Connection` but never called. Wired into `peerTick`: outgoing bytes recorded after encryption in `drainAllConnectionQueues`, incoming bytes recorded per-packet in `handlePacket`. `BandwidthTracker` and `NetworkStats` byte counters now report real values.
+- **Fix O(n^2) list appending** in `encryptOutgoing` and `processPacketsPure`: replaced `acc ++ [x]` with reverse-accumulator pattern.
+- **Fix migration cooldowns leak**: `npMigrationCooldowns` map now swept of stale entries in `updateConnections`, preventing unbounded growth on long-running servers.
+- **Total function compliance**: replaced partial `Seq.index` with `Seq.lookup` in delta encoding/baseline management.
+
+### Internal
+
+- Codebase-wide elimination of prime-mark variable naming (`x'`, `x''`) in favour of descriptive names and optics composition across all 31 source files, tests, and benchmarks.
 
 ## 0.2.1.0
 
