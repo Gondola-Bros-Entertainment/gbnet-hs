@@ -298,7 +298,7 @@ testStorableRoundTrip = do
   assertEqual "Vec3 size" 12 (BS.length bytes)
   case deserialize bytes :: Either String Vec3 of
     Left err -> error $ "  FAIL: deserialize Vec3: " ++ err
-    Right v' -> assertEqual "Vec3 roundtrip" v v'
+    Right decoded -> assertEqual "Vec3 roundtrip" v decoded
 
 testPacketHeaderRoundTrip :: IO ()
 testPacketHeaderRoundTrip = do
@@ -316,11 +316,11 @@ testPacketHeaderRoundTrip = do
       assertEqual ("size for " ++ show (packetType hdr)) packetHeaderByteSize (BS.length bytes)
       case deserializeHeader bytes of
         Left err -> error $ "deserialize failed: " ++ err
-        Right hdr' -> do
-          assertEqual "roundtrip packetType" (packetType hdr) (packetType hdr')
-          assertEqual "roundtrip sequenceNum" (sequenceNum hdr) (sequenceNum hdr')
-          assertEqual "roundtrip ack" (ack hdr) (ack hdr')
-          assertEqual "roundtrip ackBitfield" (ackBitfield hdr) (ackBitfield hdr')
+        Right decoded -> do
+          assertEqual "roundtrip packetType" (packetType hdr) (packetType decoded)
+          assertEqual "roundtrip sequenceNum" (sequenceNum hdr) (sequenceNum decoded)
+          assertEqual "roundtrip ack" (ack hdr) (ack decoded)
+          assertEqual "roundtrip ackBitfield" (ackBitfield hdr) (ackBitfield decoded)
 
 --------------------------------------------------------------------------------
 -- Reliability module tests
@@ -1010,7 +1010,7 @@ testSnapshotOutOfOrder = do
 propStorableRoundTrip :: Vec3 -> Bool
 propStorableRoundTrip v =
   case deserialize (serialize v) of
-    Right v' -> v == v'
+    Right decoded -> v == decoded
     Left _ -> False
 
 -- | PacketHeader serialize/deserialize roundtrip
@@ -1018,21 +1018,21 @@ propPacketHeaderRoundTrip :: PacketHeader -> Bool
 propPacketHeaderRoundTrip hdr =
   case deserializeHeader (serializeHeader hdr) of
     Left _ -> False
-    Right hdr' ->
-      packetType hdr == packetType hdr'
-        && sequenceNum hdr == sequenceNum hdr'
-        && ack hdr == ack hdr'
-        && ackBitfield hdr == ackBitfield hdr'
+    Right decoded ->
+      packetType hdr == packetType decoded
+        && sequenceNum hdr == sequenceNum decoded
+        && ack hdr == ack decoded
+        && ackBitfield hdr == ackBitfield decoded
 
 -- | FragmentHeader serialize/deserialize roundtrip
 propFragmentHeaderRoundTrip :: FragmentHeader -> Bool
 propFragmentHeaderRoundTrip hdr =
   case deserializeFragmentHeader (serializeFragmentHeader hdr) of
     Nothing -> False
-    Just hdr' ->
-      fhMessageId hdr == fhMessageId hdr'
-        && fhFragmentIndex hdr == fhFragmentIndex hdr'
-        && fhFragmentCount hdr == fhFragmentCount hdr'
+    Just decoded ->
+      fhMessageId hdr == fhMessageId decoded
+        && fhFragmentIndex hdr == fhFragmentIndex decoded
+        && fhFragmentCount hdr == fhFragmentCount decoded
 
 -- | sequenceGreaterThan is antisymmetric: if a > b then not (b > a)
 propSeqGtAntisymmetric :: SequenceNum -> SequenceNum -> Bool
@@ -1527,14 +1527,15 @@ testSimulatorPeerDelivery = do
     conditionPackets ::
       [RawPacket] -> Word64 -> SockAddr -> MonoTime -> NetworkSimulator -> (NetworkSimulator, [IncomingPacket])
     conditionPackets pkts addrKey fromAddr now sim0 =
-      let (sim1, incoming) =
+      let (sim1, revIncoming) =
             foldl'
               ( \(!s, !acc) pkt ->
-                  let (immediate, s') = simulatorProcessSend (rpData pkt) addrKey now s
-                   in (s', acc ++ stripAndWrap immediate)
+                  let (immediate, advanced) = simulatorProcessSend (rpData pkt) addrKey now s
+                   in (advanced, reverse (stripAndWrap immediate) ++ acc)
               )
               (sim0, [])
               pkts
+          incoming = reverse revIncoming
           -- Also deliver any previously delayed packets now ready
           (delayed, sim2) = simulatorReceiveReady now sim1
           allIncoming = incoming ++ stripAndWrap delayed
@@ -1701,8 +1702,8 @@ testFragmentSplitReassemble = do
       let (result, _assembler) = foldl feedFrag (Nothing, assembler0) frags
             where
               feedFrag (prevResult, asm) frag =
-                let (r, asm') = processFragment frag now asm
-                 in (case r of Nothing -> prevResult; Just _ -> r, asm')
+                let (r, updated) = processFragment frag now asm
+                 in (case r of Nothing -> prevResult; Just _ -> r, updated)
       case result of
         Nothing -> error "  FAIL: reassembly did not produce a result"
         Just reassembled ->

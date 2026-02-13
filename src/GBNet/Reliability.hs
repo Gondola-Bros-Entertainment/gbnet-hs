@@ -419,13 +419,13 @@ spbMember seqNum buf =
 spbInsert :: SequenceNum -> SentPacketRecord -> SentPacketBuffer -> SentPacketBuffer
 spbInsert seqNum record buf =
   let idx = seqToIdx seqNum
-      (entries', countDelta) = zeroCopyMutate' (spbEntries buf) $ \mvec -> do
+      (mutated, countDelta) = zeroCopyMutate' (spbEntries buf) $ \mvec -> do
         old <- MV.unsafeRead mvec idx
         MV.unsafeWrite mvec idx (RingEntry seqNum record)
         return $! case old of
           RingEmpty -> 1 :: Int
           _ -> 0
-   in buf & #spbEntries .~ entries' & #spbCount %~ (+ countDelta)
+   in buf & #spbEntries .~ mutated & #spbCount %~ (+ countDelta)
 {-# INLINE spbInsert #-}
 
 -- | O(1) delete by sequence number.
@@ -681,9 +681,9 @@ processAcks ackSeq ackBitsVal now ep =
 applyMutations :: [BufferMutation] -> SentPacketBuffer -> SentPacketBuffer
 applyMutations [] buf = buf
 applyMutations muts buf =
-  let (entries', deletions) = zeroCopyMutate' (spbEntries buf) $ \mvec ->
+  let (mutated, deletions) = zeroCopyMutate' (spbEntries buf) $ \mvec ->
         applyAll mvec muts 0
-   in buf & #spbEntries .~ entries' & #spbCount %~ subtract deletions
+   in buf & #spbEntries .~ mutated & #spbCount %~ subtract deletions
   where
     applyAll _ [] !dels = return dels
     applyAll mvec (MutDelete idx : rest) !dels = do

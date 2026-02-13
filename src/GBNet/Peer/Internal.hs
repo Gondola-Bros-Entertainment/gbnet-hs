@@ -220,8 +220,8 @@ generateCookieSecret seed = go seed cookieSecretSize []
   where
     go s 0 acc = (BS.pack (reverse acc), s)
     go s n acc =
-      let (r, s') = nextRandom s
-       in go s' (n - 1) (fromIntegral @Word64 @Word8 r : acc)
+      let (r, advanced) = nextRandom s
+       in go advanced (n - 1) (fromIntegral @Word64 @Word8 r : acc)
 
 -- -----------------------------------------------------------------------------
 -- Helper functions for pure API

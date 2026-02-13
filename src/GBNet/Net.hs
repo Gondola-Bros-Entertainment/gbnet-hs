@@ -156,8 +156,8 @@ instance MonadNetwork (NetT IO) where
     result <- liftIO $ socketSendTo bytes toAddr now (nsSocket st)
     case result of
       Left err -> pure $ Left (NetSendFailed (show err))
-      Right (_, sock') -> do
-        modifyNetState $ #nsSocket .~ sock'
+      Right (_, updatedSock) -> do
+        modifyNetState $ #nsSocket .~ updatedSock
         pure $ Right ()
 
   netRecv = do

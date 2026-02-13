@@ -61,8 +61,8 @@ zeroCopyMutateU' ::
 zeroCopyMutateU' vec action = runST $ do
   mv <- VU.unsafeThaw vec
   result <- action mv
-  v' <- VU.unsafeFreeze mv
-  return (v', result)
+  frozen <- VU.unsafeFreeze mv
+  return (frozen, result)
 {-# INLINE zeroCopyMutateU' #-}
 
 -- | Zero-copy mutation of a boxed vector.
@@ -89,6 +89,6 @@ zeroCopyMutate' ::
 zeroCopyMutate' vec action = runST $ do
   mv <- V.unsafeThaw vec
   result <- action mv
-  v' <- V.unsafeFreeze mv
-  return (v', result)
+  frozen <- V.unsafeFreeze mv
+  return (frozen, result)
 {-# INLINE zeroCopyMutate' #-}

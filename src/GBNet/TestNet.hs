@@ -155,17 +155,17 @@ instance MonadNetwork TestNet where
       then pure (Left NetSocketClosed)
       else do
         let cfg = tnsConfig st
-            (r1, rng') = nextRandom (tnsRng st)
+            (r1, rng1) = nextRandom (tnsRng st)
         if randomDouble r1 < tncLossRate cfg
           then do
-            #tnsRng .= rng'
+            #tnsRng .= rng1
             pure (Right ())
           else do
-            let (r2, rng'') = nextRandom rng'
+            let (r2, rng2) = nextRandom rng1
                 jitterRange = tncJitterNs cfg
                 jitter = if jitterRange == 0 then 0 else r2 `mod` (jitterRange + 1)
                 -- Out-of-order: add extra random delay
-                (r3, rng3) = nextRandom rng''
+                (r3, rng3) = nextRandom rng2
                 oooDelay =
                   if randomDouble r3 < tncOutOfOrderChance cfg
                     then MonoTime (r3 `mod` (testNetOutOfOrderMaxDelayNs + 1))
