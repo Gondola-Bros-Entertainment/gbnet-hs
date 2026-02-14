@@ -548,9 +548,12 @@ updateConnectedPure now conn0 =
         | timeSinceSend > keepaliveMs = sendKeepalive conn2
         | otherwise = conn2
       -- Process channel outgoing messages
-      conn4 = processChannelOutput now conn3
+      afterOutput = processChannelOutput now conn3
+      -- Retransmit unacked reliable messages past RTO
+      currentRto = Rel.rtoMs (connReliability afterOutput)
+      afterRetransmit = processRetransmissions now currentRto afterOutput
       -- Update channels
-      conn5 = conn4 & #connChannels %~ IntMap.map (Channel.channelUpdate now)
+      conn5 = afterRetransmit & #connChannels %~ IntMap.map (Channel.channelUpdate now)
       -- Send AckOnly if needed
       conn6
         | connPendingAck conn5 && not (connDataSentThisTick conn5) = sendAckOnly conn5
@@ -655,6 +658,50 @@ processChannelMessages now conn chIdx
             .~ congestion
             & #connCwnd
             .~ cwnd
+            & #connReliability
+            .~ reliability
+            & #connDataSentThisTick
+            .~ True
+
+-- | Retransmit unacked reliable messages that have exceeded the RTO.
+-- Iterates all channels, calls 'getRetransmitMessages' to find expired
+-- messages, and re-queues them as new Payload packets.
+processRetransmissions :: MonoTime -> Double -> Connection -> Connection
+processRetransmissions now rto conn =
+  IntMap.foldlWithKey' retransmitChannel conn (connChannels conn)
+  where
+    retransmitChannel c chIdx channel =
+      let (retransmits, updatedChannel) = Channel.getRetransmitMessages now rto channel
+          channelUpdated = c & #connChannels %~ IntMap.insert chIdx updatedChannel
+       in foldl' (emitRetransmit chIdx) channelUpdated retransmits
+
+    emitRetransmit chIdx c msg =
+      let msgSeqRaw = unSequenceNum (cmSequence msg)
+          headerByte = fromIntegral chIdx .&. 0x07
+          seqHi = fromIntegral (msgSeqRaw `shiftR` 8) :: Word8
+          seqLo = fromIntegral (msgSeqRaw .&. 0xFF) :: Word8
+          wireData = BS.cons headerByte $ BS.cons seqHi $ BS.cons seqLo (cmData msg)
+          wireSize = BS.length wireData
+          header = createHeaderInternal c
+          pkt =
+            OutgoingPacket
+              { opHeader = header {packetType = Payload},
+                opType = Payload,
+                opPayload = wireData
+              }
+          reliability =
+            Rel.onPacketSent
+              (connLocalSeq c)
+              now
+              (ChannelId (fromIntegral chIdx))
+              (cmSequence msg)
+              wireSize
+              (connReliability c)
+       in c
+            & #connSendQueue
+            %~ (Seq.|> pkt)
+            & #connLocalSeq
+            %~ (+ 1)
             & #connReliability
             .~ reliability
             & #connDataSentThisTick

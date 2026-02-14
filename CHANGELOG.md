@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4.0
+
+### Bug Fixes
+
+- **Wire reliable channel retransmission**: `Channel.getRetransmitMessages` was implemented and exported but never called from the connection tick loop. Reliable messages that were lost on the wire were never retransmitted, causing silent data loss on any packet drop. Now called from `updateConnectedPure` after processing outgoing messages — expired unacked messages are re-queued as new Payload packets with fresh sequence numbers.
+
 ## 0.2.3.0
 
 ### Bug Fixes
