@@ -237,9 +237,15 @@ drainAllConnectionQueues now peer =
       let (connPackets, drained) = Conn.drainSendQueue conn
           (rawPackets, encrypted) = encryptOutgoing peerId protocolId drained connPackets
           !bytesSent = sum (map (BS.length . rpData) rawPackets)
+          -- Only record send stats when bytes were actually sent.
+          -- Recording zero bytes resets connLastSendTime every tick,
+          -- which prevents the keepalive timer from ever triggering.
+          !updatedConn
+            | bytesSent > 0 = Conn.recordBytesSent bytesSent now encrypted
+            | otherwise = encrypted
        in foldl'
             (flip queueRawPacket)
-            (acc & #npConnections %~ Map.insert peerId (Conn.recordBytesSent bytesSent now encrypted))
+            (acc & #npConnections %~ Map.insert peerId updatedConn)
             rawPackets
 
 -- | Encrypt outgoing packets and update connection nonce state.

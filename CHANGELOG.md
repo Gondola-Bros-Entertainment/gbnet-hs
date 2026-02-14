@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3.0
+
+### Bug Fixes
+
+- **Fix keepalive regression**: `drainAllConnectionQueues` unconditionally called `recordBytesSent` even when zero bytes were sent, resetting `connLastSendTime` every tick. This prevented the keepalive timer from ever triggering, causing connections to silently die on any single packet loss (no ACK feedback, no retransmission). Now only records when actual bytes are sent.
+
 ## 0.2.2.0
 
 ### Bug Fixes

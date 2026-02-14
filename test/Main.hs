@@ -263,6 +263,9 @@ main = do
   -- Bandwidth tracking
   testBandwidthTracking
 
+  -- Keepalive regression (0.2.2.0 bug: recordBytesSent 0 prevented keepalives)
+  testKeepaliveRegression
+
   -- Migration cooldown sweep
   testMigrationCooldownSweep
 
@@ -2033,6 +2036,75 @@ testBandwidthTracking = do
     oneSecondNs = 1000000000 :: MonoTime
     tickStepMs = 10 :: MonoTime
     testPayload = "bandwidth-tracking-test"
+
+--------------------------------------------------------------------------------
+-- Keepalive regression test (0.2.2.0 bug)
+--------------------------------------------------------------------------------
+
+-- | Verify keepalives fire after the keepalive interval with no data sent.
+-- Regression: drainAllConnectionQueues called recordBytesSent unconditionally
+-- (even with 0 bytes), resetting connLastSendTime every tick and preventing
+-- the keepalive timer from ever triggering.
+testKeepaliveRegression :: IO ()
+testKeepaliveRegression = do
+  putStrLn "Keepalive fires after idle period (regression):"
+  sock <- newTestUdpSocket
+  let serverAddr = testAddr serverPort
+      clientAddr = testAddr clientPort
+      config = defaultNetworkConfig
+      startTime = oneSecondNs
+
+  let serverPeer = newPeerState sock serverAddr config serverSeed
+      clientPeer0 = newPeerState sock clientAddr config clientSeed
+      clientPeer1 = peerConnect (peerIdFromAddr serverAddr) startTime clientPeer0
+
+  let world0 = initWorld startTime serverAddr clientAddr
+
+  -- Full handshake (5 ticks)
+  let ((_, cp2), w1) = tickPeerInWorld clientAddr [] clientPeer1 world0
+  let w2 = stepWorld tickStepMs w1
+  let ((_, sp1), w3) = tickPeerInWorld serverAddr [] serverPeer w2
+  let w4 = stepWorld tickStepMs w3
+  let ((_, cp3), w5) = tickPeerInWorld clientAddr [] cp2 w4
+  let w6 = stepWorld tickStepMs w5
+  let ((_, sp2), w7) = tickPeerInWorld serverAddr [] sp1 w6
+  let w8 = stepWorld tickStepMs w7
+  let ((_, cp4), w9) = tickPeerInWorld clientAddr [] cp3 w8
+  let _w10 = stepWorld tickStepMs w9
+
+  -- Both connected. Verify connection exists.
+  let serverPid = peerIdFromAddr serverAddr
+  assertEqual "client connected" True (peerIsConnected serverPid cp4)
+
+  -- Check bytes sent immediately after handshake (should be 0 — no data sent)
+  case peerStats serverPid cp4 of
+    Nothing -> error "  FAIL: no stats after handshake"
+    Just stats -> assertEqual "no data bytes yet" 0 (nsBytesSent stats)
+
+  -- Run 110 idle ticks (1.1s at 10ms/step) to trigger keepalive (1000ms interval).
+  -- No messages sent, just ticking.
+  let tickIdle (peer, world) _ =
+        let stepped = stepWorld tickStepMs world
+            ((_, ticked), nextWorld) = tickPeerInWorld clientAddr [] peer stepped
+         in (ticked, nextWorld)
+      (cpAfterIdle, _) = foldl' tickIdle (cp4, _w10) [(1 :: Int) .. idleTicks]
+
+  -- After 1.1 seconds idle, keepalive should have fired → nsBytesSent > 0
+  case peerStats serverPid cpAfterIdle of
+    Nothing -> error "  FAIL: connection lost during idle"
+    Just stats -> do
+      assertEqual "keepalive sent bytes > 0" True (nsBytesSent stats > 0)
+      assertEqual "keepalive sent packets > 0" True (nsPacketsSent stats > 0)
+
+  putStrLn "  PASS: Keepalive fires after idle period"
+  where
+    serverPort = 7025
+    clientPort = 8025
+    serverSeed = 100000000
+    clientSeed = 200000000
+    oneSecondNs = 1000000000 :: MonoTime
+    tickStepMs = 10 :: MonoTime
+    idleTicks = 110 :: Int -- 110 * 10ms = 1.1 seconds > 1s keepalive interval
 
 --------------------------------------------------------------------------------
 -- Migration cooldown sweep
