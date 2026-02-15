@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               gbnet-hs
-version:            0.2.4.0
+version:            0.2.5.0
 synopsis:           Transport-level networking library with zero-copy Storable serialization
 description:
   A transport-level networking library providing reliable UDP with

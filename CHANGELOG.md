@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.5.0
+
+### Bug Fixes
+
+- **Retransmissions now respect congestion control**: Retransmitted reliable messages previously bypassed all flow control (`ccCanSend`/`ccDeductBudget` and CWND), allowing unbounded retransmit traffic during congestion. Now gated by the same congestion budget as new sends.
+
+### Internal
+
+- Extract `encodeChannelWire` and `enqueuePayload` shared helpers, eliminating duplicated wire encoding between `processChannelMessages` and `processRetransmissions`.
+
 ## 0.2.4.0
 
 ### Bug Fixes

@@ -586,6 +586,50 @@ updateConnectedPure now conn0 =
         & #connPendingAck
         .~ False
 
+-- | Encode a channel message into its wire representation.
+-- Wire format: channel (3 bits) | reserved (5 bits), seqHi, seqLo, payload.
+encodeChannelWire :: Int -> ChannelMessage -> (BS.ByteString, Int)
+encodeChannelWire chIdx msg =
+  let msgSeqRaw = unSequenceNum (cmSequence msg)
+      headerByte = fromIntegral chIdx .&. 0x07
+      seqHi = fromIntegral (msgSeqRaw `shiftR` 8) :: Word8
+      seqLo = fromIntegral (msgSeqRaw .&. 0xFF) :: Word8
+      wireData = BS.cons headerByte $ BS.cons seqHi $ BS.cons seqLo (cmData msg)
+   in (wireData, BS.length wireData)
+{-# INLINE encodeChannelWire #-}
+
+-- | Enqueue a Payload packet, optionally registering with the reliability
+-- tracker.  Reliable packets are tracked for ACK/retransmit; unreliable
+-- packets are fire-and-forget.
+enqueuePayload :: Bool -> MonoTime -> Int -> ChannelMessage -> BS.ByteString -> Int -> Connection -> Connection
+enqueuePayload trackReliable now chIdx msg wireData wireSize c =
+  let header = createHeaderInternal c
+      pkt =
+        OutgoingPacket
+          { opHeader = header {packetType = Payload},
+            opType = Payload,
+            opPayload = wireData
+          }
+      reliability
+        | trackReliable =
+            Rel.onPacketSent
+              (connLocalSeq c)
+              now
+              (ChannelId (fromIntegral chIdx))
+              (cmSequence msg)
+              wireSize
+              (connReliability c)
+        | otherwise = connReliability c
+   in c
+        & #connSendQueue
+        %~ (Seq.|> pkt)
+        & #connLocalSeq
+        %~ (+ 1)
+        & #connReliability
+        .~ reliability
+        & #connDataSentThisTick
+        .~ True
+
 -- | Process outgoing messages from channels.
 processChannelOutput :: MonoTime -> Connection -> Connection
 processChannelOutput now conn =
@@ -619,93 +663,43 @@ processChannelMessages now conn chIdx
     tryDequeue = do
       channel <- IntMap.lookup chIdx (connChannels conn)
       (msg, dequeued) <- Channel.getOutgoingMessage channel
-      let msgSeqRaw = unSequenceNum (cmSequence msg)
-          -- Payload header: channel (3 bits) | is_fragment (1 bit), then 16-bit channel seq
-          headerByte = fromIntegral chIdx .&. 0x07
-          seqHi = fromIntegral (msgSeqRaw `shiftR` 8) :: Word8
-          seqLo = fromIntegral (msgSeqRaw .&. 0xFF) :: Word8
-          wireData = BS.cons headerByte $ BS.cons seqHi $ BS.cons seqLo (cmData msg)
-      pure (msg, dequeued, wireData, BS.length wireData, Channel.channelIsReliable channel)
+      let (wireData, wireSize) = encodeChannelWire chIdx msg
+      pure (msg, dequeued, wireData, wireSize, Channel.channelIsReliable channel)
 
     emitPacket c msg dequeued wireData wireSize isReliable =
-      let header = createHeaderInternal c
-          pkt =
-            OutgoingPacket
-              { opHeader = header {packetType = Payload},
-                opType = Payload,
-                opPayload = wireData
-              }
-          congestion = ccDeductBudget wireSize (connCongestion c)
+      let congestion = ccDeductBudget wireSize (connCongestion c)
           cwnd = fmap (cwOnSend wireSize now) (connCwnd c)
-          reliability
-            | isReliable =
-                Rel.onPacketSent
-                  (connLocalSeq c)
-                  now
-                  (ChannelId (fromIntegral chIdx))
-                  (cmSequence msg)
-                  wireSize
-                  (connReliability c)
-            | otherwise = connReliability c
-       in c
+       in enqueuePayload isReliable now chIdx msg wireData wireSize c
             & #connChannels
             %~ IntMap.insert chIdx dequeued
-            & #connSendQueue
-            %~ (Seq.|> pkt)
-            & #connLocalSeq
-            %~ (+ 1)
             & #connCongestion
             .~ congestion
             & #connCwnd
             .~ cwnd
-            & #connReliability
-            .~ reliability
-            & #connDataSentThisTick
-            .~ True
 
 -- | Retransmit unacked reliable messages that have exceeded the RTO.
 -- Iterates all channels, calls 'getRetransmitMessages' to find expired
--- messages, and re-queues them as new Payload packets.
+-- messages, and re-queues them as new Payload packets with congestion
+-- budget deducted to avoid flooding during congestion.
 processRetransmissions :: MonoTime -> Double -> Connection -> Connection
 processRetransmissions now rto conn =
   IntMap.foldlWithKey' retransmitChannel conn (connChannels conn)
   where
+    mtu = ncMtu (connConfig conn)
+
     retransmitChannel c chIdx channel =
       let (retransmits, updatedChannel) = Channel.getRetransmitMessages now rto channel
           channelUpdated = c & #connChannels %~ IntMap.insert chIdx updatedChannel
        in foldl' (emitRetransmit chIdx) channelUpdated retransmits
 
-    emitRetransmit chIdx c msg =
-      let msgSeqRaw = unSequenceNum (cmSequence msg)
-          headerByte = fromIntegral chIdx .&. 0x07
-          seqHi = fromIntegral (msgSeqRaw `shiftR` 8) :: Word8
-          seqLo = fromIntegral (msgSeqRaw .&. 0xFF) :: Word8
-          wireData = BS.cons headerByte $ BS.cons seqHi $ BS.cons seqLo (cmData msg)
-          wireSize = BS.length wireData
-          header = createHeaderInternal c
-          pkt =
-            OutgoingPacket
-              { opHeader = header {packetType = Payload},
-                opType = Payload,
-                opPayload = wireData
-              }
-          reliability =
-            Rel.onPacketSent
-              (connLocalSeq c)
-              now
-              (ChannelId (fromIntegral chIdx))
-              (cmSequence msg)
-              wireSize
-              (connReliability c)
-       in c
-            & #connSendQueue
-            %~ (Seq.|> pkt)
-            & #connLocalSeq
-            %~ (+ 1)
-            & #connReliability
-            .~ reliability
-            & #connDataSentThisTick
-            .~ True
+    emitRetransmit chIdx c msg
+      | not (ccCanSend 0 mtu (connCongestion c)) = c
+      | otherwise =
+          let (wireData, wireSize) = encodeChannelWire chIdx msg
+              congestion = ccDeductBudget wireSize (connCongestion c)
+           in enqueuePayload True now chIdx msg wireData wireSize c
+                & #connCongestion
+                .~ congestion
 
 -- | Enqueue an empty keepalive/ack-only packet.
 -- Both keepalive and ack-only use the same wire format (Keepalive with empty payload).
