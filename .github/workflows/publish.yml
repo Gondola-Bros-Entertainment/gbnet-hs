@@ -15,14 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify tag matches cabal version
+      - name: Set version from tag
         run: |
-          CABAL_VERSION=$(sed -n 's/^version:[[:space:]]*//p' gbnet-hs.cabal | tr -d '[:space:]')
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          if [ "$CABAL_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::Tag v$TAG_VERSION does not match cabal version $CABAL_VERSION"
-            exit 1
-          fi
+          sed -i "s/^version:.*/version:            $TAG_VERSION/" gbnet-hs.cabal
+          echo "Set version to $TAG_VERSION"
       - uses: haskell-actions/setup@v2
         with:
           ghc-version: '9.6.7'
