@@ -527,10 +527,11 @@ handleMigration newPeerId pkt now peer =
             | elapsedMs lastMigration now < migrationCooldownMs ->
                 ([], peer) -- Still in cooldown
           _ ->
-            let migrated =
+            let migratedConn = Conn.resetTransportMetrics now conn
+                migrated =
                   peer
                     & #npConnections
-                    %~ (Map.insert newPeerId conn . Map.delete oldPeerId)
+                    %~ (Map.insert newPeerId migratedConn . Map.delete oldPeerId)
                     & #npMigrationCooldowns
                     %~ Map.insert migrationToken now
                     & #npFragmentAssemblers

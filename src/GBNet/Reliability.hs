@@ -58,6 +58,7 @@ module GBNet.Reliability
     ReliableEndpoint (..),
     AckResult (..),
     newReliableEndpoint,
+    resetReliabilityMetrics,
     withMaxInFlight,
     nextSequence,
     onPacketSent,
@@ -543,6 +544,28 @@ newReliableEndpoint =
       reBytesSent = 0,
       reBytesAcked = 0
     }
+
+-- | Reset transport metrics for a new network path (e.g. connection migration).
+-- Clears RTT estimation, loss window, and RTO so the new path starts fresh.
+-- Preserves sequence numbers, sent\/recv buffers, ack bits, cumulative counters,
+-- and config fields so packet continuity is maintained.
+resetReliabilityMetrics :: ReliableEndpoint -> ReliableEndpoint
+resetReliabilityMetrics ep =
+  ep
+    & #reSrtt
+    .~ 0.0
+    & #reRttvar
+    .~ 0.0
+    & #reRto
+    .~ initialRtoMillis
+    & #reHasRttSample
+    .~ False
+    & #reLossWindow
+    .~ emptyLossWindow
+    & #reLossWindowIndex
+    .~ 0
+    & #reLossWindowCount
+    .~ 0
 
 -- | Override the maximum in-flight packet count.
 withMaxInFlight :: Int -> ReliableEndpoint -> ReliableEndpoint

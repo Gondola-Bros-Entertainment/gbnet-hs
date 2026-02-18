@@ -66,6 +66,7 @@ module GBNet.Connection
 
     -- * Reset
     resetConnection,
+    resetTransportMetrics,
 
     -- * Channel info
     channelCount,
@@ -111,7 +112,7 @@ import GBNet.Congestion
   )
 import GBNet.Crypto (EncryptionKey, NonceCounter (..))
 import GBNet.Packet (PacketHeader (..), PacketType (..))
-import GBNet.Reliability (MonoTime, ReliableEndpoint, elapsedMs)
+import GBNet.Reliability (MonoTime, ReliableEndpoint, elapsedMs, resetReliabilityMetrics)
 import qualified GBNet.Reliability as Rel
 import GBNet.Stats
   ( CongestionLevel (..),
@@ -678,7 +679,7 @@ processChannelMessages now conn chIdx
             .~ cwnd
 
 -- | Retransmit unacked reliable messages that have exceeded the RTO.
--- Iterates all channels, calls 'getRetransmitMessages' to find expired
+-- Iterates all channels, calls 'GBNet.Channel.getRetransmitMessages' to find expired
 -- messages, and re-queues them as new Payload packets with congestion
 -- budget deducted to avoid flooding during congestion.
 processRetransmissions :: MonoTime -> Double -> Connection -> Connection
@@ -755,7 +756,7 @@ updateDisconnecting now conn =
         retries = connDisconnectRetries conn
         maxRetries = ncDisconnectRetries (connConfig conn)
 
--- | Reset connection state.
+-- | Reset connection state (full reset for disconnect→recycle).
 resetConnection :: Connection -> Connection
 resetConnection conn =
   let config = connConfig conn
@@ -778,6 +779,8 @@ resetConnection conn =
         .~ False
         & #connChannels
         .~ IntMap.map Channel.resetChannel (connChannels conn)
+        & #connReliability
+        .~ Rel.newReliableEndpoint
         & #connCongestion
         .~ newCongestionController
           (ncSendRate config)
@@ -788,6 +791,38 @@ resetConnection conn =
         .~ newBandwidthTracker bandwidthWindowMs
         & #connBandwidthDown
         .~ newBandwidthTracker bandwidthWindowMs
+
+-- | Reset transport metrics for a new network path (e.g. connection migration).
+-- Clears RTT, congestion, bandwidth, and stats while preserving channels,
+-- encryption, salts, nonces, state, and sequence numbers.
+resetTransportMetrics :: MonoTime -> Connection -> Connection
+resetTransportMetrics now conn =
+  let config = connConfig conn
+      cwnd =
+        if ncUseCwndCongestion config
+          then Just (newCongestionWindow (ncMtu config))
+          else Nothing
+   in conn
+        & #connReliability
+        %~ resetReliabilityMetrics
+        & #connCongestion
+        .~ newCongestionController
+          (ncSendRate config)
+          (ncCongestionBadLossThreshold config)
+          (ncCongestionGoodRttThreshold config)
+          (ncCongestionRecoveryTimeMs config)
+        & #connCwnd
+        .~ cwnd
+        & #connBandwidthUp
+        .~ newBandwidthTracker bandwidthWindowMs
+        & #connBandwidthDown
+        .~ newBandwidthTracker bandwidthWindowMs
+        & #connStats
+        .~ defaultNetworkStats
+        & #connLastSendTime
+        .~ now
+        & #connLastRecvTime
+        .~ now
 
 -- | Drain send queue.
 drainSendQueue :: Connection -> ([OutgoingPacket], Connection)

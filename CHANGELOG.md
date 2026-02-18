@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.6.0
+
+### Bug Fixes
+
+- **Reset transport metrics on connection migration**: When a peer migrates to a new address, stale RTT/congestion state from the old network path was carried over. `handleMigration` now calls `resetTransportMetrics` which clears RTT estimation, congestion controller, bandwidth trackers, and network stats while preserving sequence numbers and channel state for packet continuity.
+- **Full reliability reset on disconnect-recycle**: `resetConnection` now also resets the `ReliableEndpoint` to prevent stale reliability state from leaking across connection lifecycles.
+
+### API
+
+- `GBNet.Reliability`: new `resetReliabilityMetrics` — resets RTT/loss window while preserving sequence numbers and buffers.
+- `GBNet.Connection`: new `resetTransportMetrics` — resets congestion, bandwidth, stats, and reliability metrics for a new network path.
+
 ## 0.2.5.0
 
 ### Bug Fixes

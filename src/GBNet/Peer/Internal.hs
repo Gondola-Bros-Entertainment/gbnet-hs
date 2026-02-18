@@ -256,7 +256,7 @@ queueControlPacket ptype payload pid peer =
    in queueRawPacket (RawPacket pid raw) peer
 
 -- | Clean up per-peer state (fragment assemblers).
--- Migration cooldowns are swept separately in 'updateConnections'.
+-- Migration cooldowns are swept separately in 'GBNet.Peer.updateConnections'.
 cleanupPeer :: PeerId -> NetPeer -> NetPeer
 cleanupPeer peerId peer =
   peer & #npFragmentAssemblers %~ Map.delete peerId
