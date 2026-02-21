@@ -10,4 +10,3 @@ cabal.project.local
 *.swo
 *~
 CLAUDE.md
-gb-synth/
