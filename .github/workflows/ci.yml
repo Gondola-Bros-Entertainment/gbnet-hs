@@ -7,9 +7,14 @@ on:
     branches: [main]
   workflow_call:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build
+    needs: [lint, format]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +97,7 @@ jobs:
 
   cabal-check:
     name: Cabal Check
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
